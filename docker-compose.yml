@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  banditdb:
+    build: .
+    image: banditdb:latest
+    container_name: banditdb_engine
+    ports:
+      - "8080:8080"
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - banditdb_data:/data
+    restart: unless-stopped
+
+volumes:
+  banditdb_data:
+    name: banditdb_production_volume
