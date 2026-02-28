@@ -87,55 +87,13 @@ Error responses are always structured: `{"error": "<message>"}` with an appropri
 
 BanditDB is endlessly versatile. Here are three real-world ways developers are using it today. For more domain-specific walkthroughs, browse the [`examples/`](./examples/) directory.
 
-### Example 1: E-Commerce Upsell Optimization (Personalization)
-**The Goal:** Maximize revenue by offering the right incentive at checkout. Should we offer a 10% discount, free shipping, or nothing at all? Traditional A/B testing wastes traffic. BanditDB learns in real-time.
+### Example 1: AI Agent LLM Routing (Cost Optimisation)
+**The Goal:** AI agents blindly routing every task to GPT-4o spend 60× more than necessary. Simple summarisation, classification, and Q&A tasks are solved equally well by a model that costs $0.25/1M tokens instead of $15.00. BanditDB learns — from every agent in your swarm — exactly which model wins for which type of task.
 
 ```python
 from banditdb import Client
 
-db = Client("http://localhost:8080")
-
-# 1. Initialize the Campaign (Cold Start)
-db.create_campaign("checkout_upsell", ["10_percent_off", "free_shipping", "no_offer"], feature_dim=3)
-
-# 2. A user reaches checkout. Define their context.
-# Context:[is_mobile, cart_value_normalized, is_returning_customer]
-user_context =[1.0, 0.85, 0.0]
-
-# 3. Ask BanditDB what to show them!
-offer_to_show, interaction_id = db.predict("checkout_upsell", user_context)
-print(f"Displaying: {offer_to_show}") # e.g., "free_shipping"
-
-# 4. If the user completes the purchase, reward the database!
-# The DB instantly updates its linear algebra matrices.
-db.reward(interaction_id, reward=120.50) # Reward = Cart Value
-```
-
-### Example 2: Adaptive Clinical Trials (High-Stakes Routing)
-**The Goal:** In clinical trials, keeping patients on poorly performing treatments for months is dangerous. BanditDB can adaptively route patients to the most effective treatments based on their specific biomarkers in real-time.
-
-```python
-# Context:[age_normalized, blood_pressure, biomarker_A_present, biomarker_B_present]
-patient_features =[0.65, 0.8, 1.0, 0.0]
-
-db.create_campaign("trial_alpha",["drug_A", "drug_B", "placebo"], feature_dim=4)
-
-# BanditDB calculates the Upper Confidence Bound (UCB) for this specific patient
-treatment, interaction_id = db.predict("trial_alpha", patient_features)
-
-# 3 weeks later... the patient's condition improves significantly.
-# We send a reward. BanditDB will now confidently route future patients 
-# with similar biomarkers to this successful treatment.
-db.reward(interaction_id, reward=1.0)
-```
-
-### Example 3: AI Agent LLM Routing (Model Context Protocol)
-**The Goal:** Standard AI agents are stateless — if they route a complex task to the wrong model and fail, they make the exact same mistake tomorrow. BanditDB gives the entire agent swarm a shared memory: every agent's success or failure teaches the next one which LLM to use for which type of task.
-
-```python
-from banditdb import Client
-
-db = Client("http://localhost:8080")
+db = Client("http://localhost:8080", api_key="your-secret-key")
 
 # 1. Register the routing campaign once
 db.create_campaign("llm_routing", ["gpt-4o", "claude-haiku", "llama-3"], feature_dim=3)
@@ -154,6 +112,52 @@ db.reward(interaction_id, reward=1.0)  # 0.0 if the model failed the task
 ```
 
 > **Native agent tool use:** the Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that exposes `predict` and `reward` as native tools — no application code required. Add it to your `claude_desktop_config.json` and your agent swarm starts learning autonomously.
+
+### Example 2: E-Commerce Upsell Optimization (Personalization)
+**The Goal:** Maximize revenue by offering the right incentive at checkout. Should we offer a 10% discount, free shipping, or nothing at all? Traditional A/B testing wastes traffic. BanditDB learns in real-time.
+
+```python
+from banditdb import Client
+
+db = Client("http://localhost:8080", api_key="your-secret-key")
+
+# 1. Initialize the Campaign (Cold Start)
+db.create_campaign("checkout_upsell", ["10_percent_off", "free_shipping", "no_offer"], feature_dim=3)
+
+# 2. A user reaches checkout. Define their context.
+# Context: [is_mobile, cart_value_normalized, is_returning_customer]
+user_context = [1.0, 0.85, 0.0]
+
+# 3. Ask BanditDB what to show them!
+offer_to_show, interaction_id = db.predict("checkout_upsell", user_context)
+print(f"Displaying: {offer_to_show}")  # e.g., "free_shipping"
+
+# 4. If the user completes the purchase, reward the database!
+# The DB instantly updates its linear algebra matrices.
+db.reward(interaction_id, reward=1.0)
+```
+
+### Example 3: Adaptive Clinical Trials (High-Stakes Routing)
+**The Goal:** In clinical trials, keeping patients on poorly performing treatments for months is dangerous. BanditDB adaptively routes patients to the most effective treatment based on their specific biomarkers in real-time.
+
+```python
+from banditdb import Client
+
+db = Client("http://localhost:8080", api_key="your-secret-key")
+
+# Context: [age_normalized, blood_pressure, biomarker_A_present, biomarker_B_present]
+patient_features = [0.65, 0.8, 1.0, 0.0]
+
+db.create_campaign("trial_alpha", ["drug_A", "drug_B", "placebo"], feature_dim=4)
+
+# BanditDB calculates the Upper Confidence Bound (UCB) for this specific patient
+treatment, interaction_id = db.predict("trial_alpha", patient_features)
+
+# 3 weeks later... the patient's condition improves significantly.
+# BanditDB will now confidently route future patients
+# with similar biomarkers to this successful treatment.
+db.reward(interaction_id, reward=1.0)
+```
 
 ---
 
