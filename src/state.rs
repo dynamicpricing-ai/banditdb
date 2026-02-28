@@ -45,4 +45,7 @@ pub enum DbEvent {
         interaction_id: String,
         reward: f64,
     },
+    CampaignDeleted {
+        campaign_id: String,
+    },
 }

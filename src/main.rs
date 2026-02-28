@@ -1,15 +1,31 @@
 use axum::{
-    extract::{State, Json},
-    routing::post,
+    extract::{Path, State, Json},
+    http::StatusCode,
+    middleware::{self, Next},
+    extract::Request,
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
     Router,
 };
-use axum::routing::get;
 use banditdb::BanditDB;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-// --- JSON Payloads ---
+// --- Unified error type ---
+// Every handler returns AppError on failure, which serialises to {"error": "..."}
+// instead of a bare string. Keeps all error responses structurally identical.
+struct AppError(StatusCode, String);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        #[derive(Serialize)]
+        struct Body { error: String }
+        (self.0, Json(Body { error: self.1 })).into_response()
+    }
+}
+
+// --- Request / response structs ---
 #[derive(Deserialize)]
 struct CreateCampaignRequest {
     campaign_id: String,
@@ -35,7 +51,16 @@ struct RewardRequest {
     reward: f64,
 }
 
-// --- Route Handlers ---
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+// --- Route handlers ---
+async fn handle_health() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
 async fn handle_create_campaign(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<CreateCampaignRequest>,
@@ -44,14 +69,29 @@ async fn handle_create_campaign(
     Json("Campaign Created")
 }
 
+async fn handle_delete_campaign(
+    State(db): State<Arc<BanditDB>>,
+    Path(campaign_id): Path<String>,
+) -> Result<Json<&'static str>, AppError> {
+    match db.delete_campaign(&campaign_id) {
+        true  => Ok(Json("Campaign Deleted")),
+        false => Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("Campaign '{}' not found", campaign_id),
+        )),
+    }
+}
+
 async fn handle_predict(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<PredictRequest>,
-) -> Result<Json<PredictResponse>, String> {
-    match db.predict(&payload.campaign_id, payload.context) {
-        Some((arm_id, interaction_id)) => Ok(Json(PredictResponse { arm_id, interaction_id })),
-        None => Err("Campaign not found".to_string()),
-    }
+) -> Result<Json<PredictResponse>, AppError> {
+    db.predict(&payload.campaign_id, payload.context)
+        .map(|(arm_id, interaction_id)| Json(PredictResponse { arm_id, interaction_id }))
+        .ok_or_else(|| AppError(
+            StatusCode::NOT_FOUND,
+            format!("Campaign '{}' not found", payload.campaign_id),
+        ))
 }
 
 async fn handle_reward(
@@ -62,33 +102,60 @@ async fn handle_reward(
     Json("OK")
 }
 
-async fn handle_export(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, String> {
-    // In production, we'd timestamp this file (e.g., bandit_logs_2026-02-26.parquet)
+async fn handle_export(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, AppError> {
     let output_file = "bandit_logs_latest.parquet";
-    
-    match db.export_to_parquet("bandit_wal.jsonl", output_file) {
-        Ok(msg) => Ok(Json(msg)),
-        Err(e) => Err(e),
-    }
+    db.export_to_parquet("bandit_wal.jsonl", output_file)
+        .map(Json)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
-// --- Main Server Boot ---
+// --- Main server boot ---
 #[tokio::main]
 async fn main() {
-    // Read the DATA_DIR environment variable (Default to current directory if not set)
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string());
-    
     let wal_path = format!("{}/bandit_wal.jsonl", data_dir);
     println!("📂 Using Data Directory: {}", data_dir);
 
-    // Initialize the Database Engine with the dynamic path
+    // #5 — Configurable reward TTL (read inside BanditDB::new via env var)
     let db = Arc::new(BanditDB::new(&wal_path));
 
+    // #1 — API key authentication
+    // Set BANDITDB_API_KEY to enable. If unset, the server runs open (dev mode).
+    let api_key = std::env::var("BANDITDB_API_KEY").ok();
+    match &api_key {
+        Some(k) => println!("🔒 Authentication enabled (key: {}...)", &k[..k.len().min(4)]),
+        None    => println!("⚠️  BANDITDB_API_KEY not set — running without authentication"),
+    }
+
+    // Protected routes — all require the API key when one is configured
+    let protected = Router::new()
+        .route("/campaign",     post(handle_create_campaign))
+        .route("/campaign/:id", delete(handle_delete_campaign))
+        .route("/predict",      post(handle_predict))
+        .route("/reward",       post(handle_reward))
+        .route("/export",       get(handle_export))
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let key = api_key.clone();
+            async move {
+                if let Some(expected) = key {
+                    let provided = req
+                        .headers()
+                        .get("X-Api-Key")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if provided != expected {
+                        return AppError(StatusCode::UNAUTHORIZED, "Unauthorized".to_string())
+                            .into_response();
+                    }
+                }
+                next.run(req).await
+            }
+        }));
+
+    // #7 — /health is always public — load balancers and probes must reach it
     let app = Router::new()
-        .route("/campaign", post(handle_create_campaign))
-        .route("/predict", post(handle_predict))
-        .route("/reward", post(handle_reward))
-        .route("/export", get(handle_export))
+        .route("/health", get(handle_health))
+        .merge(protected)
         .with_state(db);
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();

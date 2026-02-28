@@ -112,6 +112,23 @@ db.reward(interaction_id, reward=1.0)
 
 ---
 
+## 🔌 API Reference
+
+All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is set, every request except `/health` must include the header `X-Api-Key: <key>`.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
+| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim"}` |
+| `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
+| `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
+| `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
+| `GET` | `/export` | Yes | Compiles the WAL into a Snappy-compressed Parquet file at `bandit_logs_latest.parquet`. |
+
+Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.
+
+---
+
 ## 🧠 Example 3: The AI "Hive Mind" (Model Context Protocol)
 
 Standard AI Agents (like Claude or AutoGPT) are amnesiacs. If they choose a slow, expensive LLM for a simple task and fail, they will make the exact same mistake tomorrow. 
@@ -151,7 +168,7 @@ When you prompt an AI Agent to perform a task, it autonomously interacts with Ba
 
 ## 📊 The Data Science Escape Hatch
 
-We know Data Scientists hate black boxes. While BanditDB learns instantly in memory, it uses **Event Sourcing** to write every interaction to a disk WAL. 
+We know Data Scientists hate black boxes. While BanditDB learns instantly in memory, it uses **Event Sourcing** to write every interaction to a disk WAL.
 
 With a single HTTP call, BanditDB natively compiles this log into heavily compressed **Apache Parquet** files, allowing your ML team to perform Offline Policy Evaluation (OPE) instantly.
 
@@ -168,6 +185,18 @@ df = pl.read_parquet("/data/bandit_logs_latest.parquet")
 # View the exact prediction histories, contexts, and propensity scores
 predictions = df.select(pl.col("Predicted")).unnest("Predicted").drop_nulls()
 print(predictions)
+```
+
+### Inspecting Campaigns via the WAL
+
+The WAL is plain JSONL — every campaign lifecycle event is human-readable on disk.
+
+```bash
+# See all campaigns ever created
+grep "CampaignCreated" /data/bandit_wal.jsonl | jq '.CampaignCreated.campaign_id'
+
+# See which campaigns have been deleted
+grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id'
 ```
 
 ---

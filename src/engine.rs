@@ -35,9 +35,14 @@ impl BanditDB {
             }
         });
 
+        let ttl_secs: u64 = std::env::var("BANDITDB_REWARD_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86400);
+
         let db = Self {
             campaigns: RwLock::new(HashMap::new()),
-            interactions: Cache::builder().time_to_live(Duration::from_secs(86400)).build(),
+            interactions: Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
             event_tx: tx,
         };
 
@@ -91,6 +96,9 @@ impl BanditDB {
                     }
                 }
             }
+            DbEvent::CampaignDeleted { campaign_id } => {
+                self.campaigns.write().remove(&campaign_id);
+            }
         }
     }
 
@@ -138,6 +146,16 @@ impl BanditDB {
         let _ = self.event_tx.send(event);         // Save to Disk
 
         Some((best_arm, interaction_id))
+    }
+
+    pub fn delete_campaign(&self, campaign_id: &str) -> bool {
+        if !self.campaigns.read().contains_key(campaign_id) {
+            return false;
+        }
+        let event = DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() };
+        self.apply_event_to_memory(event.clone());
+        let _ = self.event_tx.send(event);
+        true
     }
 
     pub fn reward(&self, interaction_id: &str, reward: f64) {
