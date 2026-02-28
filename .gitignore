@@ -1,0 +1,7 @@
+# Rust build output
+/target
+
+# BanditDB runtime files — generated at runtime, not part of the source
+*.jsonl
+*.parquet
+examples/convergence_chart.png

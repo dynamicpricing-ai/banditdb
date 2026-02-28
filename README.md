@@ -6,7 +6,7 @@
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
-  [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+  [![License](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
   [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](#)
 
   <br />
@@ -50,6 +50,8 @@ services:
       - banditdb_data:/data
     environment:
       - DATA_DIR=/data
+      - BANDITDB_API_KEY=your-secret-key        # Remove to disable auth (dev mode)
+      - BANDITDB_REWARD_TTL_SECS=86400          # Seconds to remember a context awaiting its reward
 volumes:
   banditdb_data:
 ```
