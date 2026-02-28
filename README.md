@@ -64,6 +64,23 @@ pip install banditdb-python
 
 ---
 
+## 🔌 API Reference
+
+All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is set, every request except `/health` must include the header `X-Api-Key: <key>`.
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
+| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim"}` |
+| `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
+| `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
+| `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
+| `GET` | `/export` | Yes | Compiles the WAL into a Snappy-compressed Parquet file at `bandit_logs_latest.parquet`. |
+
+Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.
+
+---
+
 ## 📖 Quick Start & Core Examples
 
 BanditDB is endlessly versatile. Here are three real-world ways developers are using it today. For more domain-specific walkthroughs, browse the [`examples/`](./examples/) directory.
@@ -110,59 +127,31 @@ treatment, interaction_id = db.predict("trial_alpha", patient_features)
 db.reward(interaction_id, reward=1.0)
 ```
 
----
+### Example 3: AI Agent LLM Routing (Model Context Protocol)
+**The Goal:** Standard AI agents are stateless — if they route a complex task to the wrong model and fail, they make the exact same mistake tomorrow. BanditDB gives the entire agent swarm a shared memory: every agent's success or failure teaches the next one which LLM to use for which type of task.
 
-## 🔌 API Reference
+```python
+from banditdb import Client
 
-All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is set, every request except `/health` must include the header `X-Api-Key: <key>`.
+db = Client("http://localhost:8080")
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
-| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim"}` |
-| `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
-| `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
-| `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
-| `GET` | `/export` | Yes | Compiles the WAL into a Snappy-compressed Parquet file at `bandit_logs_latest.parquet`. |
+# 1. Register the routing campaign once
+db.create_campaign("llm_routing", ["gpt-4o", "claude-haiku", "llama-3"], feature_dim=3)
 
-Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.
+# 2. An agent receives a task. Build its context vector.
+# Context: [prompt_length_normalized, math_complexity, budget_cents_normalized]
+task_context = [0.2, 0.9, 0.1]
 
----
+# 3. Ask BanditDB which model to use
+model, interaction_id = db.predict("llm_routing", task_context)
+print(f"Routing to: {model}")  # e.g., "claude-haiku"
 
-## 🧠 Example 3: The AI "Hive Mind" (Model Context Protocol)
-
-Standard AI Agents (like Claude or AutoGPT) are amnesiacs. If they choose a slow, expensive LLM for a simple task and fail, they will make the exact same mistake tomorrow. 
-
-**BanditDB acts as a shared Intuition Engine for AI Swarms.** Using the built-in MCP server, agents can ask BanditDB which LLM to route a prompt to based on context and price.
-
-### Running the MCP Server
-If you have the Python package installed, you can start the MCP tool natively:
-```bash
-banditdb-mcp
-```
-Add it to your `claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "banditdb": {
-      "command": "banditdb-mcp",
-      "args":[]
-    }
-  }
-}
+# 4. Run the task. Report success or failure as a reward.
+# Every agent in the swarm contributes to — and benefits from — this shared memory.
+db.reward(interaction_id, reward=1.0)  # 0.0 if the model failed the task
 ```
 
-### How the AI Uses It: Dynamic LLM Routing
-When you prompt an AI Agent to perform a task, it autonomously interacts with BanditDB using its internal tools:
-
-1. **The Agent observes the task:** 
-   *Context vector:* `[prompt_length, math_complexity, budget_cents]` -> `[0.2, 0.9, 0.1]`
-2. **The Agent asks BanditDB via MCP:** 
-   *"Which model should I route this to? `gpt-4o`, `claude-3-haiku`, or `llama-3`?"*
-3. **BanditDB Predicts:** 
-   *"Try `claude-3-haiku`."*
-4. **The Agent executes the task.** If Haiku fails at the complex math, the Agent autonomously calls the MCP tool to report a `0.0` reward.
-5. **The Result:** The Swarm learns. The next time *any* agent in your network encounters a high-math-complexity prompt, BanditDB's updated matrices will route them to `gpt-4o` instead.
+> **Native agent tool use:** the Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that exposes `predict` and `reward` as native tools — no application code required. Add it to your `claude_desktop_config.json` and your agent swarm starts learning autonomously.
 
 ---
 
