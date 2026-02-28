@@ -151,4 +151,5 @@ The model also picks up second-order interactions that rule-based systems miss �
 
 ## Related Examples
 
-- `02_` — *(coming soon)*
+- [`03_ecommerce_upsell_optimization.md`](./03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward
+- [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — high-stakes routing with biomarker context vectors
