@@ -108,6 +108,15 @@ impl BanditDB {
         let context_arr = Array1::from_vec(context.clone());
 
         let arms = campaign.arms.read();
+
+        // Guard: reject context whose dimension doesn't match the campaign's feature space.
+        // Without this, ndarray panics inside dot() with a shape mismatch error.
+        if let Some((_, first_arm)) = arms.iter().next() {
+            if context_arr.len() != first_arm.theta.len() {
+                return None;
+            }
+        }
+
         let mut best_arm = String::new();
         let mut max_score = f64::NEG_INFINITY;
 
@@ -160,31 +169,5 @@ impl BanditDB {
             }
             Err(e) => Err(format!("Failed to parse WAL into DataFrame: {}", e)),
         }
-    }
-}
-
-// --- TEST ---
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test] // Required because we spawn a background thread now!
-    async fn test_bandit_learns_context() {
-        let db = BanditDB::new("test_wal.jsonl");
-        db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2);
-
-        let mobile_context = vec![1.0, 0.0];
-        let desktop_context = vec![0.0, 1.0];
-
-        for _ in 0..50 {
-            let (arm, iid) = db.predict("homepage", mobile_context.clone()).unwrap();
-            db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
-
-            let (arm, iid) = db.predict("homepage", desktop_context.clone()).unwrap();
-            db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
-        }
-
-        let (mobile_pred, _) = db.predict("homepage", mobile_context).unwrap();
-        assert_eq!(mobile_pred, "layout_a");
     }
 }

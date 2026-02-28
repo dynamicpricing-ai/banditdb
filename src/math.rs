@@ -8,7 +8,9 @@ impl ArmState {
         let expected_reward = self.theta.dot(context);
         
         // 2. Explore: Variance/Uncertainty bound
-        let variance = context.dot(&self.a_inv.dot(context));
+        // Clamp to 0.0: after many collinear updates, f64 rounding can push variance
+        // slightly negative, causing sqrt(negative) = NaN.
+        let variance = context.dot(&self.a_inv.dot(context)).max(0.0);
         let exploration_bound = alpha * variance.sqrt();
         
         expected_reward + exploration_bound
@@ -16,6 +18,12 @@ impl ArmState {
 
     /// Sherman-Morrison Rank-1 Update (Instant Learning)
     pub fn update(&mut self, context: &Array1<f64>, reward: f64) {
+        // Guard: a non-finite reward (Inf, NaN) causes b = [Inf,...], then theta = A_inv * b.
+        // With off-diagonal terms in A_inv, this produces Inf - Inf = NaN. Reject early.
+        if !reward.is_finite() {
+            return;
+        }
+
         let a_inv_x = self.a_inv.dot(context);
         let x_a_inv_x = context.dot(&a_inv_x);
         
