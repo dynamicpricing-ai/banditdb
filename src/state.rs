@@ -26,7 +26,7 @@ pub struct InteractionRecord {
     pub probability: f64,
 }
 
-// --- NEW: The Write-Ahead Log Events ---
+// --- The Write-Ahead Log Events ---
 // Make sure this has `pub enum DbEvent` so other files can see it!
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum DbEvent {
