@@ -77,6 +77,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is s
 | `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
 | `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
 | `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
+| `POST` | `/checkpoint` | Yes | Flush WAL to disk and snapshot all campaign matrices to `checkpoint.json`. On next startup, recovery loads the snapshot and replays only the WAL tail. |
 | `GET` | `/export` | Yes | Compiles the WAL into a Snappy-compressed Parquet file at `bandit_logs_latest.parquet`. |
 
 Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.

@@ -10,6 +10,7 @@ use axum::{
 use banditdb::BanditDB;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::net::TcpListener;
 
 // --- Unified error type ---
@@ -102,6 +103,13 @@ async fn handle_reward(
     Json("OK")
 }
 
+async fn handle_checkpoint(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, AppError> {
+    db.checkpoint()
+        .await
+        .map(Json)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
 async fn handle_export(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, AppError> {
     let output_file = "bandit_logs_latest.parquet";
     db.export_to_parquet("bandit_wal.jsonl", output_file)
@@ -117,7 +125,7 @@ async fn main() {
     println!("📂 Using Data Directory: {}", data_dir);
 
     // #5 — Configurable reward TTL (read inside BanditDB::new via env var)
-    let db = Arc::new(BanditDB::new(&wal_path));
+    let db = Arc::new(BanditDB::new(&wal_path, &data_dir));
 
     // #1 — API key authentication
     // Set BANDITDB_API_KEY to enable. If unset, the server runs open (dev mode).
@@ -133,6 +141,7 @@ async fn main() {
         .route("/campaign/:id", delete(handle_delete_campaign))
         .route("/predict",      post(handle_predict))
         .route("/reward",       post(handle_reward))
+        .route("/checkpoint",   post(handle_checkpoint))
         .route("/export",       get(handle_export))
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let key = api_key.clone();
@@ -156,7 +165,35 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(handle_health))
         .merge(protected)
-        .with_state(db);
+        .with_state(Arc::clone(&db));
+
+    // Auto-checkpoint: optional background task triggered by rewarded event count.
+    // Clone before with_state() consumes db.
+    let checkpoint_interval: Option<u64> = std::env::var("BANDITDB_CHECKPOINT_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0);
+
+    match checkpoint_interval {
+        Some(n) => {
+            println!("⏱️  Auto-checkpoint enabled every {} rewarded events", n);
+            let db_bg = Arc::clone(&db);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    if db_bg.rewarded_count.load(Ordering::Relaxed) >= n {
+                        db_bg.rewarded_count.store(0, Ordering::Relaxed);
+                        if let Err(e) = db_bg.checkpoint().await {
+                            println!("[checkpoint] Auto-checkpoint failed: {}", e);
+                        }
+                    }
+                }
+            });
+        }
+        None => {
+            println!("💡 Auto-checkpoint disabled (set BANDITDB_CHECKPOINT_INTERVAL to enable)");
+        }
+    }
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
     println!("🚀 BanditDB running on http://0.0.0.0:8080");

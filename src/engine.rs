@@ -1,14 +1,21 @@
-use crate::state::{ArmState, DbEvent, InteractionRecord};
+use crate::state::{ArmState, CampaignCheckpoint, CheckpointData, DbEvent, InteractionRecord};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::time::Duration;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 use polars::prelude::*;
+
+pub enum WalMessage {
+    Event(DbEvent),
+    Checkpoint { reply: oneshot::Sender<u64> },
+}
 
 pub struct Campaign {
     pub alpha: f64,
@@ -16,22 +23,39 @@ pub struct Campaign {
 }
 
 pub struct BanditDB {
-    pub campaigns: RwLock<HashMap<String, Campaign>>,
-    pub interactions: Cache<String, InteractionRecord>,
-    pub event_tx: UnboundedSender<DbEvent>, // The fast channel to the disk writer
+    pub campaigns:      RwLock<HashMap<String, Campaign>>,
+    pub interactions:   Cache<String, InteractionRecord>,
+    pub event_tx:       UnboundedSender<WalMessage>,
+    pub rewarded_count: AtomicU64,
+    pub wal_path:       String,
+    pub data_dir:       String,
 }
 
 impl BanditDB {
-    pub fn new(wal_path: &str) -> Self {
-        let (tx, mut rx) = unbounded_channel::<DbEvent>();
+    pub fn new(wal_path: &str, data_dir: &str) -> Self {
+        let (tx, mut rx) = unbounded_channel::<WalMessage>();
 
         // 1. Spawn the Background Disk Writer Thread
         let path = wal_path.to_string();
         tokio::spawn(async move {
             let mut file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
-            while let Some(event) = rx.recv().await {
-                let json = serde_json::to_string(&event).unwrap();
-                writeln!(file, "{}", json).unwrap(); // Appends to wal.jsonl
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    WalMessage::Event(event) => {
+                        let json = serde_json::to_string(&event).unwrap();
+                        writeln!(file, "{}", json).unwrap();
+                        file.flush().unwrap();
+                    }
+                    WalMessage::Checkpoint { reply } => {
+                        file.flush().unwrap();
+                        file.sync_all().unwrap();
+                        // seek(End(0)) returns the true file size regardless of whether
+                        // any writes have occurred in the current session (stream_position()
+                        // returns 0 on O_APPEND files until the first write).
+                        let offset = file.seek(SeekFrom::End(0)).unwrap();
+                        let _ = reply.send(offset);
+                    }
+                }
             }
         });
 
@@ -41,29 +65,110 @@ impl BanditDB {
             .unwrap_or(86400);
 
         let db = Self {
-            campaigns: RwLock::new(HashMap::new()),
-            interactions: Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
-            event_tx: tx,
+            campaigns:      RwLock::new(HashMap::new()),
+            interactions:   Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
+            event_tx:       tx,
+            rewarded_count: AtomicU64::new(0),
+            wal_path:       wal_path.to_string(),
+            data_dir:       data_dir.to_string(),
         };
 
-        // 2. Crash Recovery: Read the WAL on startup
-        db.recover(wal_path);
+        // 2. Crash Recovery: Load checkpoint then replay WAL tail
+        db.recover(wal_path, data_dir);
         db
     }
 
-    /// Reads the WAL line by line and perfectly reconstructs the RAM state
-    fn recover(&self, wal_path: &str) {
-        if let Ok(file) = File::open(wal_path) {
-            let reader = BufReader::new(file);
-            let mut count = 0;
-            for line in reader.lines().flatten() {
-                if let Ok(event) = serde_json::from_str::<DbEvent>(&line) {
-                    self.apply_event_to_memory(event);
-                    count += 1;
+    fn recover(&self, wal_path: &str, data_dir: &str) {
+        // Phase 1: Load checkpoint if one exists
+        let mut wal_start_offset: u64 = 0;
+        let checkpoint_path = format!("{}/checkpoint.json", data_dir);
+
+        match fs::read_to_string(&checkpoint_path).ok()
+            .and_then(|s| serde_json::from_str::<CheckpointData>(&s).ok())
+        {
+            Some(checkpoint) => {
+                let n = checkpoint.campaigns.len();
+                for (campaign_id, camp) in checkpoint.campaigns {
+                    self.campaigns.write().insert(
+                        campaign_id,
+                        Campaign { alpha: camp.alpha, arms: RwLock::new(camp.arms) },
+                    );
                 }
+                wal_start_offset = checkpoint.wal_offset;
+                println!("[recovery] Loaded checkpoint: {} campaigns, WAL offset {} bytes", n, wal_start_offset);
             }
-            println!("🔄 Recovered {} events from WAL.", count);
+            None => {
+                println!("[recovery] No checkpoint found — replaying WAL from beginning");
+            }
         }
+
+        // Phase 2: Replay WAL events after the checkpoint offset
+        match File::open(wal_path) {
+            Err(_) => {
+                println!("[recovery] No WAL found — starting fresh");
+            }
+            Ok(mut file) => {
+                if wal_start_offset > 0 {
+                    file.seek(SeekFrom::Start(wal_start_offset)).unwrap();
+                }
+                let reader = BufReader::new(file);
+                let mut count = 0;
+                for line in reader.lines().flatten() {
+                    if let Ok(event) = serde_json::from_str::<DbEvent>(&line) {
+                        self.apply_event_to_memory(event);
+                        count += 1;
+                    }
+                }
+                println!("[recovery] Replayed {} WAL events from tail", count);
+            }
+        }
+
+        println!("[recovery] Ready: {} campaigns loaded", self.campaigns.read().len());
+    }
+
+    pub async fn checkpoint(&self) -> Result<String, String> {
+        // 1. Send flush barrier through the WAL channel — writer drains all prior
+        //    events to disk before replying with the confirmed byte offset.
+        let (reply_tx, reply_rx) = oneshot::channel::<u64>();
+        self.event_tx
+            .send(WalMessage::Checkpoint { reply: reply_tx })
+            .map_err(|_| "WAL channel closed".to_string())?;
+
+        let wal_offset = reply_rx.await.map_err(|_| "WAL writer closed".to_string())?;
+
+        // 2. Snapshot all campaign matrices under read lock.
+        //    At this point every event applied to memory is also on disk at or before wal_offset.
+        let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
+            let campaigns = self.campaigns.read();
+            campaigns.iter().map(|(id, campaign)| {
+                let arms_snapshot: HashMap<String, ArmState> = campaign.arms.read()
+                    .iter()
+                    .map(|(arm_id, state)| (arm_id.clone(), state.clone()))
+                    .collect();
+                (id.clone(), CampaignCheckpoint { alpha: campaign.alpha, arms: arms_snapshot })
+            }).collect()
+        };
+
+        // 3. Serialise checkpoint envelope
+        let data = CheckpointData {
+            wal_offset,
+            timestamp_secs: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            campaigns: campaigns_snapshot,
+        };
+        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+
+        // 4. Atomic write: write to .tmp then rename — crash-safe
+        let tmp_path  = format!("{}/checkpoint.tmp",  self.data_dir);
+        let dest_path = format!("{}/checkpoint.json", self.data_dir);
+        fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
+        fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
+
+        let msg = format!(
+            "Checkpoint written: {} campaigns, WAL offset {} bytes",
+            data.campaigns.len(), wal_offset
+        );
+        println!("[checkpoint] {}", msg);
+        Ok(msg)
     }
 
     /// The unified math & memory updater
@@ -107,7 +212,7 @@ impl BanditDB {
     pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize) {
         let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim };
         self.apply_event_to_memory(event.clone()); // Update Math
-        let _ = self.event_tx.send(event);         // Save to Disk
+        let _ = self.event_tx.send(WalMessage::Event(event));         // Save to Disk
     }
 
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Option<(String, String)> {
@@ -143,7 +248,7 @@ impl BanditDB {
         };
 
         self.apply_event_to_memory(event.clone()); // Remember context
-        let _ = self.event_tx.send(event);         // Save to Disk
+        let _ = self.event_tx.send(WalMessage::Event(event));         // Save to Disk
 
         Some((best_arm, interaction_id))
     }
@@ -154,14 +259,15 @@ impl BanditDB {
         }
         let event = DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() };
         self.apply_event_to_memory(event.clone());
-        let _ = self.event_tx.send(event);
+        let _ = self.event_tx.send(WalMessage::Event(event));
         true
     }
 
     pub fn reward(&self, interaction_id: &str, reward: f64) {
         let event = DbEvent::Rewarded { interaction_id: interaction_id.to_string(), reward };
-        self.apply_event_to_memory(event.clone()); // Update Math
-        let _ = self.event_tx.send(event);         // Save to Disk
+        self.apply_event_to_memory(event.clone());
+        let _ = self.event_tx.send(WalMessage::Event(event));
+        self.rewarded_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Converts the current JSONL Write-Ahead Log into a highly compressed Parquet file.

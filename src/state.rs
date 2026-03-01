@@ -1,7 +1,8 @@
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArmState {
     pub a_inv: Array2<f64>,
     pub b: Array1<f64>,
@@ -24,6 +25,21 @@ pub struct InteractionRecord {
     pub arm_id: String,
     pub context: Array1<f64>,
     pub probability: f64,
+}
+
+// --- Checkpoint structs ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CampaignCheckpoint {
+    pub alpha: f64,
+    pub arms: HashMap<String, ArmState>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CheckpointData {
+    pub wal_offset: u64,      // byte position in WAL; recovery replays from here
+    pub timestamp_secs: u64,  // unix epoch, for diagnostics
+    pub campaigns: HashMap<String, CampaignCheckpoint>,
 }
 
 // --- The Write-Ahead Log Events ---
