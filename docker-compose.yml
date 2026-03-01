@@ -9,6 +9,7 @@ services:
       - "8080:8080"
     environment:
       - DATA_DIR=/data
+      - BANDITDB_API_KEY=d18cb8cbab687b0a94ab390798f9d12f920c59df8a39d3e1fef3b2224e0c7f31
     volumes:
       - banditdb_data:/data
     restart: unless-stopped
