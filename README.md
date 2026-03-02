@@ -75,7 +75,9 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is s
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
-| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim"}` |
+| `GET` | `/campaigns` | Yes | List all live campaigns with their `alpha` and arm count. |
+| `GET` | `/campaign/:id` | Yes | Full diagnostic for one campaign: per-arm `theta`, `theta_norm`, `prediction_count`, `reward_count`, and campaign-level totals. Returns 404 if not found. |
+| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha"}`. `alpha` is optional (default `1.0`) — lower values (e.g. `0.1`) exploit learned knowledge more aggressively; higher values (e.g. `3.0`) keep exploring uncertain arms longer. |
 | `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
 | `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
 | `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |

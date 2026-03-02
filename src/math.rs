@@ -40,5 +40,6 @@ impl ArmState {
         
         // Update cached weights
         self.theta = self.a_inv.dot(&self.b);
+        self.reward_count += 1;
     }
 }

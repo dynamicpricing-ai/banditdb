@@ -4,11 +4,12 @@ use axum::{
     middleware::{self, Next},
     extract::Request,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use banditdb::BanditDB;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -33,7 +34,11 @@ struct CreateCampaignRequest {
     campaign_id: String,
     arms: Vec<String>,
     feature_dim: usize,
+    #[serde(default = "default_alpha")]
+    alpha: f64,
 }
+
+fn default_alpha() -> f64 { 1.0 }
 
 #[derive(Deserialize)]
 struct PredictRequest {
@@ -58,6 +63,30 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[derive(Serialize)]
+struct CampaignSummary {
+    campaign_id: String,
+    alpha: f64,
+    arm_count: usize,
+}
+
+#[derive(Serialize)]
+struct ArmInfo {
+    theta: Vec<f64>,
+    theta_norm: f64,
+    prediction_count: u64,
+    reward_count: u64,
+}
+
+#[derive(Serialize)]
+struct CampaignInfo {
+    campaign_id: String,
+    alpha: f64,
+    total_predictions: u64,
+    total_rewards: u64,
+    arms: HashMap<String, ArmInfo>,
+}
+
 // --- Route handlers ---
 async fn handle_health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
@@ -67,7 +96,7 @@ async fn handle_create_campaign(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<CreateCampaignRequest>,
 ) -> Json<&'static str> {
-    db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim);
+    db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha);
     Json("Campaign Created")
 }
 
@@ -102,6 +131,54 @@ async fn handle_reward(
 ) -> Json<&'static str> {
     db.reward(&payload.interaction_id, payload.reward);
     Json("OK")
+}
+
+async fn handle_list_campaigns(State(db): State<Arc<BanditDB>>) -> Json<Vec<CampaignSummary>> {
+    let campaigns = db.campaigns.read();
+    let mut list: Vec<CampaignSummary> = campaigns
+        .iter()
+        .map(|(id, campaign)| CampaignSummary {
+            campaign_id: id.clone(),
+            alpha: campaign.alpha,
+            arm_count: campaign.arms.read().len(),
+        })
+        .collect();
+    list.sort_by(|a, b| a.campaign_id.cmp(&b.campaign_id));
+    Json(list)
+}
+
+async fn handle_campaign_info(
+    State(db): State<Arc<BanditDB>>,
+    Path(campaign_id): Path<String>,
+) -> Result<Json<CampaignInfo>, AppError> {
+    let campaigns = db.campaigns.read();
+    let campaign = campaigns.get(&campaign_id).ok_or_else(|| {
+        AppError(StatusCode::NOT_FOUND, format!("Campaign '{}' not found", campaign_id))
+    })?;
+
+    let arms_guard = campaign.arms.read();
+    let mut total_predictions = 0u64;
+    let mut total_rewards = 0u64;
+    let mut arms = HashMap::new();
+
+    for (arm_id, state) in arms_guard.iter() {
+        total_predictions += state.prediction_count;
+        total_rewards += state.reward_count;
+        arms.insert(arm_id.clone(), ArmInfo {
+            theta: state.theta.to_vec(),
+            theta_norm: state.theta.dot(&state.theta).sqrt(),
+            prediction_count: state.prediction_count,
+            reward_count: state.reward_count,
+        });
+    }
+
+    Ok(Json(CampaignInfo {
+        campaign_id,
+        alpha: campaign.alpha,
+        total_predictions,
+        total_rewards,
+        arms,
+    }))
 }
 
 async fn handle_checkpoint(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, AppError> {
@@ -143,8 +220,9 @@ async fn main() {
 
     // Protected routes — all require the API key when one is configured
     let protected = Router::new()
+        .route("/campaigns",    get(handle_list_campaigns))
         .route("/campaign",     post(handle_create_campaign))
-        .route("/campaign/:id", delete(handle_delete_campaign))
+        .route("/campaign/:id", get(handle_campaign_info).delete(handle_delete_campaign))
         .route("/predict",      post(handle_predict))
         .route("/reward",       post(handle_reward))
         .route("/checkpoint",   post(handle_checkpoint))

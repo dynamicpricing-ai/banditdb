@@ -2,11 +2,17 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_alpha() -> f64 { 1.0 }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArmState {
     pub a_inv: Array2<f64>,
     pub b: Array1<f64>,
     pub theta: Array1<f64>,
+    #[serde(default)]
+    pub prediction_count: u64,
+    #[serde(default)]
+    pub reward_count: u64,
 }
 
 impl ArmState {
@@ -15,6 +21,8 @@ impl ArmState {
             a_inv: Array2::eye(dim),
             b: Array1::zeros(dim),
             theta: Array1::zeros(dim),
+            prediction_count: 0,
+            reward_count: 0,
         }
     }
 }
@@ -63,6 +71,8 @@ pub enum DbEvent {
         campaign_id: String,
         arms: Vec<String>,
         feature_dim: usize,
+        #[serde(default = "default_alpha")]
+        alpha: f64,
     },
     Predicted {
         interaction_id: String,

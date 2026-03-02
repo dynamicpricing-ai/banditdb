@@ -41,11 +41,36 @@ impl BanditDB {
         let writer_data_dir = data_dir.to_string();
         tokio::spawn(async move {
             let mut file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
-            while let Some(msg) = rx.recv().await {
+            // One-slot buffer for non-Event messages drained during batch collection.
+            // try_recv() removes the message it reads, so a Checkpoint or Rotate pulled
+            // out while batching must be held here and processed on the next iteration.
+            let mut peeked: Option<WalMessage> = None;
+            loop {
+                let msg = match peeked.take() {
+                    Some(m) => m,
+                    None => match rx.recv().await {
+                        Some(m) => m,
+                        None => break,
+                    },
+                };
                 match msg {
                     WalMessage::Event(event) => {
-                        let json = serde_json::to_string(&event).unwrap();
-                        writeln!(file, "{}", json).unwrap();
+                        // Drain every Event already queued in the channel into a batch.
+                        // Any non-Event message (Checkpoint, Rotate) stops the drain and
+                        // is saved in `peeked` for the next outer loop iteration.
+                        let mut batch = vec![event];
+                        loop {
+                            match rx.try_recv() {
+                                Ok(WalMessage::Event(e)) => batch.push(e),
+                                Ok(other) => { peeked = Some(other); break; }
+                                Err(_) => break,
+                            }
+                        }
+                        for e in &batch {
+                            let json = serde_json::to_string(e).unwrap();
+                            writeln!(file, "{}", json).unwrap();
+                        }
+                        // One flush per burst instead of one per event.
                         file.flush().unwrap();
                     }
                     WalMessage::Checkpoint { reply } => {
@@ -294,17 +319,22 @@ impl BanditDB {
     /// The unified math & memory updater
     fn apply_event_to_memory(&self, event: DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim } => {
+            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha } => {
                 let mut arms_map = HashMap::new();
                 for arm in arms {
                     arms_map.insert(arm, ArmState::new(feature_dim));
                 }
                 self.campaigns.write().insert(
                     campaign_id,
-                    Campaign { alpha: 1.0, arms: RwLock::new(arms_map) },
+                    Campaign { alpha, arms: RwLock::new(arms_map) },
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs } => {
+                if let Some(campaign) = self.campaigns.read().get(&campaign_id) {
+                    if let Some(arm) = campaign.arms.write().get_mut(&arm_id) {
+                        arm.prediction_count += 1;
+                    }
+                }
                 self.interactions.insert(
                     interaction_id,
                     InteractionRecord {
@@ -330,37 +360,42 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize) {
-        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim };
-        self.apply_event_to_memory(event.clone()); // Update Math
-        let _ = self.event_tx.send(WalMessage::Event(event));         // Save to Disk
+    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64) {
+        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha };
+        self.apply_event_to_memory(event.clone());
+        let _ = self.event_tx.send(WalMessage::Event(event));
     }
 
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Option<(String, String)> {
-        let campaigns = self.campaigns.read();
-        let campaign = campaigns.get(campaign_id)?;
-        let context_arr = Array1::from_vec(context.clone());
+        // Score all arms under read locks, then drop every guard before calling
+        // apply_event_to_memory. apply_event_to_memory acquires arms.write() to
+        // increment prediction_count — a same-thread read→write on the same RwLock
+        // is always a deadlock with parking_lot, so no guard may be live at that point.
+        let best_arm = {
+            let campaigns = self.campaigns.read();
+            let campaign = campaigns.get(campaign_id)?;
+            let context_arr = Array1::from_vec(context.clone());
+            let arms = campaign.arms.read();
 
-        let arms = campaign.arms.read();
-
-        // Guard: reject context whose dimension doesn't match the campaign's feature space.
-        // Without this, ndarray panics inside dot() with a shape mismatch error.
-        if let Some((_, first_arm)) = arms.iter().next() {
-            if context_arr.len() != first_arm.theta.len() {
-                return None;
+            // Guard: reject context whose dimension doesn't match the campaign's feature space.
+            if let Some((_, first_arm)) = arms.iter().next() {
+                if context_arr.len() != first_arm.theta.len() {
+                    return None;
+                }
             }
-        }
 
-        let mut best_arm = String::new();
-        let mut max_score = f64::NEG_INFINITY;
-
-        for (arm_id, state) in arms.iter() {
-            let score = state.score(&context_arr, campaign.alpha);
-            if score > max_score {
-                max_score = score;
-                best_arm = arm_id.clone();
+            let mut best_arm = String::new();
+            let mut max_score = f64::NEG_INFINITY;
+            for (arm_id, state) in arms.iter() {
+                let score = state.score(&context_arr, campaign.alpha);
+                if score > max_score {
+                    max_score = score;
+                    best_arm = arm_id.clone();
+                }
             }
-        }
+            best_arm
+            // campaigns and arms guards dropped here
+        };
 
         let interaction_id = Uuid::new_v4().to_string();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -369,8 +404,8 @@ impl BanditDB {
             arm_id: best_arm.clone(), context, timestamp_secs: now,
         };
 
-        self.apply_event_to_memory(event.clone()); // Remember context
-        let _ = self.event_tx.send(WalMessage::Event(event));         // Save to Disk
+        self.apply_event_to_memory(event.clone());
+        let _ = self.event_tx.send(WalMessage::Event(event));
 
         Some((best_arm, interaction_id))
     }

@@ -35,6 +35,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         "routing",
         vec!["fast".to_string(), "cheap".to_string()],
         2,
+        1.0,
     );
 
     // Deterministic reward signal so the test is reproducible
@@ -170,7 +171,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // larger than the new WAL file (which only holds this one small event),
     // so recovery must detect that and seek to 0 instead.
     // ===================================================================
-    db.add_campaign("post_ckpt", vec!["x".to_string()], 1);
+    db.add_campaign("post_ckpt", vec!["x".to_string()], 1, 1.0);
 
     // Flush the post-checkpoint event to disk before we drop the handle
     let (ftx2, frx2) = tokio::sync::oneshot::channel::<u64>();
