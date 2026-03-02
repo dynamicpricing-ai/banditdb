@@ -360,10 +360,14 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64) {
+    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64) -> bool {
+        if self.campaigns.read().contains_key(campaign_id) {
+            return false;
+        }
         let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha };
         self.apply_event_to_memory(event.clone());
         let _ = self.event_tx.send(WalMessage::Event(event));
+        true
     }
 
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Option<(String, String)> {

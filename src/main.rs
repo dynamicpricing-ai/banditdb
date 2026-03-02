@@ -95,9 +95,14 @@ async fn handle_health() -> Json<HealthResponse> {
 async fn handle_create_campaign(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<CreateCampaignRequest>,
-) -> Json<&'static str> {
-    db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha);
-    Json("Campaign Created")
+) -> Result<Json<&'static str>, AppError> {
+    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha) {
+        true  => Ok(Json("Campaign Created")),
+        false => Err(AppError(
+            StatusCode::CONFLICT,
+            format!("Campaign '{}' already exists", payload.campaign_id),
+        )),
+    }
 }
 
 async fn handle_delete_campaign(
