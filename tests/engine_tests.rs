@@ -11,7 +11,7 @@ async fn test_1_2_asymptotic_convergence() {
     let wal = "/tmp/banditdb_test_convergence.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal);
+    let db = BanditDB::new(wal, "/tmp");
     db.add_campaign("convergence", vec!["arm".to_string()], 2);
 
     let true_theta = [3.0_f64, -2.0_f64];
@@ -57,7 +57,7 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let wal = "/tmp/banditdb_test_dim_fuzz.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal);
+    let db = BanditDB::new(wal, "/tmp");
     db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2);
 
     // Baseline: correct dim must succeed.
@@ -91,7 +91,7 @@ async fn test_bandit_learns_context() {
     let wal = "/tmp/banditdb_test_learns_context.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal);
+    let db = BanditDB::new(wal, "/tmp");
     db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2);
 
     let mobile_context = vec![1.0, 0.0];

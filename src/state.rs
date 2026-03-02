@@ -21,10 +21,22 @@ impl ArmState {
 
 #[derive(Clone, Debug)]
 pub struct InteractionRecord {
-    pub campaign_id: String,
-    pub arm_id: String,
-    pub context: Array1<f64>,
-    pub probability: f64,
+    pub campaign_id:   String,
+    pub arm_id:        String,
+    pub context:       Array1<f64>,
+    pub probability:   f64,
+    pub timestamp_secs: u64,
+}
+
+/// One completed prediction→reward pair, ready to write as a flat Parquet row.
+#[derive(Debug)]
+pub struct CompletedInteraction {
+    pub interaction_id: String,
+    pub arm_id:         String,
+    pub context:        Vec<f64>,
+    pub reward:         f64,
+    pub predicted_at:   u64,
+    pub rewarded_at:    u64,
 }
 
 // --- Checkpoint structs ---
@@ -42,6 +54,7 @@ pub struct CheckpointData {
     pub campaigns: HashMap<String, CampaignCheckpoint>,
 }
 
+
 // --- The Write-Ahead Log Events ---
 // Make sure this has `pub enum DbEvent` so other files can see it!
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -53,13 +66,17 @@ pub enum DbEvent {
     },
     Predicted {
         interaction_id: String,
-        campaign_id: String,
-        arm_id: String,
-        context: Vec<f64>,
+        campaign_id:    String,
+        arm_id:         String,
+        context:        Vec<f64>,
+        #[serde(default)]
+        timestamp_secs: u64,
     },
     Rewarded {
         interaction_id: String,
-        reward: f64,
+        reward:         f64,
+        #[serde(default)]
+        timestamp_secs: u64,
     },
     CampaignDeleted {
         campaign_id: String,

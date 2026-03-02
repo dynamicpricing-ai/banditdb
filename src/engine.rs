@@ -1,10 +1,10 @@
-use crate::state::{ArmState, CampaignCheckpoint, CheckpointData, DbEvent, InteractionRecord};
+use crate::state::{ArmState, CampaignCheckpoint, CheckpointData, CompletedInteraction, DbEvent, InteractionRecord};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -15,6 +15,7 @@ use polars::prelude::*;
 pub enum WalMessage {
     Event(DbEvent),
     Checkpoint { reply: oneshot::Sender<u64> },
+    Rotate { checkpoint_offset: u64, reply: oneshot::Sender<()> },
 }
 
 pub struct Campaign {
@@ -37,6 +38,7 @@ impl BanditDB {
 
         // 1. Spawn the Background Disk Writer Thread
         let path = wal_path.to_string();
+        let writer_data_dir = data_dir.to_string();
         tokio::spawn(async move {
             let mut file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
             while let Some(msg) = rx.recv().await {
@@ -54,6 +56,35 @@ impl BanditDB {
                         // returns 0 on O_APPEND files until the first write).
                         let offset = file.seek(SeekFrom::End(0)).unwrap();
                         let _ = reply.send(offset);
+                    }
+                    WalMessage::Rotate { checkpoint_offset, reply } => {
+                        // Flush and sync everything currently in the old file
+                        file.flush().unwrap();
+                        file.sync_all().unwrap();
+
+                        // Read the tail: events written after the checkpoint offset (including
+                        // any post-Checkpoint-barrier events that arrived before this Rotate)
+                        let mut old = File::open(&path).unwrap();
+                        old.seek(SeekFrom::Start(checkpoint_offset)).unwrap();
+                        let mut tail = Vec::new();
+                        old.read_to_end(&mut tail).unwrap();
+                        drop(old);
+
+                        // Atomic replace: write tail to tmp then rename over the WAL
+                        let tmp = format!("{}/wal_rotation.tmp", writer_data_dir);
+                        fs::write(&tmp, &tail).unwrap();
+                        fs::rename(&tmp, &path).unwrap();
+
+                        // Reopen — old fd is now detached from the directory; new fd points
+                        // to the rotated file. Future Event writes go to the correct file.
+                        file = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+
+                        println!(
+                            "[rotation] WAL rotated: freed {} bytes, tail {} bytes",
+                            checkpoint_offset,
+                            tail.len()
+                        );
+                        let _ = reply.send(());
                     }
                 }
             }
@@ -87,15 +118,23 @@ impl BanditDB {
             .and_then(|s| serde_json::from_str::<CheckpointData>(&s).ok())
         {
             Some(checkpoint) => {
-                let n = checkpoint.campaigns.len();
+                wal_start_offset = checkpoint.wal_offset;
+
+                println!("[recovery] Checkpoint snapshot: {} campaigns, WAL offset {} bytes, taken at epoch {}",
+                    checkpoint.campaigns.len(), checkpoint.wal_offset, checkpoint.timestamp_secs);
+                for (campaign_id, camp) in &checkpoint.campaigns {
+                    let mut arms: Vec<&String> = camp.arms.keys().collect();
+                    arms.sort();
+                    let feature_dim = camp.arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+                    println!("[recovery]   campaign={} arms={:?} feature_dim={}", campaign_id, arms, feature_dim);
+                }
+
                 for (campaign_id, camp) in checkpoint.campaigns {
                     self.campaigns.write().insert(
                         campaign_id,
                         Campaign { alpha: camp.alpha, arms: RwLock::new(camp.arms) },
                     );
                 }
-                wal_start_offset = checkpoint.wal_offset;
-                println!("[recovery] Loaded checkpoint: {} campaigns, WAL offset {} bytes", n, wal_start_offset);
             }
             None => {
                 println!("[recovery] No checkpoint found — replaying WAL from beginning");
@@ -109,7 +148,11 @@ impl BanditDB {
             }
             Ok(mut file) => {
                 if wal_start_offset > 0 {
-                    file.seek(SeekFrom::Start(wal_start_offset)).unwrap();
+                    // After WAL rotation the file contains only the tail and starts at byte 0.
+                    // If the stored offset exceeds the file size the WAL was rotated; replay from 0.
+                    let file_len = file.seek(SeekFrom::End(0)).unwrap();
+                    let seek_to = if wal_start_offset <= file_len { wal_start_offset } else { 0 };
+                    file.seek(SeekFrom::Start(seek_to)).unwrap();
                 }
                 let reader = BufReader::new(file);
                 let mut count = 0;
@@ -163,9 +206,86 @@ impl BanditDB {
         fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
         fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
 
+        // 5. Write completed prediction→reward pairs from this WAL segment to Parquet.
+        //    Read WAL 0..wal_offset, join Predicted+Rewarded on interaction_id, append to
+        //    per-campaign Parquet files. Only matched pairs are written.
+        let export_dir = format!("{}/exports", self.data_dir);
+        fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+
+        let mut predicted: HashMap<String, (String, String, Vec<f64>, u64)> = HashMap::new();
+        let mut rewarded:  HashMap<String, (f64, u64)>                      = HashMap::new();
+
+        if let Ok(wal_file) = File::open(&self.wal_path) {
+            let limited = wal_file.take(wal_offset);
+            for line in BufReader::new(limited).lines().flatten() {
+                match serde_json::from_str::<DbEvent>(&line) {
+                    Ok(DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs }) => {
+                        predicted.insert(interaction_id, (campaign_id, arm_id, context, timestamp_secs));
+                    }
+                    Ok(DbEvent::Rewarded { interaction_id, reward, timestamp_secs }) => {
+                        rewarded.insert(interaction_id, (reward, timestamp_secs));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Match pairs and group by campaign
+        let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
+        let mut matched: HashSet<String> = HashSet::new();
+
+        for (iid, (reward, rewarded_at)) in &rewarded {
+            if let Some((campaign_id, arm_id, context, predicted_at)) = predicted.get(iid) {
+                matched.insert(iid.clone());
+                by_campaign.entry(campaign_id.clone()).or_default().push(CompletedInteraction {
+                    interaction_id: iid.clone(),
+                    arm_id:         arm_id.clone(),
+                    context:        context.clone(),
+                    reward:         *reward,
+                    predicted_at:   *predicted_at,
+                    rewarded_at:    *rewarded_at,
+                });
+            }
+        }
+
+        let mut parquet_rows = 0usize;
+        for (campaign_id, interactions) in &by_campaign {
+            let feature_dim = interactions[0].context.len();
+            if let Err(e) = write_campaign_parquet(&export_dir, campaign_id, interactions, feature_dim) {
+                println!("[checkpoint] Parquet write failed for {}: {}", campaign_id, e);
+            } else {
+                parquet_rows += interactions.len();
+            }
+        }
+
+        // 6. Re-emit in-flight (unmatched) Predicted events into the WAL tail so that
+        //    their reward — however delayed — lands in the same future WAL segment and
+        //    can be matched at the next checkpoint.
+        let mut reemit_count = 0usize;
+        for (iid, record) in self.interactions.iter() {
+            if !matched.contains(iid.as_ref()) {
+                let event = DbEvent::Predicted {
+                    interaction_id: iid.as_ref().clone(),
+                    campaign_id:    record.campaign_id.clone(),
+                    arm_id:         record.arm_id.clone(),
+                    context:        record.context.to_vec(),
+                    timestamp_secs: record.timestamp_secs,
+                };
+                let _ = self.event_tx.send(WalMessage::Event(event));
+                reemit_count += 1;
+            }
+        }
+
+        // 7. Rotate WAL — discard the prefix already embedded in the checkpoint
+        let (rot_tx, rot_rx) = oneshot::channel::<()>();
+        self.event_tx
+            .send(WalMessage::Rotate { checkpoint_offset: wal_offset, reply: rot_tx })
+            .map_err(|_| "WAL channel closed during rotation".to_string())?;
+        rot_rx.await.map_err(|_| "WAL writer closed during rotation".to_string())?;
+
         let msg = format!(
-            "Checkpoint written: {} campaigns, WAL offset {} bytes",
-            data.campaigns.len(), wal_offset
+            "Checkpoint written and WAL rotated: {} campaigns, offset {} bytes, {} interactions exported, {} in-flight re-emitted",
+            data.campaigns.len(), wal_offset, parquet_rows, reemit_count
         );
         println!("[checkpoint] {}", msg);
         Ok(msg)
@@ -184,15 +304,16 @@ impl BanditDB {
                     Campaign { alpha: 1.0, arms: RwLock::new(arms_map) },
                 );
             }
-            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context } => {
+            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs } => {
                 self.interactions.insert(
                     interaction_id,
                     InteractionRecord {
-                        campaign_id, arm_id, context: Array1::from_vec(context), probability: 0.0,
+                        campaign_id, arm_id, context: Array1::from_vec(context),
+                        probability: 0.0, timestamp_secs,
                     },
                 );
             }
-            DbEvent::Rewarded { interaction_id, reward } => {
+            DbEvent::Rewarded { interaction_id, reward, .. } => {
                 if let Some(record) = self.interactions.get(&interaction_id) {
                     if let Some(campaign) = self.campaigns.read().get(&record.campaign_id) {
                         if let Some(arm_state) = campaign.arms.write().get_mut(&record.arm_id) {
@@ -242,9 +363,10 @@ impl BanditDB {
         }
 
         let interaction_id = Uuid::new_v4().to_string();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let event = DbEvent::Predicted {
             interaction_id: interaction_id.clone(), campaign_id: campaign_id.to_string(),
-            arm_id: best_arm.clone(), context,
+            arm_id: best_arm.clone(), context, timestamp_secs: now,
         };
 
         self.apply_event_to_memory(event.clone()); // Remember context
@@ -264,34 +386,85 @@ impl BanditDB {
     }
 
     pub fn reward(&self, interaction_id: &str, reward: f64) {
-        let event = DbEvent::Rewarded { interaction_id: interaction_id.to_string(), reward };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let event = DbEvent::Rewarded { interaction_id: interaction_id.to_string(), reward, timestamp_secs: now };
         self.apply_event_to_memory(event.clone());
         let _ = self.event_tx.send(WalMessage::Event(event));
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Converts the current JSONL Write-Ahead Log into a highly compressed Parquet file.
-    pub fn export_to_parquet(&self, wal_path: &str, output_path: &str) -> Result<String, String> {
-        // 1. Read the JSON lines file using Polars' insanely fast multi-threaded reader
-        let df_result = JsonLineReader::from_path(wal_path)
-            .map_err(|e| format!("Failed to read WAL: {}", e))?
-            .finish();
-
-        match df_result {
-            Ok(mut df) => {
-                // 2. Create the Parquet file
-                let mut file = std::fs::File::create(output_path)
-                    .map_err(|e| format!("Failed to create Parquet file: {}", e))?;
-
-                // 3. Compress and write the DataFrame to Parquet
-                ParquetWriter::new(&mut file)
-                    .with_compression(ParquetCompression::Snappy)
-                    .finish(&mut df)
-                    .map_err(|e| format!("Failed to write Parquet: {}", e))?;
-
-                Ok(format!("Successfully exported {} rows to {}", df.height(), output_path))
-            }
-            Err(e) => Err(format!("Failed to parse WAL into DataFrame: {}", e)),
-        }
+    /// Returns the directory where per-campaign Parquet files are written.
+    pub fn export_dir(&self) -> String {
+        format!("{}/exports", self.data_dir)
     }
+}
+
+/// Append completed interactions to a per-campaign Parquet file.
+///
+/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 … feature_N
+///
+/// Uses Option A (read-existing + concat + full rewrite) for simplicity.
+/// The file is written atomically via a .tmp rename.
+pub fn write_campaign_parquet(
+    export_dir: &str,
+    campaign_id: &str,
+    interactions: &[CompletedInteraction],
+    feature_dim: usize,
+) -> Result<(), String> {
+    if interactions.is_empty() {
+        return Ok(());
+    }
+
+    // Build new-rows DataFrame
+    let new_df = interactions_to_df(interactions, feature_dim)?;
+
+    // If an existing file is present, read it and concatenate
+    let path = format!("{}/{}.parquet", export_dir, campaign_id);
+    let mut combined = if std::path::Path::new(&path).exists() {
+        let existing = LazyFrame::scan_parquet(&path, ScanArgsParquet::default())
+            .map_err(|e| e.to_string())?
+            .collect()
+            .map_err(|e| e.to_string())?;
+        concat([existing.lazy(), new_df.lazy()], UnionArgs::default())
+            .map_err(|e| e.to_string())?
+            .collect()
+            .map_err(|e| e.to_string())?
+    } else {
+        new_df
+    };
+
+    // Atomic write via tmp rename
+    let tmp = format!("{}/{}.parquet.tmp", export_dir, campaign_id);
+    let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
+    ParquetWriter::new(&mut file)
+        .with_compression(ParquetCompression::Snappy)
+        .finish(&mut combined)
+        .map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize) -> Result<DataFrame, String> {
+    let interaction_ids: Vec<&str> = interactions.iter().map(|r| r.interaction_id.as_str()).collect();
+    let arm_ids:         Vec<&str> = interactions.iter().map(|r| r.arm_id.as_str()).collect();
+    let rewards:         Vec<f64>  = interactions.iter().map(|r| r.reward).collect();
+    let predicted_ats:   Vec<i64>  = interactions.iter().map(|r| r.predicted_at as i64).collect();
+    let rewarded_ats:    Vec<i64>  = interactions.iter().map(|r| r.rewarded_at  as i64).collect();
+
+    let mut series: Vec<Series> = vec![
+        Series::new("interaction_id".into(), interaction_ids),
+        Series::new("arm_id".into(),         arm_ids),
+        Series::new("reward".into(),         rewards),
+        Series::new("predicted_at".into(),   predicted_ats),
+        Series::new("rewarded_at".into(),    rewarded_ats),
+    ];
+
+    for f in 0..feature_dim {
+        let col: Vec<f64> = interactions.iter().map(|r| r.context[f]).collect();
+        let name = format!("feature_{}", f);
+        series.push(Series::new(name.as_str().into(), col));
+    }
+
+    DataFrame::new(series).map_err(|e| e.to_string())
 }

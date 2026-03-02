@@ -36,6 +36,7 @@ async fn test_3_1_torn_write_recovery() {
                 campaign_id: "torn_test".to_string(),
                 arm_id: "arm_a".to_string(),
                 context: vec![1.0, 0.0],
+                timestamp_secs: 0,
             };
             writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
         }
@@ -54,7 +55,7 @@ async fn test_3_1_torn_write_recovery() {
     }
 
     // Recover: must skip the corrupt fragment and restore all 100 valid events.
-    let db = BanditDB::new(wal);
+    let db = BanditDB::new(wal, "/tmp");
 
     let campaigns = db.campaigns.read();
     assert!(
@@ -83,7 +84,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     let wal = "/tmp/banditdb_test_3_2.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal);
+    let db = BanditDB::new(wal, "/tmp");
     db.add_campaign("orphan_test", vec!["arm".to_string()], 2);
 
     let theta_before = {
@@ -141,7 +142,7 @@ async fn test_3_3_idempotent_recovery() {
 
     // Phase 1: train a model and capture its final theta.
     let theta_original = {
-        let db = BanditDB::new(wal);
+        let db = BanditDB::new(wal, "/tmp");
         db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2);
 
         for i in 0..N {
@@ -181,7 +182,7 @@ async fn test_3_3_idempotent_recovery() {
     // db is dropped here; the WAL file persists on disk.
 
     // Phase 2: reconstruct from WAL and verify theta is identical.
-    let db_recovered = BanditDB::new(wal);
+    let db_recovered = BanditDB::new(wal, "/tmp");
 
     let theta_recovered = {
         let campaigns = db_recovered.campaigns.read();
@@ -201,27 +202,30 @@ async fn test_3_3_idempotent_recovery() {
     let _ = std::fs::remove_file(wal);
 }
 
-/// Test 3.4 — Concurrent Export Safety
+/// Test 3.4 — Concurrent Checkpoint Safety
 ///
-/// export_to_parquet() reads the WAL file while the async background writer
-/// is actively appending to it. The export must not panic. A clean Err is also
-/// acceptable — the last WAL line may be a partial write that Polars rejects.
-/// The key assertion is: reaching the end of this test without a panic.
+/// checkpoint() reads the WAL, writes Parquet, and rotates the WAL while the
+/// async background writer is actively appending to it. The operation must not
+/// panic or deadlock. A clean Err is also acceptable. The key assertion is:
+/// reaching the end of this test without a panic.
 #[tokio::test]
 async fn test_3_4_concurrent_export_safety() {
-    let wal = "/tmp/banditdb_test_3_4.jsonl";
-    let parquet = "/tmp/banditdb_test_3_4.parquet";
+    let wal     = "/tmp/banditdb_test_3_4.jsonl";
+    let data_dir = "/tmp/banditdb_test_3_4_data";
+    std::fs::create_dir_all(data_dir).unwrap();
     let _ = std::fs::remove_file(wal);
-    let _ = std::fs::remove_file(parquet);
+    // Clean up any leftover exports / checkpoint from a previous run
+    let _ = std::fs::remove_dir_all(format!("{}/exports", data_dir));
+    let _ = std::fs::remove_file(format!("{}/checkpoint.json", data_dir));
 
-    let db = Arc::new(BanditDB::new(wal));
+    let db = Arc::new(BanditDB::new(wal, data_dir));
     db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
 
-    // 10 concurrent predict→reward threads — constantly appending Predicted +
-    // Rewarded events to the WAL while export runs.
+    // 10 concurrent predict→reward tasks — constantly appending Predicted +
+    // Rewarded events to the WAL while checkpoint() runs.
     for i in 0..10_usize {
         let db = Arc::clone(&db);
         let stop = Arc::clone(&stop);
@@ -236,11 +240,12 @@ async fn test_3_4_concurrent_export_safety() {
         }));
     }
 
-    // Give threads time to build up non-trivial WAL content before exporting.
+    // Give tasks time to build up non-trivial WAL content before checkpointing.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Fire the export while threads are still actively writing to the same file.
-    let export_result = db.export_to_parquet(wal, parquet);
+    // Fire checkpoint (includes Parquet export + WAL rotation) while tasks are
+    // still actively writing to the same file.
+    let checkpoint_result = db.checkpoint().await;
 
     stop.store(true, Ordering::Relaxed);
     for h in handles {
@@ -248,23 +253,20 @@ async fn test_3_4_concurrent_export_safety() {
     }
 
     // Reaching here proves no panic occurred — that is the primary assertion.
-    match export_result {
-        Ok(_) => {
+    match checkpoint_result {
+        Ok(msg) => {
+            println!("Checkpoint succeeded: {}", msg);
+            // checkpoint.json must exist
             assert!(
-                std::path::Path::new(parquet).exists(),
-                "Export succeeded but Parquet file was not created"
-            );
-            assert!(
-                std::fs::metadata(parquet).unwrap().len() > 0,
-                "Parquet file is empty after a successful export"
+                std::path::Path::new(&format!("{}/checkpoint.json", data_dir)).exists(),
+                "Checkpoint succeeded but checkpoint.json was not created"
             );
         }
         Err(e) => {
-            // A clean error is acceptable — the partial last WAL line may be unparseable.
-            println!("Export returned a clean error (acceptable under concurrent writes): {}", e);
+            println!("Checkpoint returned a clean error (acceptable under concurrent writes): {}", e);
         }
     }
 
     let _ = std::fs::remove_file(wal);
-    let _ = std::fs::remove_file(parquet);
+    let _ = std::fs::remove_dir_all(data_dir);
 }

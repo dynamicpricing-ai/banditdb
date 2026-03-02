@@ -9,6 +9,7 @@ use axum::{
 };
 use banditdb::BanditDB;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::net::TcpListener;
@@ -111,10 +112,15 @@ async fn handle_checkpoint(State(db): State<Arc<BanditDB>>) -> Result<Json<Strin
 }
 
 async fn handle_export(State(db): State<Arc<BanditDB>>) -> Result<Json<String>, AppError> {
-    let output_file = "bandit_logs_latest.parquet";
-    db.export_to_parquet("bandit_wal.jsonl", output_file)
-        .map(Json)
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
+    let export_dir = db.export_dir();
+    let entries = fs::read_dir(&export_dir)
+        .map_err(|e| AppError(StatusCode::NOT_FOUND, format!("No exports yet: {}", e)))?;
+    let files: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".parquet"))
+        .collect();
+    Ok(Json(format!("Parquet files in {}: {:?}", export_dir, files)))
 }
 
 // --- Main server boot ---
@@ -175,24 +181,44 @@ async fn main() {
         .filter(|&n| n > 0);
 
     match checkpoint_interval {
-        Some(n) => {
-            println!("⏱️  Auto-checkpoint enabled every {} rewarded events", n);
-            let db_bg = Arc::clone(&db);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    if db_bg.rewarded_count.load(Ordering::Relaxed) >= n {
-                        db_bg.rewarded_count.store(0, Ordering::Relaxed);
-                        if let Err(e) = db_bg.checkpoint().await {
-                            println!("[checkpoint] Auto-checkpoint failed: {}", e);
-                        }
+        Some(n) => println!("⏱️  Auto-checkpoint enabled every {} rewarded events", n),
+        None    => println!("💡 Auto-checkpoint disabled (set BANDITDB_CHECKPOINT_INTERVAL to enable)"),
+    }
+
+    let max_wal_bytes: Option<u64> = std::env::var("BANDITDB_MAX_WAL_SIZE_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(|mb| mb * 1024 * 1024);
+
+    match max_wal_bytes {
+        Some(b) => println!("💾 WAL size limit: {} MB", b / 1024 / 1024),
+        None    => println!("💾 WAL size limit: unlimited"),
+    }
+
+    if checkpoint_interval.is_some() || max_wal_bytes.is_some() {
+        let db_bg = Arc::clone(&db);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+                let count_exceeded = checkpoint_interval
+                    .map_or(false, |n| db_bg.rewarded_count.load(Ordering::Relaxed) >= n);
+
+                let size_exceeded = max_wal_bytes.map_or(false, |max| {
+                    fs::metadata(&db_bg.wal_path)
+                        .map(|m| m.len() > max)
+                        .unwrap_or(false)
+                });
+
+                if count_exceeded || size_exceeded {
+                    db_bg.rewarded_count.store(0, Ordering::Relaxed);
+                    if let Err(e) = db_bg.checkpoint().await {
+                        println!("[checkpoint] Auto-checkpoint failed: {}", e);
                     }
                 }
-            });
-        }
-        None => {
-            println!("💡 Auto-checkpoint disabled (set BANDITDB_CHECKPOINT_INTERVAL to enable)");
-        }
+            }
+        });
     }
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();

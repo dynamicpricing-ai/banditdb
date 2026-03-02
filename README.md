@@ -25,10 +25,10 @@ Building a self-learning personalization engine today requires a massive data pl
 
 ### What's In It For Developers?
 * **Zero-Math Machine Learning:** You just pass an array of user features, and BanditDB tells you what to show them.
-* **Instantaneous Learning:** When a user clicks, buys, or engages, you send a `reward`. The matrices update in sub-microseconds. The very next user gets a mathematically optimized experience.
+* **Instantaneous Learning:** When a user clicks, buys, or engages, you send a `reward`. The matrices update in microseconds. The very next user gets a mathematically optimized experience.
 * **Built-in Delayed Rewards:** The database features a highly concurrent TTL cache that automatically remembers the user's context while waiting for their future reward.
 * **Data Science Ready:** All interactions are event-sourced to a Write-Ahead Log (WAL) and instantly exportable to heavily compressed **Apache Parquet** files for offline model training in Pandas/Polars.
-* **Amnesia-Free AI Agents:** Built-in Model Context Protocol (MCP) support allows autonomous LLMs to use the database as a "shared intuition engine."
+* **Amnesia-Free AI Agents:** The Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that exposes `get_intuition` and `record_outcome` as native tools. Add it to your `claude_desktop_config.json` and your agent swarm starts learning autonomously — no application code required.
 
 ---
 
@@ -51,7 +51,9 @@ services:
     environment:
       - DATA_DIR=/data
       - BANDITDB_API_KEY=your-secret-key        # Remove to disable auth (dev mode)
-      - BANDITDB_REWARD_TTL_SECS=86400          # Seconds to remember a context awaiting its reward
+      - BANDITDB_REWARD_TTL_SECS=86400          # How long to remember a context while waiting for its reward (seconds)
+      # - BANDITDB_CHECKPOINT_INTERVAL=10000   # Auto-checkpoint after every N rewarded events
+      # - BANDITDB_MAX_WAL_SIZE_MB=50          # Auto-checkpoint when WAL exceeds this size (recommended for edge deployments)
 volumes:
   banditdb_data:
 ```
@@ -77,8 +79,8 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is s
 | `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
 | `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
 | `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
-| `POST` | `/checkpoint` | Yes | Flush WAL to disk and snapshot all campaign matrices to `checkpoint.json`. On next startup, recovery loads the snapshot and replays only the WAL tail. |
-| `GET` | `/export` | Yes | Compiles the WAL into a Snappy-compressed Parquet file at `bandit_logs_latest.parquet`. |
+| `POST` | `/checkpoint` | Yes | Flush the WAL, snapshot all campaign matrices to `checkpoint.json`, write completed prediction→reward pairs to per-campaign Parquet files in `exports/`, and rotate the WAL. Returns a summary string. |
+| `GET` | `/export` | Yes | List the per-campaign Parquet files available in the `exports/` directory. Files are created by `POST /checkpoint`. |
 
 Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.
 
@@ -110,9 +112,40 @@ print(f"Routing to: {model}")  # e.g., "claude-haiku"
 db.reward(interaction_id, reward=1.0)  # 0.0 if the model failed the task
 ```
 
-> **Native agent tool use:** the Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that exposes `predict` and `reward` as native tools — no application code required. Add it to your `claude_desktop_config.json` and your agent swarm starts learning autonomously.
+### Native Agent Tool Use (MCP)
 
-For more domain-specific walkthroughs — e-commerce personalisation, adaptive clinical trials, dynamic pricing — browse the [`examples/`](./examples/) directory.
+If you are running an AI agent rather than writing application code, `banditdb-mcp` exposes the same predict→reward loop as native MCP tools that any Claude-based agent can call directly.
+
+```bash
+pip install banditdb-python
+```
+
+Add the server to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "banditdb": {
+      "command": "banditdb-mcp",
+      "env": {
+        "BANDITDB_URL": "http://localhost:8080",
+        "BANDITDB_API_KEY": "your-secret-key"
+      }
+    }
+  }
+}
+```
+
+The agent now has two tools available:
+
+| Tool | Arguments | What it does |
+|------|-----------|--------------|
+| `get_intuition` | `campaign_id`, `context` | Returns the recommended action and an `interaction_id` to save |
+| `record_outcome` | `interaction_id`, `reward` | Reports success (1.0) or failure (0.0) and updates the model |
+
+Every agent in a swarm shares the same BanditDB instance, so the learned model improves with every interaction across the entire fleet.
+
+For more domain-specific walkthroughs — e-commerce personalisation, dynamic pricing — browse the [`examples/`](./examples/) directory.
 
 ---
 
@@ -120,21 +153,35 @@ For more domain-specific walkthroughs — e-commerce personalisation, adaptive c
 
 We know Data Scientists hate black boxes. While BanditDB learns instantly in memory, it uses **Event Sourcing** to write every interaction to a disk WAL.
 
-With a single HTTP call, BanditDB natively compiles this log into heavily compressed **Apache Parquet** files, allowing your ML team to perform Offline Policy Evaluation (OPE) instantly.
+`POST /checkpoint` compiles completed prediction→reward pairs into Snappy-compressed **Apache Parquet** files — one file per campaign — allowing your ML team to perform Offline Policy Evaluation (OPE) directly in Pandas or Polars.
+
+Every prediction will eventually appear in the Parquet file even if its reward arrives hours later. BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.
 
 ```python
 import polars as pl
 import requests
 
-# Export the database memory to a Data Lake
-requests.get("http://localhost:8080/export")
+HEADERS = {"X-Api-Key": "your-secret-key"}
 
-# Load instantly into Polars or Pandas
-df = pl.read_parquet("/data/bandit_logs_latest.parquet")
+# Checkpoint: snapshot models, export Parquet, rotate the WAL.
+# Call this on a schedule or trigger it from your application.
+requests.post("http://localhost:8080/checkpoint", headers=HEADERS)
 
-# View the exact prediction histories, contexts, and propensity scores
-predictions = df.select(pl.col("Predicted")).unnest("Predicted").drop_nulls()
-print(predictions)
+# One Parquet file per campaign, written to {DATA_DIR}/exports/
+# Mount the volume and read directly, or copy out of the container.
+df = pl.read_parquet("/data/exports/llm_routing.parquet")
+
+# Flat schema — one row per completed prediction→reward pair:
+# interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 | feature_1 | ...
+print(df.head())
+print(df.columns)
+```
+
+To list which Parquet files have been written so far:
+
+```bash
+curl -s http://localhost:8080/export -H "X-Api-Key: your-secret-key"
+# e.g. "Parquet files in /data/exports: [\"llm_routing.parquet\"]"
 ```
 
 ### Inspecting Campaigns via the WAL
