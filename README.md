@@ -43,7 +43,7 @@ Create a `docker-compose.yml` file and start the server:
 version: '3.8'
 services:
   banditdb:
-    image: simeonai/banditdb:latest # Or build from source!
+    image: simeonlukov/banditdb:latest # Or build from source!
     ports:
       - "8080:8080"
     volumes:
@@ -138,10 +138,13 @@ Add the server to your `claude_desktop_config.json`:
 }
 ```
 
-The agent now has two tools available:
+The agent now has five tools available:
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
+| `create_campaign` | `campaign_id`, `arms`, `feature_dim`, `alpha=1.0` | Create a new decision campaign |
+| `list_campaigns` | — | List all active campaigns with arm count and alpha |
+| `campaign_diagnostics` | `campaign_id` | Per-arm `theta_norm`, prediction count, reward rate — use when a campaign isn't learning |
 | `get_intuition` | `campaign_id`, `context` | Returns the recommended action and an `interaction_id` to save |
 | `record_outcome` | `interaction_id`, `reward` | Reports success (1.0) or failure (0.0) and updates the model |
 
