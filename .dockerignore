@@ -1,0 +1,17 @@
+# Rust build artifacts — can be several GB, must never enter the build context
+target/
+
+# Git history
+.git/
+
+# GitHub Actions
+.github/
+
+# Local data files (WAL, checkpoints, exports)
+*.jsonl
+*.json
+exports/
+
+# Editor and OS noise
+.DS_Store
+*.swp
