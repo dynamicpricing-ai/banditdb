@@ -37,6 +37,16 @@ Building a self-learning personalization engine today requires a massive data pl
 BanditDB consists of the **Rust Engine** (deployed via Docker) and the **Python SDK** (installed via pip).
 
 ### 1. Start the Database Engine
+
+**Quickstart (no config needed):**
+```bash
+docker run -d -p 8080:8080 simeonlukov/banditdb:latest
+```
+```bash
+curl http://localhost:8080/health   # {"status":"ok"}
+```
+
+**Production (with persistence and auth):**
 Create a `docker-compose.yml` file and start the server:
 
 ```yaml
