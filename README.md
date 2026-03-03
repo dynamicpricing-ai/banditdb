@@ -19,7 +19,7 @@ Standard databases store *what happened*. **BanditDB stores *what works*.**
 
 Every time an agent succeeds, a patient responds, or a customer converts, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
 
-Under the hood, BanditDB is a lock-free database written in Rust that runs **Contextual Bandit** algorithms (LinUCB) entirely in memory — updating its mathematical intuition in microseconds using Sherman-Morrison rank-1 matrix updates. The math is hidden. The results are not.
+Under the hood, BanditDB is a lock-free database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling** — entirely in memory, updating its mathematical intuition in microseconds using Sherman-Morrison rank-1 matrix updates. The math is hidden. The results are not.
 
 ### The Problem It Solves
 Building a self-learning personalisation engine today requires stitching together Kafka (event streaming), Redis (state), a Python worker (matrix math), and Postgres (logs).
@@ -90,7 +90,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is s
 | `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
 | `GET` | `/campaigns` | Yes | List all live campaigns with their `alpha` and arm count. |
 | `GET` | `/campaign/:id` | Yes | Full diagnostic for one campaign: per-arm `theta`, `theta_norm`, `prediction_count`, `reward_count`, and campaign-level totals. Returns 404 if not found. |
-| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha"}`. `alpha` is optional (default `1.0`) — lower values (e.g. `0.1`) exploit learned knowledge more aggressively; higher values (e.g. `3.0`) keep exploring uncertain arms longer. |
+| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha","algorithm"}`. `alpha` is optional (default `1.0`). `algorithm` is optional (default `"linucb"`) — also accepts `"thompson_sampling"` for Linear Thompson Sampling, which samples from the posterior instead of adding a UCB bonus. |
 | `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
 | `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
 | `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
@@ -155,7 +155,7 @@ The agent now has five tools available:
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `create_campaign` | `campaign_id`, `arms`, `feature_dim`, `alpha=1.0` | Create a new decision campaign |
+| `create_campaign` | `campaign_id`, `arms`, `feature_dim`, `alpha=1.0`, `algorithm="linucb"` | Create a new decision campaign. Set `algorithm="thompson_sampling"` for natural Bayesian exploration — no alpha-sweep needed. |
 | `list_campaigns` | — | List all active campaigns with arm count and alpha |
 | `campaign_diagnostics` | `campaign_id` | Per-arm `theta_norm`, prediction count, reward rate — use when a campaign isn't learning |
 | `get_intuition` | `campaign_id`, `context` | Returns the recommended action and an `interaction_id` to save |
@@ -164,6 +164,28 @@ The agent now has five tools available:
 Every agent in a swarm shares the same BanditDB instance, so the learned model improves with every interaction across the entire fleet.
 
 For more domain-specific walkthroughs — e-commerce personalisation, dynamic pricing — browse the [`examples/`](./examples/) directory.
+
+---
+
+## 🧠 Choosing an Algorithm
+
+BanditDB supports two contextual bandit algorithms. Both share identical per-arm state (A⁻¹, b, θ), so switching is a single field in the campaign creation call.
+
+| Algorithm | `algorithm` value | How it explores | When to use |
+|-----------|------------------|-----------------|-------------|
+| **LinUCB** | `"linucb"` (default) | Adds a deterministic UCB bonus: `θ·x + α·√(x·A⁻¹·x)` | When you want predictable, tunable exploration. Sweep `alpha` offline to find the right exploration level. |
+| **Linear Thompson Sampling** | `"thompson_sampling"` | Samples θ̃ from the posterior N(θ, α²·A⁻¹) and scores by θ̃·x | When you want natural Bayesian exploration with no sweep. `alpha=1.0` is the principled default — it equals the natural posterior width. Concurrent users automatically diversify arm coverage. |
+
+```python
+# LinUCB (default) — same as before
+db.create_campaign("ucb_offers", ["offer_a", "offer_b"], feature_dim=3, alpha=1.5)
+
+# Thompson Sampling — natural posterior exploration
+db.create_campaign("ts_offers", ["offer_a", "offer_b"], feature_dim=3,
+                   algorithm="thompson_sampling")
+```
+
+The `algorithm` field is stored in both the WAL and checkpoint files. Old WAL records and checkpoints without an `algorithm` field recover as `"linucb"` automatically.
 
 ---
 
