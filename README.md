@@ -216,6 +216,34 @@ grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id
 
 ---
 
+## 📈 Benchmark
+
+BanditDB is validated against the **MovieLens 100K** dataset using the standard [replay method](https://arxiv.org/abs/1003.5956) (Li et al. 2010) — the same unbiased offline estimator used in the original LinUCB paper.
+
+**Setup:** 92,698 ratings → 6 genre arms (Drama, Comedy, Action, Romance, Thriller, Adventure), 24-dimensional user context (bias + age + gender + 21-way one-hot occupation), 90/10 chronological split. Reward signal: binary (liked = rating ≥ 4).
+
+| Metric | Value |
+|--------|-------|
+| Train interactions | 83,428 |
+| Test interactions | 9,270 |
+| Replay match rate | 17.6% |
+| Random baseline avg reward | 0.5606 |
+| BanditDB avg reward | 0.6467 |
+| **Lift over random** | **+15.3%** |
+
+Reproduce the benchmark:
+```bash
+python benchmark/movielens/convert.py   # download & convert MovieLens 100K
+docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
+docker exec <container> rm -f /data/checkpoint.json
+docker compose restart
+python benchmark/movielens/evaluate.py
+```
+
+Use `benchmark/movielens/offline_sweep.py` to sweep alpha, reward type, and feature sets offline (no server required) before committing to a full Docker validation run.
+
+---
+
 ## 🏗 Architecture Under the Hood
 
 *   **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
