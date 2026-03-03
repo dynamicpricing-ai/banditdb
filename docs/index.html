@@ -182,12 +182,16 @@
         <div class="text-center">
           <div class="w-12 h-12 bg-orange-500/10 border border-orange-500/30 rounded-xl flex items-center justify-center text-orange-400 font-bold mx-auto mb-4">2</div>
           <h3 class="font-semibold mb-2">Act</h3>
-          <p class="text-sm text-zinc-500 mb-4">Show the content, route the request, apply the price — whatever the decision is.</p>
+          <p class="text-sm text-zinc-500 mb-4">An agent routes to the best model. A patient gets the most promising treatment. A customer sees the winning offer.</p>
           <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3 text-left font-mono text-xs text-zinc-300">
-            result = your_code(arm)<br />
+            <span class="text-zinc-600"># agent succeeds</span><br />
+            result = run_task(arm, prompt)<br />
             <br />
-            # arm could be a model,<br />
-            # a price, a layout...
+            <span class="text-zinc-600"># patient responds</span><br />
+            outcome = treat(patient, arm)<br />
+            <br />
+            <span class="text-zinc-600"># customer converts</span><br />
+            revenue = show_offer(user, arm)
           </div>
         </div>
 
