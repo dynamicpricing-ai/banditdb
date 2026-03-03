@@ -17,7 +17,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
 
   <style>
-    body { font-family: 'Inter', sans-serif; }
+    body { font-family: 'Inter', sans-serif; font-size: 18px; }
     code, pre { font-family: 'JetBrains Mono', monospace; }
     .gradient-text {
       background: linear-gradient(135deg, #f97316, #fb923c);
@@ -25,8 +25,8 @@
       -webkit-text-fill-color: transparent;
       background-clip: text;
     }
-    .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 1.5rem !important; font-size: 0.875rem !important; line-height: 1.6 !important; }
-    .section-divider { border-top: 1px solid #27272a; }
+    .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 2rem !important; font-size: 1rem !important; line-height: 1.7 !important; }
+    .section-divider { border-top: 2px solid #3f3f46; }
   </style>
 </head>
 
@@ -35,11 +35,11 @@
   <!-- Nav -->
   <nav class="border-b border-zinc-800 px-6 py-4 sticky top-0 bg-zinc-950/95 backdrop-blur z-10">
     <div class="max-w-5xl mx-auto flex items-center justify-between">
-      <div class="flex items-center gap-2 font-semibold text-lg">
+      <div class="flex items-center gap-2 font-semibold text-xl">
         <span>🎰</span>
         <span>BanditDB</span>
       </div>
-      <div class="flex items-center gap-6 text-sm text-zinc-400">
+      <div class="flex items-center gap-6 text-base text-zinc-400">
         <a href="#how-it-works" class="hover:text-white transition-colors hidden sm:block">How it works</a>
         <a href="#agents"       class="hover:text-white transition-colors hidden sm:block">For Agents</a>
         <a href="https://github.com/simeonlukov/banditdb" class="hover:text-white transition-colors hidden sm:block">GitHub</a>
@@ -55,21 +55,21 @@
   <section class="px-6 pt-28 pb-24 text-center">
     <div class="max-w-3xl mx-auto">
 
-      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-sm text-zinc-300 mb-12">
+      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-base text-zinc-300 mb-12">
         <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></span>
         Written in Rust &nbsp;·&nbsp; Lock-free &nbsp;·&nbsp; 50MB binary
       </div>
 
-      <h1 class="text-5xl sm:text-7xl font-extrabold mb-6 leading-tight tracking-tight">
+      <h1 class="text-6xl sm:text-8xl font-extrabold mb-6 leading-tight tracking-tight">
         The <span class="gradient-text">Intuition</span> Database
       </h1>
 
-      <p class="text-xl text-zinc-300 mb-4 leading-relaxed">
+      <p class="text-2xl text-zinc-300 mb-4 leading-relaxed">
         Your app learns from every interaction<br class="hidden sm:block" />
         and makes smarter decisions — automatically.
       </p>
 
-      <p class="text-base text-zinc-500 mb-14 leading-relaxed">
+      <p class="text-lg text-zinc-500 mb-14 leading-relaxed">
         Every time an agent succeeds, a patient responds, or a customer converts,<br class="hidden sm:block" />
         BanditDB refines its intuition. No pipeline. No ML team. No retraining cycle.
       </p>
@@ -77,7 +77,7 @@
       <!-- Install commands -->
       <div class="flex flex-col gap-3 max-w-xl mx-auto mb-12">
         <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+          <div class="flex items-center gap-3 font-mono text-base min-w-0">
             <span class="text-zinc-500 shrink-0">$</span>
             <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
           </div>
@@ -85,7 +85,7 @@
                   class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
         </div>
         <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 font-mono text-sm">
+          <div class="flex items-center gap-3 font-mono text-base">
             <span class="text-zinc-500">$</span>
             <span class="text-zinc-100">pip install banditdb-python</span>
           </div>
@@ -94,7 +94,7 @@
         </div>
       </div>
 
-      <div class="flex items-center justify-center flex-wrap gap-x-6 gap-y-2 text-sm text-zinc-500">
+      <div class="flex items-center justify-center flex-wrap gap-x-6 gap-y-2 text-base text-zinc-500">
         <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-white transition-colors">★ GitHub</a>
         <span class="text-zinc-700">·</span>
         <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-white transition-colors">🐳 Docker Hub</a>
@@ -108,12 +108,12 @@
   </section>
 
   <!-- Problem -->
-  <section class="px-6 py-28 section-divider">
+  <section class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-3xl font-bold text-center mb-3">
+      <h2 class="text-4xl font-bold text-center mb-3">
         Building a self-learning system today is a plumbing nightmare
       </h2>
-      <p class="text-zinc-400 text-center mb-14 text-base">Four moving parts. Four failure modes. Weeks to build. Months to maintain.</p>
+      <p class="text-zinc-400 text-center mb-14 text-lg">Four moving parts. Four failure modes. Weeks to build. Months to maintain.</p>
 
       <div class="grid md:grid-cols-2 gap-6">
 
@@ -123,16 +123,16 @@
             <span>✗</span> The old way
           </div>
           <div class="space-y-3">
-            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-sm text-zinc-300">
+            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-300">
               <span>📨</span> Kafka — event streaming
             </div>
-            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-sm text-zinc-300">
+            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-300">
               <span>⚡</span> Redis — state management
             </div>
-            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-sm text-zinc-300">
+            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-300">
               <span>🐍</span> Python worker — matrix math
             </div>
-            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-sm text-zinc-300">
+            <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-300">
               <span>🐘</span> Postgres — interaction logs
             </div>
           </div>
@@ -143,10 +143,10 @@
           <div class="text-orange-400 font-semibold mb-6 flex items-center gap-2">
             <span>✓</span> The BanditDB way
           </div>
-          <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-sm text-zinc-100 mb-6">
+          <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-100 mb-6">
             <span>🎰</span> BanditDB — everything, in one binary
           </div>
-          <ul class="space-y-2.5 text-sm text-zinc-400">
+          <ul class="space-y-2.5 text-base text-zinc-400">
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> In-memory matrix updates (microseconds)</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> LinUCB &amp; Linear Thompson Sampling algorithms</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Write-Ahead Log for crash recovery</li>
@@ -161,18 +161,18 @@
   </section>
 
   <!-- How it works -->
-  <section id="how-it-works" class="px-6 py-28 section-divider">
+  <section id="how-it-works" class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-3xl font-bold text-center mb-3">How it works</h2>
-      <p class="text-zinc-400 text-center mb-16 text-base">Three API calls. That's the entire integration.</p>
+      <h2 class="text-4xl font-bold text-center mb-3">How it works</h2>
+      <p class="text-zinc-400 text-center mb-16 text-lg">Three API calls. That's the entire integration.</p>
 
       <div class="grid md:grid-cols-3 gap-10">
 
         <div class="text-center">
           <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">1</div>
-          <h3 class="font-semibold text-lg mb-3">Predict</h3>
-          <p class="text-sm text-zinc-400 mb-5 leading-relaxed">Pass a context vector. Get back the optimal action and an interaction ID.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-sm text-zinc-200">
+          <h3 class="font-semibold text-xl mb-3">Predict</h3>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Pass a context vector. Get back the optimal action and an interaction ID.</p>
+          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
             arm, iid = db.predict(<br />
             &nbsp;&nbsp;"campaign",<br />
             &nbsp;&nbsp;context,<br />
@@ -182,9 +182,9 @@
 
         <div class="text-center">
           <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">2</div>
-          <h3 class="font-semibold text-lg mb-3">Act</h3>
-          <p class="text-sm text-zinc-400 mb-5 leading-relaxed">An agent routes to the best model. A patient gets the most promising treatment. A customer sees the winning offer.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-sm text-zinc-200">
+          <h3 class="font-semibold text-xl mb-3">Act</h3>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">An agent routes to the best model. A patient gets the most promising treatment. A customer sees the winning offer.</p>
+          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
             result = run_task(arm, prompt)<br />
             <br />
             outcome = treat(patient, arm)<br />
@@ -195,9 +195,9 @@
 
         <div class="text-center">
           <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">3</div>
-          <h3 class="font-semibold text-lg mb-3">Reward</h3>
-          <p class="text-sm text-zinc-400 mb-5 leading-relaxed">Report the outcome. Matrices update in microseconds. The next request is smarter.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-sm text-zinc-200">
+          <h3 class="font-semibold text-xl mb-3">Reward</h3>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Report the outcome. Matrices update in microseconds. The next request is smarter.</p>
+          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
             db.reward(<br />
             &nbsp;&nbsp;iid,<br />
             &nbsp;&nbsp;1.0 if success else 0.0,<br />
@@ -210,13 +210,13 @@
   </section>
 
   <!-- Code example -->
-  <section class="px-6 py-28 section-divider">
+  <section class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
       <div class="grid md:grid-cols-2 gap-14 items-center">
 
         <div>
-          <div class="text-orange-400 text-sm font-semibold uppercase tracking-wider mb-4">Quick Start</div>
-          <h2 class="text-3xl font-bold mb-5">AI Agent LLM Routing</h2>
+          <div class="text-orange-400 text-base font-semibold uppercase tracking-wider mb-4">Quick Start</div>
+          <h2 class="text-4xl font-bold mb-5">AI Agent LLM Routing</h2>
           <p class="text-zinc-300 leading-relaxed mb-7">
             AI agents blindly routing every task to GPT-4o spend 60× more than necessary. BanditDB learns — from every agent in your swarm — exactly which model wins for which type of task.
           </p>
@@ -265,10 +265,10 @@ db.reward(iid, 1.0 if result.success else 0.0)</code></pre>
   </section>
 
   <!-- Algorithm picker -->
-  <section class="px-6 py-28 section-divider">
+  <section class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-3xl font-bold text-center mb-3">Two algorithms. One API.</h2>
-      <p class="text-zinc-400 text-center mb-14 text-base">Pick the algorithm at campaign creation. Everything else stays identical.</p>
+      <h2 class="text-4xl font-bold text-center mb-3">Two algorithms. One API.</h2>
+      <p class="text-zinc-400 text-center mb-14 text-lg">Pick the algorithm at campaign creation. Everything else stays identical.</p>
 
       <div class="grid md:grid-cols-2 gap-6 mb-8">
 
@@ -277,14 +277,14 @@ db.reward(iid, 1.0 if result.success else 0.0)</code></pre>
             <div class="w-9 h-9 bg-orange-500/10 border border-orange-500/40 rounded-lg flex items-center justify-center text-orange-400 font-bold text-sm shrink-0">UCB</div>
             <div>
               <div class="font-semibold">LinUCB</div>
-              <div class="text-xs text-zinc-500 font-mono mt-0.5">algorithm="linucb"</div>
+              <div class="text-sm text-zinc-500 font-mono mt-0.5">algorithm="linucb"</div>
             </div>
             <span class="ml-auto text-xs bg-zinc-800 text-zinc-300 px-2.5 py-1 rounded-full">Default</span>
           </div>
-          <p class="text-sm text-zinc-300 leading-relaxed mb-5">
+          <p class="text-base text-zinc-300 leading-relaxed mb-5">
             Adds a deterministic upper confidence bound to every arm score. Exploration is tunable via <code class="text-orange-400 text-xs">alpha</code> — sweep it offline to calibrate.
           </p>
-          <div class="text-sm text-zinc-500 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-3.5">
+          <div class="text-base text-zinc-400 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-4">
             score = θ·x + α·√(x·A⁻¹·x)
           </div>
         </div>
@@ -294,13 +294,13 @@ db.reward(iid, 1.0 if result.success else 0.0)</code></pre>
             <div class="w-9 h-9 bg-orange-500/10 border border-orange-500/40 rounded-lg flex items-center justify-center text-orange-400 font-bold text-sm shrink-0">TS</div>
             <div>
               <div class="font-semibold">Linear Thompson Sampling</div>
-              <div class="text-xs text-zinc-500 font-mono mt-0.5">algorithm="thompson_sampling"</div>
+              <div class="text-sm text-zinc-500 font-mono mt-0.5">algorithm="thompson_sampling"</div>
             </div>
           </div>
-          <p class="text-sm text-zinc-300 leading-relaxed mb-5">
+          <p class="text-base text-zinc-300 leading-relaxed mb-5">
             Samples θ̃ from the Bayesian posterior on every prediction. No alpha sweep needed — <code class="text-orange-400 text-xs">alpha=1.0</code> is the natural posterior width. Concurrent users automatically diversify arm coverage.
           </p>
-          <div class="text-sm text-zinc-500 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-3.5">
+          <div class="text-base text-zinc-400 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-4">
             θ̃ ~ N(θ,&nbsp;α²·A⁻¹)&nbsp;&nbsp;score = θ̃·x
           </div>
         </div>
@@ -317,7 +317,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
   </section>
 
   <!-- For AI agents (MCP) -->
-  <section id="agents" class="px-6 py-28 section-divider">
+  <section id="agents" class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
       <div class="grid md:grid-cols-2 gap-14 items-center">
 
@@ -335,27 +335,27 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
 }</code></pre>
           <div class="mt-5 grid grid-cols-2 gap-2">
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
-              <div class="text-zinc-100 font-medium text-sm mb-1">get_intuition</div>
-              <div class="text-xs text-zinc-500">Ask which action to take</div>
+              <div class="text-zinc-100 font-medium text-base mb-1">get_intuition</div>
+              <div class="text-sm text-zinc-500">Ask which action to take</div>
             </div>
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
-              <div class="text-zinc-100 font-medium text-sm mb-1">record_outcome</div>
-              <div class="text-xs text-zinc-500">Report success or failure</div>
+              <div class="text-zinc-100 font-medium text-base mb-1">record_outcome</div>
+              <div class="text-sm text-zinc-500">Report success or failure</div>
             </div>
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
-              <div class="text-zinc-100 font-medium text-sm mb-1">create_campaign</div>
-              <div class="text-xs text-zinc-500">Define a new decision</div>
+              <div class="text-zinc-100 font-medium text-base mb-1">create_campaign</div>
+              <div class="text-sm text-zinc-500">Define a new decision</div>
             </div>
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
-              <div class="text-zinc-100 font-medium text-sm mb-1">campaign_diagnostics</div>
-              <div class="text-xs text-zinc-500">Inspect learning state</div>
+              <div class="text-zinc-100 font-medium text-base mb-1">campaign_diagnostics</div>
+              <div class="text-sm text-zinc-500">Inspect learning state</div>
             </div>
           </div>
         </div>
 
         <div class="order-1 md:order-2">
-          <div class="text-orange-400 text-sm font-semibold uppercase tracking-wider mb-4">For AI Agents</div>
-          <h2 class="text-3xl font-bold mb-5">Your agent swarm builds shared intuition</h2>
+          <div class="text-orange-400 text-base font-semibold uppercase tracking-wider mb-4">For AI Agents</div>
+          <h2 class="text-4xl font-bold mb-5">Your agent swarm builds shared intuition</h2>
           <p class="text-zinc-300 leading-relaxed mb-5">
             Standard LLM agents are stateless — if they make a bad decision, they repeat it tomorrow. BanditDB's built-in MCP server gives your entire agent swarm shared persistent memory.
           </p>
@@ -373,65 +373,65 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
   </section>
 
   <!-- Use cases -->
-  <section class="px-6 py-28 section-divider">
+  <section class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-3xl font-bold text-center mb-3">Any decision with a measurable outcome</h2>
-      <p class="text-zinc-400 text-center mb-14 text-base">BanditDB works wherever you can define a context, a set of choices, and a reward.</p>
+      <h2 class="text-4xl font-bold text-center mb-3">Any decision with a measurable outcome</h2>
+      <p class="text-zinc-400 text-center mb-14 text-lg">BanditDB works wherever you can define a context, a set of choices, and a reward.</p>
 
       <div class="grid sm:grid-cols-2 md:grid-cols-3 gap-5">
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">🤖</div>
-          <h3 class="font-semibold mb-2">LLM Routing</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Route tasks to the right model. Learn which model wins for which task type across your entire agent fleet.</p>
+          <h3 class="font-semibold text-lg mb-2">LLM Routing</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Route tasks to the right model. Learn which model wins for which task type across your entire agent fleet.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">💰</div>
-          <h3 class="font-semibold mb-2">Dynamic Pricing</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Learn which price maximises revenue for which customer profile. Adapt in real time as behaviour changes.</p>
+          <h3 class="font-semibold text-lg mb-2">Dynamic Pricing</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Learn which price maximises revenue for which customer profile. Adapt in real time as behaviour changes.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">🎯</div>
-          <h3 class="font-semibold mb-2">Personalisation</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Show the right content, offer, or layout to each user segment without a data science team.</p>
+          <h3 class="font-semibold text-lg mb-2">Personalisation</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Show the right content, offer, or layout to each user segment without a data science team.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">🏥</div>
-          <h3 class="font-semibold mb-2">Clinical Trials</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Adaptive trial designs that route patients to the most promising treatment arm as evidence accumulates.</p>
+          <h3 class="font-semibold text-lg mb-2">Clinical Trials</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Adaptive trial designs that route patients to the most promising treatment arm as evidence accumulates.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">🛒</div>
-          <h3 class="font-semibold mb-2">Checkout Optimisation</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Learn which upsell offer converts best for which cart composition and customer history.</p>
+          <h3 class="font-semibold text-lg mb-2">Checkout Optimisation</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Learn which upsell offer converts best for which cart composition and customer history.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
           <div class="text-2xl mb-4">📊</div>
-          <h3 class="font-semibold mb-2">Beyond A/B Tests</h3>
-          <p class="text-sm text-zinc-400 leading-relaxed">Stop splitting traffic equally. BanditDB routes more users to the winning variant as it learns — automatically.</p>
+          <h3 class="font-semibold text-lg mb-2">Beyond A/B Tests</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Stop splitting traffic equally. BanditDB routes more users to the winning variant as it learns — automatically.</p>
         </div>
       </div>
     </div>
   </section>
 
   <!-- Stats -->
-  <section class="px-6 py-20 section-divider">
+  <section class="px-6 py-28 section-divider">
     <div class="max-w-5xl mx-auto">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-5">
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-7 text-center">
-          <div class="text-4xl font-extrabold text-orange-400 mb-3">50MB</div>
-          <div class="text-sm text-zinc-400">Replaces Kafka + Redis + Python + Postgres</div>
+          <div class="text-5xl font-extrabold text-orange-400 mb-3">50MB</div>
+          <div class="text-base text-zinc-400">Replaces Kafka + Redis + Python + Postgres</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-7 text-center">
-          <div class="text-4xl font-extrabold text-orange-400 mb-3">μs</div>
-          <div class="text-sm text-zinc-400">Matrix updates via Sherman-Morrison rank-1 formula</div>
+          <div class="text-5xl font-extrabold text-orange-400 mb-3">μs</div>
+          <div class="text-base text-zinc-400">Matrix updates via Sherman-Morrison rank-1 formula</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-7 text-center">
-          <div class="text-4xl font-extrabold text-orange-400 mb-3">+16.7%</div>
-          <div class="text-sm text-zinc-400">Lift over random on MovieLens 100K benchmark</div>
+          <div class="text-5xl font-extrabold text-orange-400 mb-3">+16.7%</div>
+          <div class="text-base text-zinc-400">Lift over random on MovieLens 100K benchmark</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-7 text-center">
-          <div class="text-4xl font-extrabold text-orange-400 mb-3">WAL</div>
-          <div class="text-sm text-zinc-400">Crash-safe durability with Parquet export</div>
+          <div class="text-5xl font-extrabold text-orange-400 mb-3">WAL</div>
+          <div class="text-base text-zinc-400">Crash-safe durability with Parquet export</div>
         </div>
       </div>
     </div>
@@ -440,17 +440,17 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
   <!-- CTA -->
   <section class="px-6 py-28 section-divider text-center">
     <div class="max-w-xl mx-auto">
-      <h2 class="text-4xl font-extrabold mb-5">Start in one command</h2>
-      <p class="text-zinc-400 mb-10 text-base">No sign-up. No cloud account. No configuration required.</p>
+      <h2 class="text-5xl font-extrabold mb-5">Start in one command</h2>
+      <p class="text-zinc-400 mb-10 text-lg">No sign-up. No cloud account. No configuration required.</p>
       <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-4 flex items-center justify-between gap-3 max-w-md mx-auto mb-8">
-        <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+        <div class="flex items-center gap-3 font-mono text-base min-w-0">
           <span class="text-zinc-500 shrink-0">$</span>
           <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
         </div>
         <button onclick="copy(this, 'docker run -d -p 8080:8080 simeonlukov/banditdb:latest')"
                 class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
       </div>
-      <div class="flex items-center justify-center gap-4 text-sm">
+      <div class="flex items-center justify-center gap-4 text-base">
         <a href="https://github.com/simeonlukov/banditdb"
            class="bg-zinc-800 hover:bg-zinc-700 text-white px-6 py-3 rounded-lg transition-colors font-medium">
           ★ View on GitHub
@@ -465,7 +465,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
 
   <!-- Footer -->
   <footer class="px-6 py-10 border-t border-zinc-800">
-    <div class="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-zinc-500">
+    <div class="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-base text-zinc-500">
       <div class="flex items-center gap-2">
         <span>🎰</span>
         <span class="font-medium text-zinc-400">BanditDB</span>
