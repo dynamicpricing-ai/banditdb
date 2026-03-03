@@ -2,7 +2,8 @@
 <div align="center">
 
   <h1>🎰 BanditDB</h1>
-  <p><b>The lightning-fast, drop-in auto-optimizer for Developers and AI Agents.</b></p>
+  <p><b>The Intuition Database.</b></p>
+  <p>Your app learns from every interaction and makes smarter decisions — automatically.</p>
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
@@ -14,21 +15,23 @@
 
 ## 💡 What is BanditDB?
 
-Standard databases store *what happened*. **BanditDB stores *how to act*.**
+Standard databases store *what happened*. **BanditDB stores *what works*.**
 
-BanditDB is a lightweight, lock-free database written in Rust, purpose-built for **Contextual Bandits** and real-time Reinforcement Learning. It handles the complex linear algebra of exploration vs. exploitation (LinUCB, Thompson Sampling) entirely in memory, abstracting the math behind a dead-simple developer API.
+Every time a user clicks, buys, or engages, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
+
+Under the hood, BanditDB is a lock-free database written in Rust that runs **Contextual Bandit** algorithms (LinUCB) entirely in memory — updating its mathematical intuition in microseconds using Sherman-Morrison rank-1 matrix updates. The math is hidden. The results are not.
 
 ### The Problem It Solves
-Building a self-learning personalization engine today requires a massive data plumbing nightmare: stitching together Kafka (for event streaming), Redis (for state), a Python worker (for matrix math), and Postgres (for logs). 
+Building a self-learning personalisation engine today requires stitching together Kafka (event streaming), Redis (state), a Python worker (matrix math), and Postgres (logs).
 
-**BanditDB replaces all of that with a single 50MB Rust binary.** 
+**BanditDB replaces all of that with a single 50MB binary.**
 
-### What's In It For Developers?
-* **Zero-Math Machine Learning:** You just pass an array of user features, and BanditDB tells you what to show them.
-* **Instantaneous Learning:** When a user clicks, buys, or engages, you send a `reward`. The matrices update in microseconds. The very next user gets a mathematically optimized experience.
-* **Built-in Delayed Rewards:** The database features a highly concurrent TTL cache that automatically remembers the user's context while waiting for their future reward.
-* **Data Science Ready:** All interactions are event-sourced to a Write-Ahead Log (WAL) and instantly exportable to heavily compressed **Apache Parquet** files for offline model training in Pandas/Polars.
-* **Amnesia-Free AI Agents:** The Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that exposes `get_intuition` and `record_outcome` as native tools. Add it to your `claude_desktop_config.json` and your agent swarm starts learning autonomously — no application code required.
+### What You Get
+* **Your app gets smarter automatically.** Pass a context vector, get a decision. Send a reward when it works. BanditDB does the rest.
+* **Instant learning.** Matrices update in microseconds. No batch jobs, no retraining, no lag.
+* **Built-in delayed rewards.** A concurrent TTL cache remembers the user's context while waiting for their future reward — purchases, conversions, or outcomes that arrive hours later.
+* **Data Science escape hatch.** Every interaction is event-sourced to a Write-Ahead Log and exportable to **Apache Parquet** for offline analysis in Pandas or Polars.
+* **AI agents that remember what works.** The Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that gives any Claude-based agent native `get_intuition` and `record_outcome` tools. Your agent swarm builds shared intuition — autonomously.
 
 ---
 
