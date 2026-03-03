@@ -96,6 +96,9 @@ async fn handle_create_campaign(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<CreateCampaignRequest>,
 ) -> Result<Json<&'static str>, AppError> {
+    if payload.arms.is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Campaign must have at least one arm".to_string()));
+    }
     match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha) {
         true  => Ok(Json("Campaign Created")),
         false => Err(AppError(
@@ -133,9 +136,20 @@ async fn handle_predict(
 async fn handle_reward(
     State(db): State<Arc<BanditDB>>,
     Json(payload): Json<RewardRequest>,
-) -> Json<&'static str> {
-    db.reward(&payload.interaction_id, payload.reward);
-    Json("OK")
+) -> Result<Json<&'static str>, AppError> {
+    if payload.reward < 0.0 || payload.reward > 1.0 {
+        println!(
+            "[warn] Reward {:.4} for interaction '{}' is outside [0, 1] — model may degrade",
+            payload.reward, payload.interaction_id
+        );
+    }
+    match db.reward(&payload.interaction_id, payload.reward) {
+        true  => Ok(Json("OK")),
+        false => Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("Interaction '{}' not found or already rewarded", payload.interaction_id),
+        )),
+    }
 }
 
 async fn handle_list_campaigns(State(db): State<Arc<BanditDB>>) -> Json<Vec<CampaignSummary>> {

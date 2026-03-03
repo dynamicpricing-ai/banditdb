@@ -84,6 +84,193 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let _ = std::fs::remove_file(wal);
 }
 
+/// Test V.1 — Duplicate Campaign Creation Is Rejected
+///
+/// Calling add_campaign twice with the same campaign_id must return false on the
+/// second call and leave the existing matrices untouched. Without this guard a
+/// duplicate create silently resets all learned weights to zero.
+#[tokio::test]
+async fn test_v1_duplicate_campaign_rejected() {
+    let wal = "/tmp/banditdb_test_v1.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+
+    // First create must succeed
+    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0));
+
+    // Train it so theta is non-zero
+    let (_, iid) = db.predict("dup_test", vec![1.0, 0.0]).unwrap();
+    db.reward(&iid, 1.0);
+
+    let theta_before = {
+        let c = db.campaigns.read();
+        let campaign = c.get("dup_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm_a").unwrap().theta.clone();
+        x
+    };
+
+    // Second create with same id must be rejected
+    assert!(
+        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0),
+        "Duplicate campaign creation must return false"
+    );
+
+    // Matrices must be completely unchanged
+    let theta_after = {
+        let c = db.campaigns.read();
+        let campaign = c.get("dup_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm_a").unwrap().theta.clone();
+        x
+    };
+
+    assert_eq!(
+        theta_before, theta_after,
+        "Duplicate campaign creation must not reset learned weights"
+    );
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// Test V.2 — Double-Reward Is Rejected
+///
+/// The same interaction_id must only update the model once. After the first
+/// reward the interaction is removed from the TTL cache. A second call with
+/// the same id must return false and leave theta unchanged.
+#[tokio::test]
+async fn test_v2_double_reward_rejected() {
+    let wal = "/tmp/banditdb_test_v2.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0);
+
+    let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
+
+    // First reward must succeed and update the model
+    assert!(db.reward(&iid, 1.0), "First reward must return true");
+
+    let theta_after_first = {
+        let c = db.campaigns.read();
+        let campaign = c.get("double_reward_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+
+    // Second reward with the same id must be rejected
+    assert!(
+        !db.reward(&iid, 1.0),
+        "Second reward with same interaction_id must return false"
+    );
+
+    let theta_after_second = {
+        let c = db.campaigns.read();
+        let campaign = c.get("double_reward_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+
+    assert_eq!(
+        theta_after_first, theta_after_second,
+        "Double reward must not update theta a second time"
+    );
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// Test V.3 — Reward for Unknown Interaction Returns False
+///
+/// Rewarding an interaction_id that was never predicted (or whose TTL expired)
+/// must return false and must not mutate any campaign's theta.
+#[tokio::test]
+async fn test_v3_unknown_interaction_reward_rejected() {
+    let wal = "/tmp/banditdb_test_v3.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0);
+
+    let theta_before = {
+        let c = db.campaigns.read();
+        let campaign = c.get("unknown_iid_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+
+    assert!(
+        !db.reward("interaction-id-that-never-existed", 1.0),
+        "Reward for unknown interaction_id must return false"
+    );
+
+    let theta_after = {
+        let c = db.campaigns.read();
+        let campaign = c.get("unknown_iid_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+
+    assert_eq!(
+        theta_before, theta_after,
+        "Unknown interaction reward must not mutate theta"
+    );
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// Test V.4 — Non-Finite Reward Is Rejected, Out-of-Range Is Warned But Applied
+///
+/// The engine rejects Inf and NaN rewards entirely (existing guard in update()).
+/// A reward outside [0, 1] (e.g. 5.0) is a caller mistake that the HTTP handler
+/// warns about but the engine still applies — this test verifies both behaviours.
+#[tokio::test]
+async fn test_v4_reward_range_behaviour() {
+    let wal = "/tmp/banditdb_test_v4.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0);
+
+    // Non-finite reward: engine must reject it, theta stays at zero
+    let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
+    db.reward(&iid_inf, f64::INFINITY);
+
+    let theta_after_inf = {
+        let c = db.campaigns.read();
+        let campaign = c.get("range_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+    assert!(
+        theta_after_inf.iter().all(|&v| v == 0.0),
+        "Inf reward must not update theta"
+    );
+
+    // Out-of-range but finite reward: engine applies it (handler warns, but does not block)
+    let (_, iid_oob) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
+    assert!(db.reward(&iid_oob, 5.0), "Out-of-range finite reward must still return true");
+
+    let theta_after_oob = {
+        let c = db.campaigns.read();
+        let campaign = c.get("range_test").unwrap();
+        let arms = campaign.arms.read();
+        let x = arms.get("arm").unwrap().theta.clone();
+        x
+    };
+    assert!(
+        theta_after_oob.iter().any(|&v| v != 0.0),
+        "Out-of-range finite reward must update theta"
+    );
+
+    let _ = std::fs::remove_file(wal);
+}
+
 /// Original learning test: the engine must converge to context-specific arm selection
 /// after 50 training rounds of positive reinforcement.
 #[tokio::test]

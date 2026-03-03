@@ -350,6 +350,9 @@ impl BanditDB {
                             arm_state.update(&record.context, reward);
                         }
                     }
+                    // Remove after rewarding — prevents the same interaction being
+                    // rewarded a second time within the TTL window.
+                    self.interactions.invalidate(&interaction_id);
                 }
             }
             DbEvent::CampaignDeleted { campaign_id } => {
@@ -424,12 +427,17 @@ impl BanditDB {
         true
     }
 
-    pub fn reward(&self, interaction_id: &str, reward: f64) {
+    /// Returns false if the interaction_id is unknown or has already been rewarded.
+    pub fn reward(&self, interaction_id: &str, reward: f64) -> bool {
+        if self.interactions.get(interaction_id).is_none() {
+            return false;
+        }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let event = DbEvent::Rewarded { interaction_id: interaction_id.to_string(), reward, timestamp_secs: now };
         self.apply_event_to_memory(event.clone());
         let _ = self.event_tx.send(WalMessage::Event(event));
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Returns the directory where per-campaign Parquet files are written.
