@@ -17,7 +17,7 @@
 
 Standard databases store *what happened*. **BanditDB stores *what works*.**
 
-Every time a user clicks, buys, or engages, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
+Every time an agent succeeds, a patient responds, or a customer converts, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
 
 Under the hood, BanditDB is a lock-free database written in Rust that runs **Contextual Bandit** algorithms (LinUCB) entirely in memory — updating its mathematical intuition in microseconds using Sherman-Morrison rank-1 matrix updates. The math is hidden. The results are not.
 
