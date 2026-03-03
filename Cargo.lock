@@ -214,6 +214,8 @@ dependencies = [
  "ndarray",
  "parking_lot",
  "polars",
+ "rand",
+ "rand_distr",
  "serde",
  "serde_json",
  "tokio",

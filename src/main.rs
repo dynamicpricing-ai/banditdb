@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use banditdb::state::Algorithm;
 use banditdb::BanditDB;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,6 +37,8 @@ struct CreateCampaignRequest {
     feature_dim: usize,
     #[serde(default = "default_alpha")]
     alpha: f64,
+    #[serde(default)]
+    algorithm: Algorithm,
 }
 
 fn default_alpha() -> f64 { 1.0 }
@@ -67,6 +70,7 @@ struct HealthResponse {
 struct CampaignSummary {
     campaign_id: String,
     alpha: f64,
+    algorithm: Algorithm,
     arm_count: usize,
 }
 
@@ -82,6 +86,7 @@ struct ArmInfo {
 struct CampaignInfo {
     campaign_id: String,
     alpha: f64,
+    algorithm: Algorithm,
     total_predictions: u64,
     total_rewards: u64,
     arms: HashMap<String, ArmInfo>,
@@ -99,7 +104,7 @@ async fn handle_create_campaign(
     if payload.arms.is_empty() {
         return Err(AppError(StatusCode::BAD_REQUEST, "Campaign must have at least one arm".to_string()));
     }
-    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha) {
+    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha, payload.algorithm) {
         true  => Ok(Json("Campaign Created")),
         false => Err(AppError(
             StatusCode::CONFLICT,
@@ -159,6 +164,7 @@ async fn handle_list_campaigns(State(db): State<Arc<BanditDB>>) -> Json<Vec<Camp
         .map(|(id, campaign)| CampaignSummary {
             campaign_id: id.clone(),
             alpha: campaign.alpha,
+            algorithm: campaign.algorithm.clone(),
             arm_count: campaign.arms.read().len(),
         })
         .collect();
@@ -194,6 +200,7 @@ async fn handle_campaign_info(
     Ok(Json(CampaignInfo {
         campaign_id,
         alpha: campaign.alpha,
+        algorithm: campaign.algorithm.clone(),
         total_predictions,
         total_rewards,
         arms,

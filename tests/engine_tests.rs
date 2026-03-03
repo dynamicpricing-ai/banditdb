@@ -1,3 +1,4 @@
+use banditdb::state::Algorithm;
 use banditdb::BanditDB;
 
 /// Test 1.2 — Asymptotic Convergence to Known Theta
@@ -12,7 +13,7 @@ async fn test_1_2_asymptotic_convergence() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0);
+    db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
     let true_theta = [3.0_f64, -2.0_f64];
 
@@ -58,7 +59,7 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0);
+    db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb);
 
     // Baseline: correct dim must succeed.
     assert!(db.predict("dim_test", vec![1.0, 0.0]).is_some());
@@ -97,7 +98,7 @@ async fn test_v1_duplicate_campaign_rejected() {
     let db = BanditDB::new(wal, "/tmp");
 
     // First create must succeed
-    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0));
+    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb));
 
     // Train it so theta is non-zero
     let (_, iid) = db.predict("dup_test", vec![1.0, 0.0]).unwrap();
@@ -113,7 +114,7 @@ async fn test_v1_duplicate_campaign_rejected() {
 
     // Second create with same id must be rejected
     assert!(
-        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0),
+        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb),
         "Duplicate campaign creation must return false"
     );
 
@@ -145,7 +146,7 @@ async fn test_v2_double_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0);
+    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
     let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
 
@@ -192,7 +193,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0);
+    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
     let theta_before = {
         let c = db.campaigns.read();
@@ -234,7 +235,7 @@ async fn test_v4_reward_range_behaviour() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0);
+    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
     // Non-finite reward: engine must reject it, theta stays at zero
     let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
@@ -279,7 +280,7 @@ async fn test_bandit_learns_context() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0);
+    db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb);
 
     let mobile_context = vec![1.0, 0.0];
     let desktop_context = vec![0.0, 1.0];
@@ -294,6 +295,145 @@ async fn test_bandit_learns_context() {
 
     let (mobile_pred, _) = db.predict("homepage", mobile_context).unwrap();
     assert_eq!(mobile_pred, "layout_a");
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// TS Test 1 — Thompson Sampling learns context-dependent preferences.
+///
+/// Same structure as test_bandit_learns_context but uses ThompsonSampling.
+/// After 100 training rounds the model must reliably prefer the rewarded arm.
+/// Retried up to 3× since TS is stochastic.
+#[tokio::test]
+async fn test_ts_learns_context() {
+    let wal = "/tmp/banditdb_test_ts_learns.jsonl";
+
+    for attempt in 0..3 {
+        let _ = std::fs::remove_file(wal);
+        let db = BanditDB::new(wal, "/tmp");
+        db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+
+        let mobile_context  = vec![1.0, 0.0];
+        let desktop_context = vec![0.0, 1.0];
+
+        for _ in 0..100 {
+            let (arm, iid) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
+            db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
+
+            let (arm, iid) = db.predict("ts_homepage", desktop_context.clone()).unwrap();
+            db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
+        }
+
+        let (mobile_pred, _) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
+        if mobile_pred == "layout_a" {
+            let _ = std::fs::remove_file(wal);
+            return; // passed
+        }
+        if attempt == 2 {
+            assert_eq!(mobile_pred, "layout_a", "TS failed to learn context after 3 attempts");
+        }
+    }
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// TS Test 2 — Thompson Sampling explores all arms with neutral context.
+///
+/// With 3 arms and no rewards, TS must visit all 3 arms across 50 predictions
+/// (stochastic exploration ensures diversity).
+#[tokio::test]
+async fn test_ts_explores() {
+    let wal = "/tmp/banditdb_test_ts_explores.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+    db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..50 {
+        if let Some((arm, _)) = db.predict("ts_explore", vec![1.0, 1.0]) {
+            seen.insert(arm);
+        }
+    }
+
+    assert_eq!(
+        seen.len(), 3,
+        "TS must explore all 3 arms across 50 predictions, but only saw: {:?}", seen
+    );
+
+    let _ = std::fs::remove_file(wal);
+}
+
+/// TS Test 3 — Algorithm field survives checkpoint/recovery round-trip.
+///
+/// Creates a TS campaign, trains it, checkpoints, then recovers. The recovered
+/// campaign must still have algorithm == ThompsonSampling and predict successfully.
+#[tokio::test]
+async fn test_ts_checkpoint_recovery() {
+    let data_dir = "/tmp/banditdb_ts_ckpt_test";
+    let wal_path = format!("{}/bandit_wal.jsonl", data_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    let db = BanditDB::new(&wal_path, data_dir);
+    db.add_campaign("ts_camp", vec!["x".to_string(), "y".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+
+    for i in 0..20_usize {
+        let ctx = vec![(i as f64 * 0.3).sin(), (i as f64 * 0.3).cos()];
+        if let Some((arm, iid)) = db.predict("ts_camp", ctx) {
+            db.reward(&iid, if arm == "x" { 1.0 } else { 0.0 });
+        }
+    }
+
+    db.checkpoint().await.unwrap();
+    drop(db);
+
+    let db2 = BanditDB::new(&wal_path, data_dir);
+
+    {
+        let campaigns = db2.campaigns.read();
+        let camp = campaigns.get("ts_camp").expect("ts_camp must survive recovery");
+        assert_eq!(
+            camp.algorithm, Algorithm::ThompsonSampling,
+            "algorithm field must be ThompsonSampling after checkpoint recovery"
+        );
+    }
+
+    assert!(
+        db2.predict("ts_camp", vec![1.0, 0.0]).is_some(),
+        "predict must work on recovered TS campaign"
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+/// TS Test 4 — LinUCB and Thompson Sampling campaigns coexist without interference.
+#[tokio::test]
+async fn test_linucb_ts_coexist() {
+    let wal = "/tmp/banditdb_test_coexist.jsonl";
+    let _ = std::fs::remove_file(wal);
+
+    let db = BanditDB::new(wal, "/tmp");
+    db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+
+    for _ in 0..20 {
+        if let Some((_, iid)) = db.predict("ucb_camp", vec![1.0, 0.0]) {
+            db.reward(&iid, 1.0);
+        }
+        if let Some((_, iid)) = db.predict("ts_camp", vec![1.0, 0.0]) {
+            db.reward(&iid, 1.0);
+        }
+    }
+
+    assert!(db.predict("ucb_camp", vec![1.0, 0.0]).is_some(), "LinUCB campaign must still predict");
+    assert!(db.predict("ts_camp",  vec![1.0, 0.0]).is_some(), "TS campaign must still predict");
+
+    {
+        let campaigns = db.campaigns.read();
+        assert_eq!(campaigns.get("ucb_camp").unwrap().algorithm, Algorithm::Linucb);
+        assert_eq!(campaigns.get("ts_camp").unwrap().algorithm,  Algorithm::ThompsonSampling);
+    }
 
     let _ = std::fs::remove_file(wal);
 }

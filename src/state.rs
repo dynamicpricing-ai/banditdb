@@ -4,6 +4,17 @@ use std::collections::HashMap;
 
 fn default_alpha() -> f64 { 1.0 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Algorithm {
+    Linucb,
+    ThompsonSampling,
+}
+
+impl Default for Algorithm {
+    fn default() -> Self { Algorithm::Linucb }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArmState {
     pub a_inv: Array2<f64>,
@@ -52,6 +63,8 @@ pub struct CompletedInteraction {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CampaignCheckpoint {
     pub alpha: f64,
+    #[serde(default)]
+    pub algorithm: Algorithm,
     pub arms: HashMap<String, ArmState>,
 }
 
@@ -73,6 +86,8 @@ pub enum DbEvent {
         feature_dim: usize,
         #[serde(default = "default_alpha")]
         alpha: f64,
+        #[serde(default)]
+        algorithm: Algorithm,
     },
     Predicted {
         interaction_id: String,

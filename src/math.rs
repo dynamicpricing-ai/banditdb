@@ -1,5 +1,22 @@
 use crate::state::ArmState;
-use ndarray::{Array1, Axis};
+use ndarray::{Array1, Array2, Axis};
+
+fn cholesky(m: &Array2<f64>) -> Array2<f64> {
+    let n = m.shape()[0];
+    let mut l = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        for j in 0..=i {
+            let mut s = m[[i, j]];
+            for k in 0..j { s -= l[[i, k]] * l[[j, k]]; }
+            if i == j {
+                l[[i, j]] = s.max(0.0).sqrt();
+            } else if l[[j, j]] > 1e-10 {
+                l[[i, j]] = s / l[[j, j]];
+            }
+        }
+    }
+    l
+}
 
 impl ArmState {
     /// Predict the UCB score for a given context
@@ -14,6 +31,18 @@ impl ArmState {
         let exploration_bound = alpha * variance.sqrt();
         
         expected_reward + exploration_bound
+    }
+
+    /// Thompson Sampling score: sample θ̃ ~ N(θ, v²·A⁻¹) and return θ̃·x
+    pub fn score_ts(&self, context: &Array1<f64>, v: f64) -> f64 {
+        use rand::thread_rng;
+        use rand_distr::{Distribution, StandardNormal};
+        let d = self.theta.len();
+        let l = cholesky(&self.a_inv);
+        let mut rng = thread_rng();
+        let z = Array1::from_iter((0..d).map(|_| StandardNormal.sample(&mut rng)));
+        let theta_tilde = &self.theta + &(v * l.dot(&z));
+        theta_tilde.dot(context)
     }
 
     /// Sherman-Morrison Rank-1 Update (Instant Learning)

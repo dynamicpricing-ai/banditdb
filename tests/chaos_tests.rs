@@ -1,4 +1,4 @@
-use banditdb::state::DbEvent;
+use banditdb::state::{Algorithm, DbEvent};
 use banditdb::BanditDB;
 use std::io::Write;
 use std::sync::Arc;
@@ -28,6 +28,7 @@ async fn test_3_1_torn_write_recovery() {
             arms: vec!["arm_a".to_string(), "arm_b".to_string()],
             feature_dim: 2,
             alpha: 1.0,
+            algorithm: Algorithm::Linucb,
         };
         writeln!(file, "{}", serde_json::to_string(&campaign_event).unwrap()).unwrap();
 
@@ -86,7 +87,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0);
+    db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
     let theta_before = {
         let campaigns = db.campaigns.read();
@@ -144,7 +145,7 @@ async fn test_3_3_idempotent_recovery() {
     // Phase 1: train a model and capture its final theta.
     let theta_original = {
         let db = BanditDB::new(wal, "/tmp");
-        db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0);
+        db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
 
         for i in 0..N {
             let angle = i as f64 * 0.1;
@@ -220,7 +221,7 @@ async fn test_3_4_concurrent_export_safety() {
     let _ = std::fs::remove_file(format!("{}/checkpoint.json", data_dir));
 
     let db = Arc::new(BanditDB::new(wal, data_dir));
-    db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3, 1.0);
+    db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();

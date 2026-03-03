@@ -1,4 +1,4 @@
-use crate::state::{ArmState, CampaignCheckpoint, CheckpointData, CompletedInteraction, DbEvent, InteractionRecord};
+use crate::state::{Algorithm, ArmState, CampaignCheckpoint, CheckpointData, CompletedInteraction, DbEvent, InteractionRecord};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
@@ -20,6 +20,7 @@ pub enum WalMessage {
 
 pub struct Campaign {
     pub alpha: f64,
+    pub algorithm: Algorithm,
     pub arms: RwLock<HashMap<String, ArmState>>,
 }
 
@@ -157,7 +158,7 @@ impl BanditDB {
                 for (campaign_id, camp) in checkpoint.campaigns {
                     self.campaigns.write().insert(
                         campaign_id,
-                        Campaign { alpha: camp.alpha, arms: RwLock::new(camp.arms) },
+                        Campaign { alpha: camp.alpha, algorithm: camp.algorithm, arms: RwLock::new(camp.arms) },
                     );
                 }
             }
@@ -213,7 +214,7 @@ impl BanditDB {
                     .iter()
                     .map(|(arm_id, state)| (arm_id.clone(), state.clone()))
                     .collect();
-                (id.clone(), CampaignCheckpoint { alpha: campaign.alpha, arms: arms_snapshot })
+                (id.clone(), CampaignCheckpoint { alpha: campaign.alpha, algorithm: campaign.algorithm.clone(), arms: arms_snapshot })
             }).collect()
         };
 
@@ -319,14 +320,14 @@ impl BanditDB {
     /// The unified math & memory updater
     fn apply_event_to_memory(&self, event: DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha } => {
+            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm } => {
                 let mut arms_map = HashMap::new();
                 for arm in arms {
                     arms_map.insert(arm, ArmState::new(feature_dim));
                 }
                 self.campaigns.write().insert(
                     campaign_id,
-                    Campaign { alpha, arms: RwLock::new(arms_map) },
+                    Campaign { alpha, algorithm, arms: RwLock::new(arms_map) },
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs } => {
@@ -363,11 +364,11 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64) -> bool {
+    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64, algorithm: Algorithm) -> bool {
         if self.campaigns.read().contains_key(campaign_id) {
             return false;
         }
-        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha };
+        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm };
         self.apply_event_to_memory(event.clone());
         let _ = self.event_tx.send(WalMessage::Event(event));
         true
@@ -394,7 +395,10 @@ impl BanditDB {
             let mut best_arm = String::new();
             let mut max_score = f64::NEG_INFINITY;
             for (arm_id, state) in arms.iter() {
-                let score = state.score(&context_arr, campaign.alpha);
+                let score = match campaign.algorithm {
+                    Algorithm::Linucb           => state.score(&context_arr, campaign.alpha),
+                    Algorithm::ThompsonSampling => state.score_ts(&context_arr, campaign.alpha),
+                };
                 if score > max_score {
                     max_score = score;
                     best_arm = arm_id.clone();
