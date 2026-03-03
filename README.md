@@ -226,10 +226,10 @@ BanditDB is validated against the **MovieLens 100K** dataset using the standard 
 |--------|-------|
 | Train interactions | 83,428 |
 | Test interactions | 9,270 |
-| Replay match rate | 17.6% |
+| Replay match rate | 14.6% |
 | Random baseline avg reward | 0.5606 |
-| BanditDB avg reward | 0.6467 |
-| **Lift over random** | **+15.3%** |
+| BanditDB avg reward | 0.6541 |
+| **Lift over random** | **+16.7%** |
 
 Reproduce the benchmark:
 ```bash

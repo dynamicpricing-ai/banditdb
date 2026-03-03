@@ -5,8 +5,8 @@ MovieLens 100K -> BanditDB WAL Converter
 
 Downloads MovieLens 100K and converts the rating log into two BanditDB WAL files:
 
-  data/movielens_train.jsonl  -- first 80% of ratings (chronological)
-  data/movielens_test.jsonl   -- remaining 20%, for replay evaluation
+  data/movielens_train.jsonl  -- first 90% of ratings (chronological)
+  data/movielens_test.jsonl   -- remaining 10%, for replay evaluation
 
 Bandit problem formulation
 --------------------------
@@ -19,9 +19,10 @@ Bandit problem formulation
 Loading the train WAL into BanditDB
 ------------------------------------
   docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
+  docker exec <container> rm -f /data/checkpoint.json
   docker compose restart
 
-The server replays the WAL on startup, training the model on all 80K interactions.
+The server replays the WAL on startup, training the model on all 83K interactions.
 Run benchmark/movielens/evaluate.py afterwards to measure CTR vs. random baseline.
 
 Usage
@@ -31,7 +32,6 @@ Usage
 """
 
 import json
-import os
 import sys
 import uuid
 import zipfile
@@ -51,7 +51,7 @@ CAMPAIGN_ID = "movielens_recommendation"
 ARMS        = ["Drama", "Comedy", "Action", "Romance", "Thriller", "Adventure"]
 N_OCC       = 21          # u.occupation has 21 occupations
 FEATURE_DIM = 24          # 1 (bias) + 1 (age) + 1 (gender) + 21 (occ one-hot)
-ALPHA       = 1.0
+ALPHA       = 1.5
 TRAIN_RATIO = 0.9
 
 ML100K_URL  = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
@@ -229,7 +229,7 @@ def main():
     if skipped:
         print(f"Skipped {skipped:,} ratings (user or genre not in scope).")
 
-    # Chronological 80/20 split
+    # Chronological 90/10 split
     split = int(len(interactions) * TRAIN_RATIO)
     train = interactions[:split]
     test  = interactions[split:]
@@ -272,6 +272,7 @@ def main():
     print(f"\n  Next steps:")
     print(f"  1. Load train WAL into BanditDB:")
     print(f"     docker cp {TRAIN_WAL} <container>:/data/bandit_wal.jsonl")
+    print(f"     docker exec <container> rm -f /data/checkpoint.json")
     print(f"     docker compose restart")
     print(f"  2. Run replay evaluation:")
     print(f"     python benchmark/movielens/evaluate.py")
