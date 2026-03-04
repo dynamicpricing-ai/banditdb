@@ -107,28 +107,42 @@ A complete predict→reward cycle for a **sleep improvement** campaign.
 Arms: `decrease_temperature`, `decrease_light`, `decrease_noise`.
 Context vector: `[sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]`
 
+**Create** the campaign (run once):
 ```bash
-# Create the campaign (run once)
 curl -s -X POST http://localhost:8080/campaign \
   -H "X-Api-Key: secret" -H "Content-Type: application/json" \
   -d '{"campaign_id":"sleep","arms":["decrease_temperature","decrease_light","decrease_noise"],"feature_dim":5}'
-# "Campaign Created"
+```
+```
+"Campaign Created"
+```
 
-# List campaigns
+**List** campaigns:
+```bash
 curl -s http://localhost:8080/campaigns -H "X-Api-Key: secret"
-# [{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3}]
+```
+```json
+[{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3}]
+```
 
-# Predict — female, 35yo, 75 kg, moderately active, bedtime 23:00
+**Predict** — female, 35yo, 75 kg, moderately active, bedtime 23:00:
+```bash
 curl -s -X POST http://localhost:8080/predict \
   -H "X-Api-Key: secret" -H "Content-Type: application/json" \
   -d '{"campaign_id":"sleep","context":[1.0, 0.35, 0.50, 0.60, 0.96]}'
-# {"arm_id":"decrease_temperature","interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
+```
+```json
+{"arm_id":"decrease_temperature","interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
+```
 
-# Reward — sleep quality improved by 80% (use interaction_id from predict response)
+**Reward** — sleep quality improved by 80% (use `interaction_id` from the predict response):
+```bash
 curl -s -X POST http://localhost:8080/reward \
   -H "X-Api-Key: secret" -H "Content-Type: application/json" \
   -d '{"interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","reward":0.80}'
-# "OK"
+```
+```
+"OK"
 ```
 
 After enough predict→reward cycles the model converges: patients with similar profiles are routed to the arm that consistently produced the highest improvement ratio.
