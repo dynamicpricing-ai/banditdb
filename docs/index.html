@@ -322,18 +322,31 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
       <div class="grid md:grid-cols-2 gap-14 items-center">
 
         <div class="order-2 md:order-1">
-          <pre><code class="language-json">{
-  "mcpServers": {
-    "banditdb": {
-      "command": "banditdb-mcp",
-      "env": {
-        "BANDITDB_URL": "http://localhost:8080",
-        "BANDITDB_API_KEY": "your-key"
-      }
-    }
-  }
-}</code></pre>
-          <div class="mt-5 grid grid-cols-2 gap-2">
+          <div class="space-y-3 mb-6">
+            <div>
+              <div class="text-xs text-zinc-500 font-mono mb-1.5">1. install the sdk</div>
+              <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3 font-mono text-base min-w-0">
+                  <span class="text-zinc-500 shrink-0">$</span>
+                  <span class="text-zinc-100 truncate">pip install banditdb-python</span>
+                </div>
+                <button onclick="copy(this, 'pip install banditdb-python')"
+                        class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs text-zinc-500 font-mono mb-1.5">2. register with claude</div>
+              <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+                  <span class="text-zinc-500 shrink-0">$</span>
+                  <span class="text-zinc-100 truncate">claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080</span>
+                </div>
+                <button onclick="copy(this, 'claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080')"
+                        class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+              </div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
               <div class="text-zinc-100 font-medium text-base mb-1">get_intuition</div>
               <div class="text-sm text-zinc-500">Ask which action to take</div>
@@ -360,8 +373,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
             Standard LLM agents are stateless — if they make a bad decision, they repeat it tomorrow. BanditDB's built-in MCP server gives your entire agent swarm shared persistent memory.
           </p>
           <p class="text-zinc-300 leading-relaxed mb-5">
-            Add four lines to <code class="text-orange-400 bg-zinc-900 px-1.5 py-0.5 rounded text-xs">claude_desktop_config.json</code>.
-            Your agents now have five native tools to get intuition, record outcomes, and inspect learning state.
+            Two commands and BanditDB is a native tool in Claude. Your agents can get intuition, record outcomes, and inspect learning state — no config file editing required.
           </p>
           <p class="text-zinc-400">
             Every decision made by any agent in the network improves the routing for all future agents.
