@@ -19,7 +19,7 @@ Standard databases store *what happened*. **BanditDB stores *what works*.**
 
 Every time an agent succeeds, a patient responds, or a customer converts, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
 
-Under the hood, BanditDB is a lock-free database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling** — entirely in memory, updating its mathematical intuition in microseconds using Sherman-Morrison rank-1 matrix updates. The math is hidden. The results are not.
+Under the hood, BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling** — entirely in memory. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a Sherman-Morrison rank-1 matrix update. The math is hidden. The results are not.
 
 ### The Problem It Solves
 Building a self-learning personalisation engine today requires stitching together Kafka (event streaming), Redis (state), a Python worker (matrix math), and Postgres (logs).
@@ -269,7 +269,7 @@ Use `benchmark/movielens/offline_sweep.py` to sweep alpha, reward type, and feat
 ## 🏗 Architecture Under the Hood
 
 *   **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
-*   **State:** Lock-free concurrency using `parking_lot` RwLocks. Tens of thousands of predictions can be read concurrently across all CPU cores without blocking.
+*   **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; μs write locks for reward updates only.
 *   **Memory:** Delayed rewards are mapped to historical context vectors via `moka`, a blazing-fast concurrent TTL cache that prevents OOM crashes.
 *   **Durability:** Asynchronous MPSC channels pipe interactions to a JSON-lines WAL for perfect crash recovery without impacting API latency.
 
