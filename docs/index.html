@@ -181,7 +181,27 @@
             <p class="text-base text-zinc-400 leading-relaxed">Name the campaign, list the arms, and set the context dimension. BanditDB initialises the weight matrices and is immediately ready to serve predictions.</p>
           </div>
           <div class="flex-1 min-w-0">
-            <pre><code class="language-python">db.create_campaign(
+            <div class="flex items-center gap-1 mb-3">
+              <button onclick="switchTab(this)" data-group="step-1" data-tab="curl"
+                      class="tab-btn bg-zinc-700 text-white px-3 py-1 text-xs font-mono rounded transition-colors">curl</button>
+              <button onclick="switchTab(this)" data-group="step-1" data-tab="python"
+                      class="tab-btn text-zinc-500 hover:text-zinc-300 px-3 py-1 text-xs font-mono rounded transition-colors">python</button>
+            </div>
+            <div class="tab-panel" data-group="step-1" data-tab="curl">
+              <pre><code class="language-bash">curl -X POST http://localhost:8080/campaign \
+  -H "Content-Type: application/json" \
+  -d '{
+    "campaign_id": "sleep",
+    "arms": [
+      "decrease_temperature",
+      "decrease_light",
+      "decrease_noise"
+    ],
+    "feature_dim": 5
+  }'</code></pre>
+            </div>
+            <div class="tab-panel hidden" data-group="step-1" data-tab="python">
+              <pre><code class="language-python">db.create_campaign(
     "sleep",
     arms=[
         "decrease_temperature",
@@ -190,12 +210,13 @@
     ],
     feature_dim=5,
 )</code></pre>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Loop connector -->
-      <div class="flex items-center gap-4 mb-10">
+      <div class="flex items-center gap-4 mb-5">
         <div class="flex-1 border-t border-dashed border-zinc-700"></div>
         <div class="flex items-center gap-2 text-sm text-zinc-500 font-mono bg-zinc-900 border border-zinc-800 rounded-full px-4 py-1.5">
           <span class="text-orange-400">↻</span>
@@ -215,7 +236,25 @@
             <p class="text-base text-zinc-400 leading-relaxed">Pass the participant's context vector. Get back the recommended intervention and an interaction ID to track it.</p>
           </div>
           <div class="flex-1 min-w-0">
-            <pre><code class="language-python">context = [
+            <div class="flex items-center gap-1 mb-3">
+              <button onclick="switchTab(this)" data-group="step-2" data-tab="curl"
+                      class="tab-btn bg-zinc-700 text-white px-3 py-1 text-xs font-mono rounded transition-colors">curl</button>
+              <button onclick="switchTab(this)" data-group="step-2" data-tab="python"
+                      class="tab-btn text-zinc-500 hover:text-zinc-300 px-3 py-1 text-xs font-mono rounded transition-colors">python</button>
+            </div>
+            <div class="tab-panel" data-group="step-2" data-tab="curl">
+              <pre><code class="language-bash">curl -X POST http://localhost:8080/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "campaign_id": "sleep",
+    "context": [1.0, 0.35, 0.50, 0.60, 0.96]
+  }'
+
+# → {"arm_id": "decrease_temperature",
+#    "interaction_id": "a1b2c3..."}</code></pre>
+            </div>
+            <div class="tab-panel hidden" data-group="step-2" data-tab="python">
+              <pre><code class="language-python">context = [
     1.0,   # female
     0.35,  # age 35
     0.50,  # 75 kg
@@ -225,11 +264,12 @@
 
 arm, iid = db.predict("sleep", context)
 # → "decrease_temperature"</code></pre>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Step 3: Act -->
+      <!-- Step 3: Act (no BanditDB API call — your application code) -->
       <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8 mb-5">
         <div class="flex flex-col md:flex-row gap-8 items-start">
           <div class="md:w-72 shrink-0">
@@ -260,7 +300,24 @@ apply_intervention(user_id, arm)
             <p class="text-base text-zinc-400 leading-relaxed">Report the outcome the next morning. Matrices update in microseconds. Every subsequent participant gets a smarter recommendation.</p>
           </div>
           <div class="flex-1 min-w-0">
-            <pre><code class="language-python"># next morning: PSQI scores
+            <div class="flex items-center gap-1 mb-3">
+              <button onclick="switchTab(this)" data-group="step-4" data-tab="curl"
+                      class="tab-btn bg-zinc-700 text-white px-3 py-1 text-xs font-mono rounded transition-colors">curl</button>
+              <button onclick="switchTab(this)" data-group="step-4" data-tab="python"
+                      class="tab-btn text-zinc-500 hover:text-zinc-300 px-3 py-1 text-xs font-mono rounded transition-colors">python</button>
+            </div>
+            <div class="tab-panel" data-group="step-4" data-tab="curl">
+              <pre><code class="language-bash">curl -X POST http://localhost:8080/reward \
+  -H "Content-Type: application/json" \
+  -d '{
+    "interaction_id": "a1b2c3...",
+    "reward": 0.27
+  }'
+
+# → "OK"</code></pre>
+            </div>
+            <div class="tab-panel hidden" data-group="step-4" data-tab="python">
+              <pre><code class="language-python"># next morning: PSQI scores
 score_before = 62
 score_after  = 79
 
@@ -268,63 +325,9 @@ reward = (score_after - score_before) / score_before
 # reward = 0.27
 
 db.reward(iid, reward)</code></pre>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Code example -->
-  <section class="px-6 py-36 section-divider">
-    <div class="max-w-5xl mx-auto">
-      <div class="grid md:grid-cols-2 gap-14 items-center">
-
-        <div>
-          <div class="text-orange-400 text-base font-semibold uppercase tracking-wider mb-4">Quick Start</div>
-          <h2 class="text-4xl font-bold mb-5">AI Agent LLM Routing</h2>
-          <p class="text-zinc-300 leading-relaxed mb-7">
-            AI agents blindly routing every task to GPT-4o spend 60× more than necessary. BanditDB learns — from every agent in your swarm — exactly which model wins for which type of task.
-          </p>
-          <div class="space-y-4">
-            <div class="flex items-start gap-3">
-              <span class="text-orange-500 shrink-0 mt-0.5">→</span>
-              <span class="text-zinc-300">Every agent shares the same learned intuition</span>
-            </div>
-            <div class="flex items-start gap-3">
-              <span class="text-orange-500 shrink-0 mt-0.5">→</span>
-              <span class="text-zinc-300">Converges to optimal routing without configuration</span>
-            </div>
-            <div class="flex items-start gap-3">
-              <span class="text-orange-500 shrink-0 mt-0.5">→</span>
-              <span class="text-zinc-300">Works for pricing, personalisation, clinical protocols — any decision with measurable outcomes</span>
             </div>
           </div>
         </div>
-
-        <div>
-          <pre><code class="language-python">from banditdb import Client
-
-db = Client("http://localhost:8080",
-            api_key="your-secret-key")
-
-db.create_campaign(
-    "llm_routing",
-    arms=["gpt-4o", "claude-haiku", "llama-3"],
-    feature_dim=3,
-)
-
-context = [
-    prompt_length / 1000,
-    has_math * 1.0,
-    budget_remaining / 100,
-]
-
-model, iid = db.predict("llm_routing", context)
-
-result = run_task(model, prompt)
-db.reward(iid, 1.0 if result.success else 0.0)</code></pre>
-        </div>
-
       </div>
     </div>
   </section>
@@ -387,28 +390,15 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
       <div class="grid md:grid-cols-2 gap-14 items-center">
 
         <div class="order-2 md:order-1">
-          <div class="space-y-3 mb-6">
-            <div>
-              <div class="text-xs text-zinc-500 font-mono mb-1.5">1. install the sdk</div>
-              <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-                <div class="flex items-center gap-3 font-mono text-base min-w-0">
-                  <span class="text-zinc-500 shrink-0">$</span>
-                  <span class="text-zinc-100 truncate">pip install banditdb-python</span>
-                </div>
-                <button onclick="copy(this, 'pip install banditdb-python')"
-                        class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+          <div class="mb-6">
+            <div class="text-xs text-zinc-500 font-mono mb-1.5">register with claude</div>
+            <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+                <span class="text-zinc-500 shrink-0">$</span>
+                <span class="text-zinc-100 truncate">claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080</span>
               </div>
-            </div>
-            <div>
-              <div class="text-xs text-zinc-500 font-mono mb-1.5">2. register with claude</div>
-              <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-                <div class="flex items-center gap-3 font-mono text-sm min-w-0">
-                  <span class="text-zinc-500 shrink-0">$</span>
-                  <span class="text-zinc-100 truncate">claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080</span>
-                </div>
-                <button onclick="copy(this, 'claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080')"
-                        class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
-              </div>
+              <button onclick="copy(this, 'claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080')"
+                      class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
             </div>
           </div>
           <div class="grid grid-cols-2 gap-2">
@@ -673,6 +663,19 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
 
   <script>
     hljs.highlightAll();
+    function switchTab(btn) {
+      var group = btn.dataset.group;
+      var tab = btn.dataset.tab;
+      document.querySelectorAll('.tab-btn[data-group="' + group + '"]').forEach(function(b) {
+        var active = b.dataset.tab === tab;
+        b.classList.toggle('bg-zinc-700', active);
+        b.classList.toggle('text-white', active);
+        b.classList.toggle('text-zinc-500', !active);
+      });
+      document.querySelectorAll('.tab-panel[data-group="' + group + '"]').forEach(function(p) {
+        p.classList.toggle('hidden', p.dataset.tab !== tab);
+      });
+    }
     function copy(btn, text) {
       navigator.clipboard.writeText(text).then(() => {
         const original = btn.textContent;
