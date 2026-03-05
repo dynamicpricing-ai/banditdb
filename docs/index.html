@@ -165,45 +165,90 @@
   <section id="how-it-works" class="px-6 py-36 section-divider">
     <div class="max-w-5xl mx-auto">
       <h2 class="text-4xl font-bold text-center mb-3">How it works</h2>
-      <p class="text-zinc-400 text-center mb-16 text-base">Three API calls. That's the entire integration.</p>
+      <p class="text-zinc-400 text-center mb-16 text-base">Four API calls — one to define, three to learn.</p>
 
-      <div class="grid md:grid-cols-3 gap-10">
-
-        <div class="text-center">
-          <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">1</div>
-          <h3 class="font-semibold text-xl mb-3">Predict</h3>
-          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Pass a context vector. Get back the optimal action and an interaction ID.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
-            arm, iid = db.predict(<br />
-            &nbsp;&nbsp;"campaign",<br />
-            &nbsp;&nbsp;context,<br />
-            )
+      <!-- Step 1: Create (run once) -->
+      <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-8 mb-5">
+        <div class="flex flex-col md:flex-row gap-8 items-start">
+          <div class="md:w-72 shrink-0">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg shrink-0">1</div>
+              <div>
+                <h3 class="font-semibold text-xl leading-tight">Create</h3>
+                <span class="text-xs font-mono text-zinc-400 bg-zinc-800 border border-zinc-700 rounded-full px-2.5 py-0.5 mt-1 inline-block">run once at startup</span>
+              </div>
+            </div>
+            <p class="text-base text-zinc-400 leading-relaxed">Name the campaign, list the arms, and set the context dimension. BanditDB initialises the weight matrices and is immediately ready to serve predictions.</p>
+          </div>
+          <div class="flex-1 min-w-0">
+            <pre><code class="language-python">db.create_campaign(
+    "sleep",
+    arms=[
+        "decrease_temperature",
+        "decrease_light",
+        "decrease_noise",
+    ],
+    feature_dim=5,
+)</code></pre>
           </div>
         </div>
+      </div>
+
+      <!-- Loop connector -->
+      <div class="flex items-center gap-4 mb-10">
+        <div class="flex-1 border-t border-dashed border-zinc-700"></div>
+        <div class="flex items-center gap-2 text-sm text-zinc-500 font-mono bg-zinc-900 border border-zinc-800 rounded-full px-4 py-1.5">
+          <span class="text-orange-400">↻</span>
+          <span>loops with every participant</span>
+        </div>
+        <div class="flex-1 border-t border-dashed border-zinc-700"></div>
+      </div>
+
+      <!-- Steps 2–4 -->
+      <div class="grid md:grid-cols-3 gap-8">
 
         <div class="text-center">
           <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">2</div>
-          <h3 class="font-semibold text-xl mb-3">Act</h3>
-          <p class="text-sm text-zinc-400 mb-5 leading-relaxed">An agent routes to the best model. A patient gets the most promising treatment. A customer sees the winning offer.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
-            result = run_task(arm, prompt)<br />
-            <br />
-            outcome = treat(patient, arm)<br />
-            <br />
-            revenue = show_offer(user, arm)
-          </div>
+          <h3 class="font-semibold text-xl mb-3">Predict</h3>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Pass the participant's context vector. Get back the recommended intervention and an interaction ID to track it.</p>
+          <pre><code class="language-python">context = [
+    1.0,   # female
+    0.35,  # age 35
+    0.50,  # 75 kg
+    0.60,  # active
+    0.96,  # bedtime 23:00
+]
+
+arm, iid = db.predict(
+    "sleep", context
+)
+# → "decrease_temperature"</code></pre>
         </div>
 
         <div class="text-center">
           <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">3</div>
+          <h3 class="font-semibold text-xl mb-3">Act</h3>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Apply the chosen intervention. BanditDB holds the context in cache, ready to receive the reward when the outcome is known.</p>
+          <pre><code class="language-python"># arm = "decrease_temperature"
+apply_intervention(
+    user_id, arm
+)
+# lower bedroom temperature
+# to 17°C for tonight</code></pre>
+        </div>
+
+        <div class="text-center">
+          <div class="w-14 h-14 bg-orange-500/10 border border-orange-500/40 rounded-xl flex items-center justify-center text-orange-400 font-bold text-lg mx-auto mb-5">4</div>
           <h3 class="font-semibold text-xl mb-3">Reward</h3>
-          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Report the outcome. Matrices update in microseconds. The next request is smarter.</p>
-          <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-left font-mono text-base text-zinc-200">
-            db.reward(<br />
-            &nbsp;&nbsp;iid,<br />
-            &nbsp;&nbsp;1.0 if success else 0.0,<br />
-            )
-          </div>
+          <p class="text-base text-zinc-400 mb-5 leading-relaxed">Report the outcome the next morning. Matrices update in microseconds. Every subsequent participant benefits.</p>
+          <pre><code class="language-python"># next morning: PSQI scores
+score_before = 62
+score_after  = 79
+
+reward = (score_after - score_before
+         ) / score_before  # → 0.27
+
+db.reward(iid, reward)</code></pre>
         </div>
 
       </div>
