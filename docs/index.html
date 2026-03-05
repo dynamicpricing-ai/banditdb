@@ -41,6 +41,7 @@
       </div>
       <div class="flex items-center gap-6 text-base text-zinc-400">
         <a href="#how-it-works" class="hover:text-white transition-colors hidden sm:block">How it works</a>
+        <a href="#examples"     class="hover:text-white transition-colors hidden sm:block">Examples</a>
         <a href="#agents"       class="hover:text-white transition-colors hidden sm:block">For Agents</a>
         <a href="https://github.com/simeonlukov/banditdb" class="hover:text-white transition-colors hidden sm:block">GitHub</a>
         <a href="https://hub.docker.com/r/simeonlukov/banditdb"
@@ -421,6 +422,107 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
           <h3 class="font-semibold text-lg mb-2">Beyond A/B Tests</h3>
           <p class="text-base text-zinc-400 leading-relaxed">Stop splitting traffic equally. BanditDB routes more users to the winning variant as it learns — automatically.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Examples -->
+  <section id="examples" class="px-6 py-36 bg-zinc-900 border-t border-zinc-800">
+    <div class="max-w-5xl mx-auto">
+      <div class="text-orange-400 text-base font-semibold uppercase tracking-wider text-center mb-4">Walkthroughs</div>
+      <h2 class="text-4xl font-bold text-center mb-3">Learn by example</h2>
+      <p class="text-zinc-400 text-center mb-14 text-lg">Four end-to-end examples, ordered from simplest to most advanced.</p>
+
+      <div class="grid sm:grid-cols-2 gap-5">
+
+        <!-- 1: Sleep — curl only, beginner -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/05_sleep_improvement.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-orange-500/40 hover:border-orange-500 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="inline-flex items-center gap-1.5 bg-orange-500/10 border border-orange-500/30 text-orange-400 text-xs font-mono rounded-full px-3 py-1 mb-4">★ Start here</div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">🌙</span>
+                <h3 class="font-semibold text-lg">Sleep Improvement</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Temperature, light, or noise — which adjustment works best for each person? A pure curl walkthrough, no SDK needed.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">1</span>
+          </div>
+          <div class="flex items-center gap-2 mt-auto">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">curl</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">3 arms</span>
+            <span class="ml-auto text-orange-400 group-hover:text-orange-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
+        <!-- 2: E-Commerce — Python SDK, 3 features -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/03_ecommerce_upsell_optimization.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="h-7 mb-4"></div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">🛒</span>
+                <h3 class="font-semibold text-lg">E-Commerce Upsell</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Discount, free shipping, or nothing — learns which checkout offer closes each shopper without giving margin away.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">2</span>
+          </div>
+          <div class="flex items-center gap-2 mt-auto">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">python</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">3 arms · 3 features</span>
+            <span class="ml-auto text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
+        <!-- 3: Dynamic Pricing — temporal bandit, market context -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/01_dynamic_pricing_sell_through.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="h-7 mb-4"></div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">💰</span>
+                <h3 class="font-semibold text-lg">Dynamic Pricing</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Hold margin or liquidate? Learns from sell-through rate, holiday proximity, and competitor pricing — context describes the market, not the user.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">3</span>
+          </div>
+          <div class="flex items-center gap-2 mt-auto">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">python</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">4 arms · 5 features</span>
+            <span class="ml-auto text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
+        <!-- 4: Clinical Trials — advanced domain -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/04_adaptive_clinical_trials.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="h-7 mb-4"></div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">🏥</span>
+                <h3 class="font-semibold text-lg">Adaptive Clinical Trials</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Routes patients toward the most effective treatment arm in real time as evidence accumulates — no waiting months for interim analysis.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">4</span>
+          </div>
+          <div class="flex items-center gap-2 mt-auto">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">python</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">3 arms · 4 features</span>
+            <span class="ml-auto text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
       </div>
     </div>
   </section>
