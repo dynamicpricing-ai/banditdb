@@ -143,28 +143,44 @@ After enough predict→reward cycles the model converges: patients with similar 
 
 ## 📖 Quick Start
 
-### AI Agent LLM Routing (Cost Optimisation)
-**The Goal:** AI agents blindly routing every task to GPT-4o spend 60× more than necessary. Simple summarisation, classification, and Q&A tasks are solved equally well by a model that costs $0.25/1M tokens instead of $15.00. BanditDB learns — from every agent in your swarm — exactly which model wins for which type of task.
+### Sleep Improvement
+**The Goal:** One-size-fits-all sleep advice ignores individual physiology. A 25-year-old male athlete and a 60-year-old sedentary woman respond differently to the same environmental change. BanditDB learns those differences automatically — routing each participant to the intervention most likely to work for *their* profile, improving with every reported outcome.
 
 ```python
 from banditdb import Client
 
 db = Client("http://localhost:8080", api_key="your-secret-key")
 
-# 1. Register the routing campaign once
-db.create_campaign("llm_routing", ["gpt-4o", "claude-haiku", "llama-3"], feature_dim=3)
+# 1. Create the campaign once at startup
+db.create_campaign(
+    "sleep",
+    arms=["decrease_temperature", "decrease_light", "decrease_noise"],
+    feature_dim=5,
+)
 
-# 2. An agent receives a task. Build its context vector.
-# Context: [prompt_length_normalized, math_complexity, budget_cents_normalized]
-task_context = [0.2, 0.9, 0.1]
+# 2. A participant is ready for tonight's intervention. Build their context vector.
+# Context: [sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]
+context = [
+    1.0,   # female
+    0.35,  # age 35
+    0.50,  # 75 kg
+    0.60,  # moderately active
+    0.96,  # bedtime 23:00
+]
 
-# 3. Ask BanditDB which model to use
-model, interaction_id = db.predict("llm_routing", task_context)
-print(f"Routing to: {model}")  # e.g., "claude-haiku"
+# 3. Ask BanditDB which intervention to apply
+arm, interaction_id = db.predict("sleep", context)
+print(f"Tonight's intervention: {arm}")  # e.g., "decrease_temperature"
 
-# 4. Run the task. Report success or failure as a reward.
-# Every agent in the swarm contributes to — and benefits from — this shared memory.
-db.reward(interaction_id, reward=1.0)  # 0.0 if the model failed the task
+# 4. Apply the intervention, then reward the next morning with a PSQI-based score
+apply_intervention(user_id, arm)
+
+# next morning: sleep quality improved from 62 → 79
+score_before = 62
+score_after  = 79
+reward = (score_after - score_before) / score_before  # → 0.27
+
+db.reward(interaction_id, reward)
 ```
 
 ### Native Agent Tool Use (MCP)
