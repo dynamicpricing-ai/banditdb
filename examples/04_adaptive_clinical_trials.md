@@ -105,6 +105,23 @@ This is the canonical strength of adaptive trials: the model can surface subgrou
 
 ---
 
+## Convergence Estimate
+
+**~400 patients with completed follow-ups** to measurably outperform uniform random arm allocation. At 80% follow-up compliance — realistic for outpatient trials — enroll approximately 500 patients to reach that threshold.
+
+| Phase | Patients with follow-ups | What the model knows |
+|---|---|---|
+| Exploration | 0–120 | Arm allocation is near-uniform. Functionally equivalent to a standard fixed-allocation RCT. |
+| Early signal | 120–250 | Biomarker A effect begins to appear for `drug_A`. Placebo arm starts diverging for biomarker-negative patients. |
+| Measurable lift | ~400 | Cumulative clinical improvement score from BanditDB exceeds uniform random allocation. |
+| Subgroup convergence | ~700 | Both biomarker subgroups (A+/B−, A−/B+) are reliably routed. Age × blood pressure interactions become visible. |
+
+**Assumptions:** Reward is continuous (improvement score in [0, 1]) so every patient who completes follow-up provides a signal regardless of whether they responded. The estimate assumes a 3–6 week follow-up window and 80% completion. Missing follow-ups do not corrupt the model — they simply delay learning for those patients.
+
+The most critical operational parameter is **TTL configuration**: a 3-week follow-up window requires `BANDITDB_REWARD_TTL_SECS` set to at least 1,814,400 (21 days). Set it conservatively to 45 days (3,888,000) to absorb late assessments without losing the context vector.
+
+---
+
 ## Related Examples
 
 - [`01_dynamic_pricing_sell_through.md`](./01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit)

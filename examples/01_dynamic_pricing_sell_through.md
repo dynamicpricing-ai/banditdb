@@ -149,6 +149,23 @@ The model also picks up second-order interactions that rule-based systems miss �
 
 ---
 
+## Convergence Estimate
+
+**~500 hourly pricing cycles** (~3 weeks of operation) to measurably outperform random pricing on common market states. Rare market states require 2–3 full seasons to fully converge.
+
+| Phase | Pricing cycles | What the model knows |
+|---|---|---|
+| Exploration | 0–150 | Arms selected roughly equally. Revenue roughly matches a fixed-price baseline. |
+| Early signal | 150–350 | Weekday/weekend distinction and the high sell-through → full price pattern begin to emerge. |
+| Measurable lift | ~500 | Cumulative margin captured exceeds what uniform random pricing would have delivered on common market states. |
+| Rare-state convergence | 2–3 full seasons | Holiday weekend dynamics and competitor undercut on peak days require repeated seasonal exposure. |
+
+**Assumptions:** Every hourly cycle closes the feedback loop — units sold and achieved margin are always observable after the hour ends. This is the most favourable observability condition of all four examples: the reward is continuous and 100% of interactions are rewarded, so every cycle provides a signal with no dropout risk.
+
+The main constraint is not sample size but **rare market states**: a holiday weekend coinciding with a competitor undercut may appear only 4–6 times across a single season. The model learns common weekday and mid-season patterns quickly; edge-case combinations require seasonal repetition to be reliably learned.
+
+---
+
 ## Related Examples
 
 - [`03_ecommerce_upsell_optimization.md`](./03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward

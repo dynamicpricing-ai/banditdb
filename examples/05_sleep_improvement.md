@@ -93,6 +93,23 @@ After enough predict→reward cycles the model converges on profile-specific int
 
 ---
 
+## Convergence Estimate
+
+**~300 rewarded outcomes** to measurably outperform random arm assignment.
+
+| Phase | Rewarded outcomes | What the model knows |
+|---|---|---|
+| Exploration | 0–100 | Arms selected roughly equally. Functionally identical to random. |
+| Early signal | 100–200 | Temperature vs noise distinction begins to emerge for extreme profiles (young active male vs older sedentary female). |
+| Measurable lift | ~300 | Cumulative reward from BanditDB exceeds what uniform random assignment would have delivered. |
+| Stable routing | ~500 | Per-profile recommendations are consistent. New users with unseen feature combinations still trigger exploration. |
+
+**Assumptions:** The reward is continuous and nearly always observed — any participant who submits a morning sleep score closes the loop. This estimate assumes ≥ 70% next-morning reporting compliance. At 50% compliance, enroll approximately 430 participants to collect 300 rewarded outcomes.
+
+The main risk is not sample size but **reward delay**: if participants forget to report the following morning, BanditDB cannot update. Set `BANDITDB_REWARD_TTL_SECS` to at least 64800 (18 hours) to hold the context in cache until the report arrives.
+
+---
+
 ## Related Examples
 
 - [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — delayed rewards in a high-stakes medical context

@@ -96,6 +96,23 @@ The model also discovers interaction effects that a rule-based system would miss
 
 ---
 
+## Convergence Estimate
+
+**~1,500 checkout interactions** — at a 50% completion rate, yielding ~750 binary reward signals — to measurably outperform random assignment.
+
+| Phase | Checkout interactions | What the model knows |
+|---|---|---|
+| Exploration | 0–300 | Arms selected roughly equally per user segment. No meaningful pattern yet. |
+| Early signal | 300–800 | Mobile vs desktop distinction begins to appear. Returning customer preference for `no_offer` starts to emerge. |
+| Measurable lift | ~1,500 | Cumulative revenue from BanditDB exceeds uniform random assignment. |
+| Stable routing | ~3,000 | All three shopper segments (mobile/new, desktop/new, returning) are reliably routed. |
+
+**Assumptions:** 50% checkout completion rate (purchase or abandon events are always observed). If your completion rate is lower — for example 30%, because many sessions time out before a final action — scale proportionally: you will need approximately 2,500 interactions to collect 750 reward signals.
+
+The binary reward (1.0 / 0.0) is the highest-noise signal across these four examples. Every interaction either converts or it does not — there is no partial signal. This is why convergence requires more total interactions than examples with continuous rewards, even though the feature space here is the simplest (3 features).
+
+---
+
 ## Related Examples
 
 - [`01_dynamic_pricing_sell_through.md`](./01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit) rather than user-state context
