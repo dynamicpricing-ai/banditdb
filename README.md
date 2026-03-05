@@ -332,4 +332,4 @@ Use `benchmark/movielens/offline_sweep.py` to sweep alpha, reward type, and feat
 ## 🤝 Contributing
 BanditDB is an open-source project. Whether you want to add Proximal Policy Optimization (PPO) for Version 2, optimize the SIMD math routines, or build SDKs for Go and TypeScript, PRs are welcome! 
 
-Visit [banditdb.com](https://banditdb.com) to read the full documentation.
+Visit [banditdb](https://dynamicpricing-ai.github.io/banditdb/) to read the full documentation.
