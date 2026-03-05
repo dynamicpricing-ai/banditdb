@@ -121,7 +121,7 @@ curl -s http://localhost:8080/campaigns
 ```
 > `[{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3}]`
 
-**Predict** — female, 35yo, 75 kg, moderately active, bedtime 23:00:
+**Predict** — female, 35yo, 75 kg, moderately active, bedtime 23:00: - see above how the context was calculated out of the actual values to fit in [0-1] interval.
 ```bash
 curl -s -X POST http://localhost:8080/predict \
   -H "Content-Type: application/json" \
