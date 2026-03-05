@@ -472,9 +472,9 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
           <p class="text-base text-zinc-400 leading-relaxed">Learn which upsell offer converts best for which cart composition and customer history.</p>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">📊</div>
-          <h3 class="font-semibold text-lg mb-2">Beyond A/B Tests</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Stop splitting traffic equally. BanditDB routes more users to the winning variant as it learns — automatically.</p>
+          <div class="text-2xl mb-4">⚖️</div>
+          <h3 class="font-semibold text-lg mb-2">Legal Intake Routing</h3>
+          <p class="text-base text-zinc-400 leading-relaxed">Route inbound matters to the right response — consult, intake form, referral, or decline — based on case value, capacity, and conflict risk.</p>
         </div>
       </div>
     </div>
@@ -485,7 +485,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
     <div class="max-w-5xl mx-auto">
       <div class="text-orange-400 text-base font-semibold uppercase tracking-wider text-center mb-4">Walkthroughs</div>
       <h2 class="text-4xl font-bold text-center mb-3">Learn by example</h2>
-      <p class="text-zinc-400 text-center mb-14 text-lg">Four end-to-end examples, ordered from simplest to most advanced.</p>
+      <p class="text-zinc-400 text-center mb-14 text-lg">Five end-to-end examples, ordered from simplest to most advanced.</p>
 
       <div class="grid sm:grid-cols-2 gap-5">
 
@@ -539,7 +539,32 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
           </div>
         </a>
 
-        <!-- 3: Dynamic Pricing — temporal bandit, market context -->
+        <!-- 3: Law Firm Client Intake — multi-valued reward, delayed outcome -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/06_law_firm_client_intake.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="h-7 mb-4"></div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">⚖️</span>
+                <h3 class="font-semibold text-lg">Law Firm Client Intake</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Consult, intake form, refer, or decline — learns which response maximises matter value for each enquiry profile, accounting for capacity and conflict risk.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">3</span>
+          </div>
+          <div class="text-xs text-zinc-500 border-t border-zinc-800 pt-4">
+            Measurable lift after <span class="text-orange-400/80">~600 intake decisions</span> at 50% outcome rate — reward is multi-valued, not binary.
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">python</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">4 arms · 5 features</span>
+            <span class="ml-auto text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
+        <!-- 4: Dynamic Pricing — temporal bandit, market context -->
         <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/01_dynamic_pricing_sell_through.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
@@ -552,7 +577,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
               </div>
               <p class="text-base text-zinc-400 leading-relaxed">Hold margin or liquidate? Learns from sell-through rate, holiday proximity, and competitor pricing — context describes the market, not the user.</p>
             </div>
-            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">3</span>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">4</span>
           </div>
           <div class="text-xs text-zinc-500 border-t border-zinc-800 pt-4">
             Measurable lift after <span class="text-orange-400/80">~500 hourly cycles</span> on common states — rare holiday combinations require 2–3 full seasons.
@@ -564,7 +589,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
           </div>
         </a>
 
-        <!-- 4: Clinical Trials — advanced domain -->
+        <!-- 5: Clinical Trials — advanced domain -->
         <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/04_adaptive_clinical_trials.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
@@ -577,7 +602,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
               </div>
               <p class="text-base text-zinc-400 leading-relaxed">Routes patients toward the most effective treatment arm in real time as evidence accumulates — no waiting months for interim analysis.</p>
             </div>
-            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">4</span>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">5</span>
           </div>
           <div class="text-xs text-zinc-500 border-t border-zinc-800 pt-4">
             Measurable lift after <span class="text-orange-400/80">~400 completed follow-ups</span> — enroll ~500 patients to account for 80% compliance.
