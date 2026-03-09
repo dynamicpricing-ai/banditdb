@@ -312,7 +312,10 @@ The final optimized context uses a **44-Dimensional vector** combining binned de
 
 Reproduce the benchmark:
 ```bash
-python benchmark/movielens/convert.py            # download & convert MovieLens 100K
+python benchmark/movielens/convert.py   # download & convert MovieLens 100K
+docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
+docker exec <container> rm -f /data/checkpoint.json
+docker compose restart
 python benchmark/movielens/evaluate_improved.py  # run heavily optimized causal evaluation loop
 ```
 
