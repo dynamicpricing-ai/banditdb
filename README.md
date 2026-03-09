@@ -298,27 +298,25 @@ grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id
 
 BanditDB is validated against the **MovieLens 100K** dataset using the standard [replay method](https://arxiv.org/abs/1003.5956) (Li et al. 2010) — the same unbiased offline estimator used in the original LinUCB paper.
 
-**Setup:** 92,698 ratings → 6 genre arms (Drama, Comedy, Action, Romance, Thriller, Adventure), 24-dimensional user context (bias + age + gender + 21-way one-hot occupation), 90/10 chronological split. Reward signal: binary (liked = rating ≥ 4).
+**Setup:** 92,698 ratings → 6 genre arms (Drama, Comedy, Action, Romance, Thriller, Adventure). 
+The final optimized context uses a **44-Dimensional vector** combining binned demographics, causal user history (like rates + exposure counts), feature-crossing (age × genre history), and movie era preferences. The model uses **Dynamic Per-User Alpha Decay** to balance exploration across the 90/10 chronological split.
 
 | Metric | Value |
 |--------|-------|
 | Train interactions | 83,428 |
 | Test interactions | 9,270 |
-| Replay match rate | 14.6% |
+| Replay match rate | 7.3% |
 | Random baseline avg reward | 0.5606 |
-| BanditDB avg reward | 0.6541 |
-| **Lift over random** | **+16.7%** |
+| BanditDB avg reward | 0.6984 |
+| **Lift over random** | **+24.6%** |
 
 Reproduce the benchmark:
 ```bash
-python benchmark/movielens/convert.py   # download & convert MovieLens 100K
-docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
-docker exec <container> rm -f /data/checkpoint.json
-docker compose restart
-python benchmark/movielens/evaluate.py
+python benchmark/movielens/convert.py            # download & convert MovieLens 100K
+python benchmark/movielens/evaluate_improved.py  # run heavily optimized causal evaluation loop
 ```
 
-Use `benchmark/movielens/offline_sweep.py` to sweep alpha, reward type, and feature sets offline (no server required) before committing to a full Docker validation run.
+Use `benchmark/movielens/offline_sweep.py` or create your own custom scripts to sweep alpha, reward type, and feature sets offline before deploying entirely to a live BanditDB workflow.
 
 ---
 
