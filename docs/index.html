@@ -486,7 +486,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
     <div class="max-w-5xl mx-auto">
       <div class="text-orange-400 text-base font-semibold uppercase tracking-wider text-center mb-4">Walkthroughs</div>
       <h2 class="text-4xl font-bold text-center mb-3">Learn by example</h2>
-      <p class="text-zinc-400 text-center mb-14 text-lg">Five end-to-end examples, ordered from simplest to most advanced.</p>
+      <p class="text-zinc-400 text-center mb-14 text-lg">Six end-to-end examples, ordered from simplest to most advanced.</p>
 
       <div class="grid sm:grid-cols-2 gap-5">
 
@@ -590,7 +590,32 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
           </div>
         </a>
 
-        <!-- 5: Clinical Trials — advanced domain -->
+        <!-- 5: Prompt Optimisation — LLM evals in production -->
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/07_prompt_optimisation_llm_evals.md"
+           target="_blank" rel="noopener"
+           class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="h-7 mb-4"></div>
+              <div class="flex items-center gap-2.5 mb-2">
+                <span class="text-xl">🤖</span>
+                <h3 class="font-semibold text-lg">Prompt Optimisation</h3>
+              </div>
+              <p class="text-base text-zinc-400 leading-relaxed">Learns which prompt strategy — zero-shot, chain-of-thought, few-shot, structured — produces the best response for each task type. Your evals run in production, not in a spreadsheet.</p>
+            </div>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">5</span>
+          </div>
+          <div class="text-xs text-zinc-500 border-t border-zinc-800 pt-4">
+            Measurable lift after <span class="text-orange-400/80">~400 requests</span> — LLM-as-judge gives near-100% reward observability.
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">python</span>
+            <span class="bg-zinc-900 text-zinc-500 rounded-full px-2.5 py-0.5 text-xs font-mono">4 arms · 5 features</span>
+            <span class="ml-auto text-zinc-500 group-hover:text-zinc-300 font-medium transition-colors text-sm">Read walkthrough →</span>
+          </div>
+        </a>
+
+        <!-- 6: Clinical Trials — advanced domain -->
         <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/04_adaptive_clinical_trials.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
@@ -603,7 +628,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
               </div>
               <p class="text-base text-zinc-400 leading-relaxed">Routes patients toward the most effective treatment arm in real time as evidence accumulates — no waiting months for interim analysis.</p>
             </div>
-            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">5</span>
+            <span class="text-6xl font-extrabold text-zinc-800 group-hover:text-zinc-700 transition-colors leading-none shrink-0">6</span>
           </div>
           <div class="text-xs text-zinc-500 border-t border-zinc-800 pt-4">
             Measurable lift after <span class="text-orange-400/80">~400 completed follow-ups</span> — enroll ~500 patients to account for 80% compliance.
