@@ -238,15 +238,16 @@ impl BanditDB {
         let export_dir = format!("{}/exports", self.data_dir);
         fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
 
-        let mut predicted: HashMap<String, (String, String, Vec<f64>, u64)> = HashMap::new();
-        let mut rewarded:  HashMap<String, (f64, u64)>                      = HashMap::new();
+        // (campaign_id, arm_id, context, arm_propensities, timestamp_secs)
+        let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
+        let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
 
         if let Ok(wal_file) = File::open(&self.wal_path) {
             let limited = wal_file.take(wal_offset);
             for line in BufReader::new(limited).lines().flatten() {
                 match serde_json::from_str::<DbEvent>(&line) {
-                    Ok(DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs }) => {
-                        predicted.insert(interaction_id, (campaign_id, arm_id, context, timestamp_secs));
+                    Ok(DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities }) => {
+                        predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
                     }
                     Ok(DbEvent::Rewarded { interaction_id, reward, timestamp_secs }) => {
                         rewarded.insert(interaction_id, (reward, timestamp_secs));
@@ -261,8 +262,9 @@ impl BanditDB {
         let mut matched: HashSet<String> = HashSet::new();
 
         for (iid, (reward, rewarded_at)) in &rewarded {
-            if let Some((campaign_id, arm_id, context, predicted_at)) = predicted.get(iid) {
+            if let Some((campaign_id, arm_id, context, arm_propensities, predicted_at)) = predicted.get(iid) {
                 matched.insert(iid.clone());
+                let propensity = arm_propensities.as_ref().and_then(|m| m.get(arm_id.as_str())).copied();
                 by_campaign.entry(campaign_id.clone()).or_default().push(CompletedInteraction {
                     interaction_id: iid.clone(),
                     arm_id:         arm_id.clone(),
@@ -270,6 +272,7 @@ impl BanditDB {
                     reward:         *reward,
                     predicted_at:   *predicted_at,
                     rewarded_at:    *rewarded_at,
+                    propensity,
                 });
             }
         }
@@ -291,11 +294,12 @@ impl BanditDB {
         for (iid, record) in self.interactions.iter() {
             if !matched.contains(iid.as_ref()) {
                 let event = DbEvent::Predicted {
-                    interaction_id: iid.as_ref().clone(),
-                    campaign_id:    record.campaign_id.clone(),
-                    arm_id:         record.arm_id.clone(),
-                    context:        record.context.to_vec(),
-                    timestamp_secs: record.timestamp_secs,
+                    interaction_id:   iid.as_ref().clone(),
+                    campaign_id:      record.campaign_id.clone(),
+                    arm_id:           record.arm_id.clone(),
+                    context:          record.context.to_vec(),
+                    timestamp_secs:   record.timestamp_secs,
+                    arm_propensities: record.arm_propensities.clone(),
                 };
                 let _ = self.event_tx.send(WalMessage::Event(event));
                 reemit_count += 1;
@@ -330,7 +334,7 @@ impl BanditDB {
                     Campaign { alpha, algorithm, arms: RwLock::new(arms_map) },
                 );
             }
-            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs } => {
+            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
                 if let Some(campaign) = self.campaigns.read().get(&campaign_id) {
                     if let Some(arm) = campaign.arms.write().get_mut(&arm_id) {
                         arm.prediction_count += 1;
@@ -340,7 +344,7 @@ impl BanditDB {
                     interaction_id,
                     InteractionRecord {
                         campaign_id, arm_id, context: Array1::from_vec(context),
-                        probability: 0.0, timestamp_secs,
+                        arm_propensities, timestamp_secs,
                     },
                 );
             }
@@ -379,7 +383,7 @@ impl BanditDB {
         // apply_event_to_memory. apply_event_to_memory acquires arms.write() to
         // increment prediction_count — a same-thread read→write on the same RwLock
         // is always a deadlock with parking_lot, so no guard may be live at that point.
-        let best_arm = {
+        let (best_arm, arm_propensities) = {
             let campaigns = self.campaigns.read();
             let campaign = campaigns.get(campaign_id)?;
             let context_arr = Array1::from_vec(context.clone());
@@ -392,19 +396,27 @@ impl BanditDB {
                 }
             }
 
-            let mut best_arm = String::new();
-            let mut max_score = f64::NEG_INFINITY;
-            for (arm_id, state) in arms.iter() {
+            // Collect all arm scores in one pass.
+            let scores: Vec<(String, f64)> = arms.iter().map(|(arm_id, state)| {
                 let score = match campaign.algorithm {
                     Algorithm::Linucb           => state.score(&context_arr, campaign.alpha),
                     Algorithm::ThompsonSampling => state.score_ts(&context_arr, campaign.alpha),
                 };
-                if score > max_score {
-                    max_score = score;
-                    best_arm = arm_id.clone();
-                }
-            }
-            best_arm
+                (arm_id.clone(), score)
+            }).collect();
+
+            let best_arm = scores.iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(id, _)| id.clone())
+                .unwrap_or_default();
+
+            // Propensity: softmax over UCB scores for LinUCB. None for Thompson Sampling.
+            let arm_propensities = match campaign.algorithm {
+                Algorithm::Linucb => Some(softmax_propensities(&scores)),
+                Algorithm::ThompsonSampling => None,
+            };
+
+            (best_arm, arm_propensities)
             // campaigns and arms guards dropped here
         };
 
@@ -412,7 +424,7 @@ impl BanditDB {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let event = DbEvent::Predicted {
             interaction_id: interaction_id.clone(), campaign_id: campaign_id.to_string(),
-            arm_id: best_arm.clone(), context, timestamp_secs: now,
+            arm_id: best_arm.clone(), context, timestamp_secs: now, arm_propensities,
         };
 
         self.apply_event_to_memory(event.clone());
@@ -497,11 +509,12 @@ pub fn write_campaign_parquet(
 }
 
 fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize) -> Result<DataFrame, String> {
-    let interaction_ids: Vec<&str> = interactions.iter().map(|r| r.interaction_id.as_str()).collect();
-    let arm_ids:         Vec<&str> = interactions.iter().map(|r| r.arm_id.as_str()).collect();
-    let rewards:         Vec<f64>  = interactions.iter().map(|r| r.reward).collect();
-    let predicted_ats:   Vec<i64>  = interactions.iter().map(|r| r.predicted_at as i64).collect();
-    let rewarded_ats:    Vec<i64>  = interactions.iter().map(|r| r.rewarded_at  as i64).collect();
+    let interaction_ids: Vec<&str>      = interactions.iter().map(|r| r.interaction_id.as_str()).collect();
+    let arm_ids:         Vec<&str>      = interactions.iter().map(|r| r.arm_id.as_str()).collect();
+    let rewards:         Vec<f64>       = interactions.iter().map(|r| r.reward).collect();
+    let predicted_ats:   Vec<i64>       = interactions.iter().map(|r| r.predicted_at as i64).collect();
+    let rewarded_ats:    Vec<i64>       = interactions.iter().map(|r| r.rewarded_at  as i64).collect();
+    let propensities:    Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
 
     let mut series: Vec<Series> = vec![
         Series::new("interaction_id".into(), interaction_ids),
@@ -509,6 +522,7 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
         Series::new("reward".into(),         rewards),
         Series::new("predicted_at".into(),   predicted_ats),
         Series::new("rewarded_at".into(),    rewarded_ats),
+        Series::new("propensity".into(),     propensities),
     ];
 
     for f in 0..feature_dim {
@@ -518,4 +532,15 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
+}
+
+/// Compute softmax-normalised propensities over arm UCB scores.
+/// Subtracts the max for numerical stability before exponentiating.
+fn softmax_propensities(scores: &[(String, f64)]) -> HashMap<String, f64> {
+    let max_score = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = scores.iter().map(|(_, s)| (s - max_score).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    scores.iter().zip(exps.iter())
+        .map(|((arm_id, _), exp)| (arm_id.clone(), exp / sum))
+        .collect()
 }

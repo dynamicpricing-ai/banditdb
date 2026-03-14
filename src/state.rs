@@ -2,6 +2,8 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_none_map() -> Option<HashMap<String, f64>> { None }
+
 fn default_alpha() -> f64 { 1.0 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -40,11 +42,11 @@ impl ArmState {
 
 #[derive(Clone, Debug)]
 pub struct InteractionRecord {
-    pub campaign_id:   String,
-    pub arm_id:        String,
-    pub context:       Array1<f64>,
-    pub probability:   f64,
-    pub timestamp_secs: u64,
+    pub campaign_id:      String,
+    pub arm_id:           String,
+    pub context:          Array1<f64>,
+    pub arm_propensities: Option<HashMap<String, f64>>,
+    pub timestamp_secs:   u64,
 }
 
 /// One completed prediction→reward pair, ready to write as a flat Parquet row.
@@ -56,6 +58,9 @@ pub struct CompletedInteraction {
     pub reward:         f64,
     pub predicted_at:   u64,
     pub rewarded_at:    u64,
+    /// Softmax-normalised UCB propensity of the chosen arm (LinUCB only).
+    /// None for Thompson Sampling campaigns (propensity logging added in a future iteration).
+    pub propensity:     Option<f64>,
 }
 
 // --- Checkpoint structs ---
@@ -96,6 +101,11 @@ pub enum DbEvent {
         context:        Vec<f64>,
         #[serde(default)]
         timestamp_secs: u64,
+        /// Softmax-normalised UCB propensity for every arm (LinUCB only).
+        /// Absent in WAL records written before propensity logging was added — deserialises to None.
+        /// None for Thompson Sampling campaigns.
+        #[serde(default = "default_none_map")]
+        arm_propensities: Option<HashMap<String, f64>>,
     },
     Rewarded {
         interaction_id: String,
