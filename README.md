@@ -253,6 +253,8 @@ We know Data Scientists hate black boxes. While BanditDB learns instantly in mem
 
 Every prediction will eventually appear in the Parquet file even if its reward arrives hours later. BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.
 
+Each row includes a **`propensity`** column — the softmax-normalised probability that the logging policy selected the chosen arm given the context (LinUCB campaigns; `null` for Thompson Sampling). This is the `P(a | x)` term required by Inverse Propensity Scoring (IPS) estimators. It answers the question you can't answer without it: *"what would my cumulative reward have been with `alpha=2.0` instead of `1.0`?"* — without running a live experiment.
+
 ```python
 import polars as pl
 import requests
@@ -268,7 +270,7 @@ requests.post("http://localhost:8080/checkpoint", headers=HEADERS)
 df = pl.read_parquet("/data/exports/llm_routing.parquet")
 
 # Flat schema — one row per completed prediction→reward pair:
-# interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 | feature_1 | ...
+# interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity | feature_0 | feature_1 | ...
 print(df.head())
 print(df.columns)
 ```
