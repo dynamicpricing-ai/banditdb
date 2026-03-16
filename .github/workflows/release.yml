@@ -1,19 +1,18 @@
-name: Publish Docker Image
+name: Release
 
 on:
   push:
     tags:
       - 'v*'
 
+# ── Job 1: Docker image (linux/amd64 + linux/arm64) ──────────────────────────
 jobs:
-  build-and-push:
+  docker:
+    name: Publish Docker image
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # QEMU lets the x86 GitHub runner emulate ARM64 for cross-platform builds
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -26,7 +25,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Produces two tags: simeonlukov/banditdb:1.2.3 and simeonlukov/banditdb:latest
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -44,6 +42,97 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache layers in GitHub Actions cache — cuts rebuild time significantly
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+# ── Job 2: Native binaries ────────────────────────────────────────────────────
+  binaries:
+    name: Build binary (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+            use_cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # cross: Docker-based cross-compiler for aarch64-linux on x86 runners
+      - name: Install cross
+        if: matrix.use_cross == true
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: matrix.use_cross != true
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }}
+
+      # ── Package ──────────────────────────────────────────────────────────────
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          BIN=target/${{ matrix.target }}/release/banditdb
+          ARCHIVE=banditdb-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          tar -czf "$ARCHIVE" -C "$(dirname $BIN)" "$(basename $BIN)"
+          echo "ASSET=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $bin  = "target/${{ matrix.target }}/release/banditdb.exe"
+          $name = "banditdb-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path $bin -DestinationPath $name
+          echo "ASSET=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          retention-days: 1
+
+# ── Job 3: Create GitHub Release and attach all binaries ─────────────────────
+  release:
+    name: Create GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz\n*.zip"
+          generate_release_notes: true

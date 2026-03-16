@@ -37,14 +37,29 @@ Building a self-learning personalisation engine today requires stitching togethe
 
 ## 🚀 Installation
 
-BanditDB consists of the **Rust Engine** (deployed via Docker) and the **Python SDK** (installed via pip).
+BanditDB consists of the **Rust Engine** and the **Python SDK** (installed via pip).
 
 ### 1. Start the Database Engine
 
-**Quickstart (no config needed):**
+Three ways to get the engine running — pick whichever fits your environment:
+
+**Binary (fastest, no Docker required):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh
+banditdb
+```
+
+**Docker:**
 ```bash
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
 ```
+
+**Build from source:**
+```bash
+cargo build --release
+./target/release/banditdb
+```
+
 ```bash
 curl http://localhost:8080/health   # {"status":"ok"}
 ```
