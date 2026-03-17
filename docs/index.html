@@ -96,7 +96,7 @@
         <span class="text-zinc-700">·</span>
         <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-white transition-colors">🐍 PyPI</a>
         <span class="text-zinc-700">·</span>
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-white transition-colors">AGPL-3.0</a>
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-white transition-colors">Apache-2.0</a>
       </div>
 
     </div>
@@ -645,8 +645,8 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
     <div class="max-w-5xl mx-auto">
       <div class="grid grid-cols-2 md:grid-cols-5 gap-5">
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-5xl font-extrabold text-orange-400 mb-3">50MB</div>
-          <div class="text-sm text-zinc-400">Replaces Kafka + Redis + Python + Postgres</div>
+          <div class="text-5xl font-extrabold text-orange-400 mb-3">~11MB</div>
+          <div class="text-sm text-zinc-400">Native binary for Linux, macOS, and Windows</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
           <div class="text-5xl font-extrabold text-orange-400 mb-3">μs</div>
@@ -673,8 +673,20 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
     <div class="max-w-xl mx-auto">
       <h2 class="text-5xl font-extrabold mb-5">Start in one command</h2>
       <p class="text-zinc-400 mb-10 text-lg">No sign-up. No cloud account. No configuration required.</p>
+
+      <p class="text-xs text-zinc-500 uppercase tracking-widest mb-2">Binary — Linux, macOS, Windows</p>
+      <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-4 flex items-center justify-between gap-3 max-w-md mx-auto mb-5">
+        <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+          <span class="text-zinc-500 shrink-0">$</span>
+          <span class="text-zinc-100 truncate">curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh</span>
+        </div>
+        <button onclick="copy(this, 'curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh')"
+                class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+      </div>
+
+      <p class="text-xs text-zinc-500 uppercase tracking-widest mb-2">Docker</p>
       <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-4 flex items-center justify-between gap-3 max-w-md mx-auto mb-8">
-        <div class="flex items-center gap-3 font-mono text-base min-w-0">
+        <div class="flex items-center gap-3 font-mono text-sm min-w-0">
           <span class="text-zinc-500 shrink-0">$</span>
           <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
         </div>
@@ -706,7 +718,7 @@ db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
         <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-zinc-300 transition-colors">GitHub</a>
         <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-zinc-300 transition-colors">Docker Hub</a>
         <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-zinc-300 transition-colors">PyPI</a>
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-zinc-300 transition-colors">AGPL-3.0</a>
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-zinc-300 transition-colors">Apache-2.0</a>
       </div>
       <div class="text-xs">Built with Rust in New York City. © 2026 Simeon Lukov.</div>
     </div>

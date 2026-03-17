@@ -7,7 +7,7 @@
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
-  [![License](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+  [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
   [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](#)
 
   <br />
@@ -37,7 +37,7 @@ Building a self-learning personalisation engine today requires stitching togethe
 
 ## 🚀 Installation
 
-BanditDB consists of the **Rust Engine** and the **Python SDK** (installed via pip).
+BanditDB consists of the **Rust Engine** (~11MB native binary for Linux, macOS, and Windows — also available as a Docker image) and the **Python SDK** (installed via pip).
 
 ### 1. Start the Database Engine
 

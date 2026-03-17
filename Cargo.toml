@@ -3,6 +3,7 @@ name = "banditdb"
 version = "0.1.0"
 edition = "2021"
 description = "An ultra-fast Contextual Bandit Database"
+license = "Apache-2.0"
 
 [dependencies]
 ndarray = { version = "0.15", features = ["serde"] }
