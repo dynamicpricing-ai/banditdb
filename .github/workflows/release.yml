@@ -78,6 +78,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
       # cross: Docker-based cross-compiler for aarch64-linux on x86 runners
       - name: Install cross
         if: matrix.use_cross == true
