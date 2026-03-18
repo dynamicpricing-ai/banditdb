@@ -116,6 +116,29 @@ Error responses are always structured: `{"error": "<message>"}` with an appropri
 
 ---
 
+## 🌐 Live Sandbox
+
+Want to try BanditDB without installing anything? A public sandbox runs at **`http://3.122.120.58`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
+
+| Campaign | Arms | Context |
+|----------|------|---------|
+| `sleep` | `decrease_temperature`, `decrease_light`, `decrease_noise` | `[sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]` |
+| `prompt_strategy` | `zero_shot`, `chain_of_thought`, `few_shot`, `structured_output` | `[task_complexity, domain, input_length_norm, session_turn_norm, user_expertise]` |
+| `client_intake` | `schedule_consultation`, `send_intake_form`, `refer_to_partner_firm`, `decline` | `[case_value_norm, matter_complexity, org_size_norm, conflict_risk, capacity_norm]` |
+
+```bash
+# List live campaigns
+curl -s http://3.122.120.58/campaigns -H "X-Api-Key: banditdb-demo"
+
+# Get a prediction from the sleep campaign
+curl -s -X POST http://3.122.120.58/predict \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: banditdb-demo" \
+  -d '{"campaign_id":"sleep","context":[1.0, 0.35, 0.50, 0.60, 0.96]}'
+```
+
+---
+
 ## 🖥 Try It — curl
 
 A complete predict→reward cycle for a **sleep improvement** campaign.
