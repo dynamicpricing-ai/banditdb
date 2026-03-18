@@ -118,7 +118,7 @@ Error responses are always structured: `{"error": "<message>"}` with an appropri
 
 ## 🌐 Live Sandbox
 
-Want to try BanditDB without installing anything? A public sandbox runs at **`http://3.122.120.58`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
+Want to try BanditDB without installing anything? A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
 
 | Campaign | Arms | Context |
 |----------|------|---------|
@@ -128,10 +128,10 @@ Want to try BanditDB without installing anything? A public sandbox runs at **`ht
 
 ```bash
 # List live campaigns
-curl -s http://3.122.120.58/campaigns -H "X-Api-Key: banditdb-demo"
+curl -s https://sandbox.banditdb.com/campaigns -H "X-Api-Key: banditdb-demo"
 
 # Get a prediction from the sleep campaign
-curl -s -X POST http://3.122.120.58/predict \
+curl -s -X POST https://sandbox.banditdb.com/predict \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: banditdb-demo" \
   -d '{"campaign_id":"sleep","context":[1.0, 0.35, 0.50, 0.60, 0.96]}'
