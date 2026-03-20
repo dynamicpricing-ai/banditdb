@@ -26,6 +26,8 @@ pub struct ArmState {
     pub prediction_count: u64,
     #[serde(default)]
     pub reward_count: u64,
+    #[serde(default)]
+    pub total_reward: f64,
 }
 
 impl ArmState {
@@ -36,6 +38,7 @@ impl ArmState {
             theta: Array1::zeros(dim),
             prediction_count: 0,
             reward_count: 0,
+            total_reward: 0.0,
         }
     }
 }

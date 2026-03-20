@@ -292,7 +292,7 @@
               <span>·</span>
               <span>${s.reward_count} rewards</span>
               <span>·</span>
-              <span>${rewardPct}% rate</span>
+              <span>${s.avg_reward != null ? 'avg reward ' + s.avg_reward.toFixed(3) : 'no rewards yet'}</span>
             </div>
           </div>
         `;

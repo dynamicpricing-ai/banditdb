@@ -80,6 +80,7 @@ struct ArmInfo {
     theta_norm: f64,
     prediction_count: u64,
     reward_count: u64,
+    avg_reward: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +195,11 @@ async fn handle_campaign_info(
             theta_norm: state.theta.dot(&state.theta).sqrt(),
             prediction_count: state.prediction_count,
             reward_count: state.reward_count,
+            avg_reward: if state.reward_count > 0 {
+                Some(state.total_reward / state.reward_count as f64)
+            } else {
+                None
+            },
         });
     }
 
