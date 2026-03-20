@@ -135,7 +135,7 @@ def seed_client_intake(n=300):
 if __name__ == "__main__":
     random.seed(42)
     print(f"Seeding sandbox at {URL}...\n")
-    seed_sleep(300)
+    seed_sleep(750)
     print()
     seed_prompt_strategy(300)
     print()

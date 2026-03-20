@@ -146,7 +146,7 @@
           </div>
           <ul class="space-y-2.5 text-base text-zinc-400">
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> In-memory matrix updates (microseconds)</li>
-            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> LinUCB &amp; Linear Thompson Sampling algorithms</li>
+            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Built-in exploration algorithms, tunable per campaign</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Write-Ahead Log for crash recovery</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> TTL cache for delayed rewards</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Propensity-logged Parquet export</li>
@@ -330,59 +330,6 @@ db.reward(iid, reward)</code></pre>
     </div>
   </section>
 
-  <!-- Algorithm picker -->
-  <section class="px-6 py-36 section-divider">
-    <div class="max-w-5xl mx-auto">
-      <h2 class="text-4xl font-bold text-center mb-3">Two algorithms. One API.</h2>
-      <p class="text-zinc-400 text-center mb-14 text-lg">Pick the algorithm at campaign creation. Everything else stays identical.
-        <br>BanditDB provides persistence, concurrency, and APIs for production decision systems.
-      </p>
-
-      <div class="grid md:grid-cols-2 gap-6 mb-8">
-
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-7">
-          <div class="flex items-center gap-3 mb-5">
-            <div class="w-9 h-9 bg-orange-500/10 border border-orange-500/40 rounded-lg flex items-center justify-center text-orange-400 font-bold text-sm shrink-0">UCB</div>
-            <div>
-              <div class="font-semibold">LinUCB</div>
-              <div class="text-sm text-zinc-500 font-mono mt-0.5">algorithm="linucb"</div>
-            </div>
-            <span class="ml-auto text-xs bg-zinc-800 text-zinc-300 px-2.5 py-1 rounded-full">Default</span>
-          </div>
-          <p class="text-base text-zinc-300 leading-relaxed mb-5">
-            Adds a deterministic upper confidence bound to every arm score. Exploration is tunable via <code class="text-orange-400 text-xs">alpha</code> — sweep it offline to calibrate.
-          </p>
-          <div class="text-base text-zinc-400 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-4">
-            score = θ·x + α·√(x·A⁻¹·x)
-          </div>
-        </div>
-
-        <div class="bg-zinc-900 border border-orange-500/30 rounded-xl p-7">
-          <div class="flex items-center gap-3 mb-5">
-            <div class="w-9 h-9 bg-orange-500/10 border border-orange-500/40 rounded-lg flex items-center justify-center text-orange-400 font-bold text-sm shrink-0">TS</div>
-            <div>
-              <div class="font-semibold">Linear Thompson Sampling</div>
-              <div class="text-sm text-zinc-500 font-mono mt-0.5">algorithm="thompson_sampling"</div>
-            </div>
-          </div>
-          <p class="text-base text-zinc-300 leading-relaxed mb-5">
-            Samples θ̃ from the Bayesian posterior on every prediction. No alpha sweep needed — <code class="text-orange-400 text-xs">alpha=1.0</code> is the natural posterior width. Concurrent users automatically diversify arm coverage.
-          </p>
-          <div class="text-base text-zinc-400 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-4">
-            θ̃ ~ N(θ,&nbsp;α²·A⁻¹)&nbsp;&nbsp;score = θ̃·x
-          </div>
-        </div>
-
-      </div>
-
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-        <pre><code class="language-python">db.create_campaign("ucb_offers", arms=["a", "b", "c"], feature_dim=4, alpha=1.5)
-
-db.create_campaign("ts_offers", arms=["a", "b", "c"], feature_dim=4,
-                   algorithm="thompson_sampling")</code></pre>
-      </div>
-    </div>
-  </section>
 
   <!-- For AI agents (MCP) -->
   <section id="agents" class="px-6 py-36 section-divider">
