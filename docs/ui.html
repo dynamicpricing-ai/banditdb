@@ -5,35 +5,46 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BanditDB Sandbox</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .bar { transition: width 0.6s ease; }
+    .fade-in { animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    input[type=range] { accent-color: #f97316; }
+  </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans antialiased">
 
   <!-- Nav -->
-  <nav class="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
+  <nav class="border-b border-zinc-800/60 px-6 py-3.5 flex items-center justify-between sticky top-0 bg-zinc-950/95 backdrop-blur z-10">
     <div class="flex items-center gap-3">
-      <span class="text-xl">🎰</span>
-      <span class="font-bold text-lg">BanditDB</span>
-      <span class="text-zinc-600 text-sm">/ sandbox</span>
+      <span class="text-lg">🎰</span>
+      <a href="https://banditdb.com" class="font-bold text-base hover:text-orange-400 transition-colors">BanditDB</a>
+      <span class="text-zinc-700">/</span>
+      <span class="text-zinc-400 text-sm">sandbox</span>
     </div>
-    <div class="flex items-center gap-2">
-      <span id="health-dot" class="w-2 h-2 rounded-full bg-zinc-600"></span>
-      <span id="health-text" class="text-xs text-zinc-500">checking...</span>
+    <div class="flex items-center gap-4">
+      <div class="flex items-center gap-2">
+        <span id="health-dot" class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span>
+        <span id="health-text" class="text-xs text-zinc-500">checking...</span>
+      </div>
+      <a href="https://github.com/dynamicpricing-ai/banditdb"
+         class="text-xs text-zinc-500 hover:text-white transition-colors hidden sm:block">★ GitHub</a>
     </div>
   </nav>
 
   <!-- Tabs -->
-  <div class="border-b border-zinc-800 px-6">
-    <div class="flex gap-6">
+  <div class="border-b border-zinc-800/60 px-6">
+    <div class="flex gap-1">
       <button onclick="showTab('campaigns')" id="tab-campaigns"
-              class="py-3 text-sm font-medium border-b-2 border-orange-500 text-white transition-colors">
+              class="px-4 py-3 text-sm font-medium border-b-2 border-orange-500 text-white transition-colors">
         Campaigns
       </button>
       <button onclick="showTab('tryit')" id="tab-tryit"
-              class="py-3 text-sm font-medium border-b-2 border-transparent text-zinc-400 hover:text-white transition-colors">
+              class="px-4 py-3 text-sm font-medium border-b-2 border-transparent text-zinc-500 hover:text-white transition-colors">
         Try It
       </button>
       <button onclick="showTab('about')" id="tab-about"
-              class="py-3 text-sm font-medium border-b-2 border-transparent text-zinc-400 hover:text-white transition-colors">
+              class="px-4 py-3 text-sm font-medium border-b-2 border-transparent text-zinc-500 hover:text-white transition-colors">
         About
       </button>
     </div>
@@ -41,131 +52,132 @@
 
   <!-- ── Campaigns Tab ───────────────────────────────────────────────────── -->
   <div id="panel-campaigns" class="p-6 max-w-4xl mx-auto">
-    <div class="flex items-center justify-between mb-6">
-      <h2 class="text-lg font-semibold">Live Campaigns</h2>
-      <button onclick="loadCampaigns()" class="text-xs text-zinc-500 hover:text-orange-400 transition-colors">↻ Refresh</button>
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-base font-semibold">Live Campaigns</h2>
+      <div class="flex items-center gap-3">
+        <span id="last-updated" class="text-xs text-zinc-600"></span>
+        <button onclick="loadCampaigns(true)" class="text-xs text-zinc-500 hover:text-orange-400 transition-colors">↻ Refresh</button>
+      </div>
     </div>
-    <div id="campaigns-list" class="space-y-4">
-      <div class="text-zinc-500 text-sm">Loading...</div>
+    <p class="text-xs text-zinc-600 mb-6">Resets nightly at 03:00 UTC · <span id="total-stats"></span></p>
+    <div id="campaigns-list" class="space-y-3">
+      <div class="text-zinc-600 text-sm">Loading...</div>
     </div>
   </div>
 
   <!-- ── Try It Tab ─────────────────────────────────────────────────────── -->
-  <div id="panel-tryit" class="p-6 max-w-2xl mx-auto hidden">
-    <h2 class="text-lg font-semibold mb-6">Try It — predict → reward</h2>
+  <div id="panel-tryit" class="p-6 max-w-xl mx-auto hidden">
+    <h2 class="text-base font-semibold mb-1">Try It</h2>
+    <p class="text-xs text-zinc-500 mb-6">Send a prediction and reward the result. The model updates instantly.</p>
 
     <!-- Step 1 -->
-    <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6 mb-4">
-      <div class="flex items-center gap-3 mb-5">
-        <span class="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
-        <span class="font-medium">Get a prediction</span>
+    <div id="step1" class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-3">
+      <div class="flex items-center gap-2.5 mb-4">
+        <span id="step1-num" class="w-5 h-5 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">1</span>
+        <span class="text-sm font-medium">Select campaign &amp; context</span>
       </div>
-      <div class="space-y-4">
+      <div class="space-y-3">
         <div>
-          <label class="text-xs text-zinc-400 block mb-1.5">Campaign</label>
+          <label class="text-xs text-zinc-500 block mb-1">Campaign</label>
           <select id="try-campaign" onchange="onCampaignSelect()"
-                  class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                  class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500 transition-colors">
             <option value="">Loading...</option>
           </select>
         </div>
-        <div id="context-hint" class="hidden">
-          <div class="text-xs text-zinc-500 mb-1">Context hint</div>
-          <div id="context-hint-text" class="text-xs text-zinc-400 bg-zinc-800 rounded px-3 py-2 font-mono leading-relaxed"></div>
+        <div id="context-hint" class="hidden rounded-lg bg-zinc-800/50 border border-zinc-700/50 px-3 py-2.5">
+          <div class="text-xs text-zinc-500 mb-1">Context guide</div>
+          <div id="context-hint-text" class="text-xs text-zinc-400 font-mono leading-relaxed whitespace-pre-line"></div>
         </div>
         <div>
-          <label class="text-xs text-zinc-400 block mb-1.5">
-            Context vector <span class="text-zinc-600">(comma-separated floats in [0, 1])</span>
-          </label>
+          <label class="text-xs text-zinc-500 block mb-1">Context vector <span class="text-zinc-700">(comma-separated, values in [0,1])</span></label>
           <input id="try-context" type="text" placeholder="e.g. 1.0, 0.35, 0.50, 0.60, 0.96"
-                 class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500">
+                 class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-zinc-700 focus:outline-none focus:border-orange-500 transition-colors">
         </div>
         <button onclick="doPredirect()"
-                class="w-full bg-orange-500 hover:bg-orange-400 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
-          Predict
+                class="w-full bg-orange-500 hover:bg-orange-400 active:bg-orange-600 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
+          Get Prediction
         </button>
       </div>
     </div>
 
     <!-- Step 2 -->
-    <div id="predict-result" class="hidden bg-zinc-900 border border-zinc-800 rounded-xl p-6 mb-4">
-      <div class="flex items-center gap-3 mb-5">
-        <span class="w-6 h-6 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
-        <span class="font-medium">Send a reward</span>
+    <div id="predict-result" class="hidden fade-in bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-3">
+      <div class="flex items-center gap-2.5 mb-4">
+        <span class="w-5 h-5 rounded-full bg-orange-500 text-white text-xs font-bold flex items-center justify-center shrink-0">2</span>
+        <span class="text-sm font-medium">Send reward</span>
       </div>
-      <div class="space-y-2 mb-5">
-        <div class="flex items-center justify-between">
-          <span class="text-xs text-zinc-400">Recommended arm</span>
-          <span id="result-arm" class="text-sm font-mono font-semibold text-orange-400"></span>
-        </div>
-        <div class="flex items-center justify-between gap-4">
-          <span class="text-xs text-zinc-400 shrink-0">Interaction ID</span>
-          <span id="result-id" class="text-xs font-mono text-zinc-500 truncate"></span>
-        </div>
+
+      <div class="bg-zinc-800/50 rounded-lg px-4 py-3 mb-4">
+        <div class="text-xs text-zinc-500 mb-0.5">Recommended arm</div>
+        <div id="result-arm" class="text-lg font-mono font-semibold text-orange-400"></div>
+        <div id="result-id" class="text-xs font-mono text-zinc-600 mt-1 truncate"></div>
       </div>
-      <div class="border-t border-zinc-800 pt-5">
+
+      <div>
         <div class="flex items-center justify-between mb-2">
-          <label class="text-xs text-zinc-400">Reward</label>
-          <span id="reward-display" class="text-sm font-mono text-orange-400">0.80</span>
+          <label class="text-xs text-zinc-500">Reward</label>
+          <span id="reward-display" class="text-sm font-mono font-medium text-orange-400">0.80</span>
         </div>
         <input id="reward-slider" type="range" min="0" max="100" value="80"
                oninput="document.getElementById('reward-display').textContent=(this.value/100).toFixed(2)"
-               class="w-full accent-orange-500 mb-3">
-        <div class="flex gap-2 mb-4">
-          <button onclick="setReward(0)"   class="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded transition-colors">0.0 fail</button>
-          <button onclick="setReward(50)"  class="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded transition-colors">0.5</button>
-          <button onclick="setReward(100)" class="flex-1 text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded transition-colors">1.0 success</button>
+               class="w-full mb-3">
+        <div class="grid grid-cols-3 gap-2 mb-3">
+          <button onclick="setReward(0)"   class="text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded-lg transition-colors text-zinc-400">0.0 — fail</button>
+          <button onclick="setReward(50)"  class="text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded-lg transition-colors text-zinc-400">0.5 — partial</button>
+          <button onclick="setReward(100)" class="text-xs bg-zinc-800 hover:bg-zinc-700 py-1.5 rounded-lg transition-colors text-zinc-400">1.0 — success</button>
         </div>
         <button onclick="doReward()"
-                class="w-full bg-zinc-700 hover:bg-zinc-600 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
-          Send Reward
+                class="w-full bg-zinc-700 hover:bg-zinc-600 active:bg-zinc-500 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
+          Send Reward → Update Model
         </button>
       </div>
     </div>
 
     <!-- Step 3 -->
-    <div id="reward-result" class="hidden bg-zinc-900 border border-green-800 rounded-xl p-6">
-      <div class="flex items-center gap-3">
-        <span class="text-green-400 text-xl">✓</span>
-        <div>
-          <div class="font-medium text-green-400">Reward recorded — model updated</div>
-          <div id="reward-summary" class="text-xs text-zinc-400 mt-1"></div>
+    <div id="reward-result" class="hidden fade-in bg-zinc-900 border border-green-900/60 rounded-xl p-5">
+      <div class="flex items-start gap-3">
+        <span class="text-green-400 text-lg mt-0.5">✓</span>
+        <div class="flex-1">
+          <div class="font-medium text-green-400 text-sm">Reward recorded — model updated</div>
+          <div id="reward-summary" class="text-xs text-zinc-500 mt-1"></div>
         </div>
       </div>
-      <button onclick="resetTryIt()" class="mt-4 text-xs text-zinc-400 hover:text-orange-400 transition-colors">
-        Try another →
+      <button onclick="resetTryIt()" class="mt-4 text-xs text-zinc-500 hover:text-orange-400 transition-colors">
+        Try another prediction →
       </button>
     </div>
   </div>
 
   <!-- ── About Tab ──────────────────────────────────────────────────────── -->
   <div id="panel-about" class="p-6 max-w-2xl mx-auto hidden">
-    <h2 class="text-lg font-semibold mb-6">What the numbers mean</h2>
-    <div class="space-y-6 text-sm leading-relaxed">
-      <div>
+    <h2 class="text-base font-semibold mb-6">What the numbers mean</h2>
+    <div class="space-y-5 text-sm">
+      <div class="border-l-2 border-zinc-800 pl-4">
         <div class="font-medium text-white mb-1">theta_norm</div>
-        <div class="text-zinc-400">The L2 norm of the weight vector θ for each arm. Higher means the arm has a stronger learned signal — the model is more confident about when to recommend it.</div>
+        <div class="text-zinc-400 leading-relaxed">L2 norm of the weight vector θ per arm. Higher = stronger learned signal. A freshly created campaign shows near-zero values; after hundreds of predict→reward cycles the arms diverge as the model learns which context profiles each arm serves best.</div>
       </div>
-      <div>
-        <div class="font-medium text-white mb-1">prediction_count / reward_count</div>
-        <div class="text-zinc-400">How many times each arm has been selected, and how many of those received a reward. A gap means those interactions are still in-flight — reward not yet sent.</div>
+      <div class="border-l-2 border-zinc-800 pl-4">
+        <div class="font-medium text-white mb-1">Predictions / Rewards</div>
+        <div class="text-zinc-400 leading-relaxed">How many times each arm was selected, and how many of those received a reward. A gap means interactions are still in-flight — reward not yet sent. The reward bar shows the fill rate.</div>
       </div>
-      <div>
-        <div class="font-medium text-white mb-1">alpha</div>
-        <div class="text-zinc-400">Exploration parameter. Higher = more exploration. LinUCB adds a larger uncertainty bonus; Thompson Sampling samples from a wider posterior. Default 1.0.</div>
+      <div class="border-l-2 border-zinc-800 pl-4">
+        <div class="font-medium text-white mb-1">Algorithm</div>
+        <div class="text-zinc-400 leading-relaxed"><b class="text-zinc-300">LinUCB</b> adds a deterministic UCB bonus: score = θ·x + α·√(x·A⁻¹·x). It always picks the arm with the highest upper confidence bound.<br><br><b class="text-zinc-300">Thompson Sampling</b> samples θ̃ from the posterior N(θ, α²·A⁻¹) — concurrent users naturally diversify arm coverage.</div>
       </div>
-      <div>
+      <div class="border-l-2 border-zinc-800 pl-4">
         <div class="font-medium text-white mb-1">Context vector</div>
-        <div class="text-zinc-400">A fixed-length array of floats in [0, 1] describing the current situation. BanditDB uses this to personalise decisions — the model learns which arms work best for which context profiles.</div>
+        <div class="text-zinc-400 leading-relaxed">Fixed-length array of floats in [0, 1] describing the current situation. The model learns which arms work for which context profiles — personalisation emerges from the predict→reward signal.</div>
       </div>
-      <div>
-        <div class="font-medium text-white mb-1">This sandbox resets nightly at 03:00 UTC</div>
-        <div class="text-zinc-400">All learned matrices are wiped and the three demo campaigns are recreated fresh. Play freely — nothing persists.</div>
+      <div class="border-l-2 border-zinc-800 pl-4">
+        <div class="font-medium text-white mb-1">This sandbox</div>
+        <div class="text-zinc-400 leading-relaxed">Resets nightly at 03:00 UTC. All matrices are wiped and the three demo campaigns are recreated. Play freely — nothing persists. Rate limited to 10 req/s per IP.</div>
       </div>
-      <div class="pt-2 border-t border-zinc-800">
-        <a href="https://github.com/dynamicpricing-ai/banditdb" class="text-orange-400 hover:text-orange-300 transition-colors">
-          ★ GitHub — source code, docs, Python SDK
-        </a>
-      </div>
+    </div>
+    <div class="mt-8 pt-6 border-t border-zinc-800 flex flex-wrap gap-4 text-xs text-zinc-500">
+      <a href="https://github.com/dynamicpricing-ai/banditdb" class="hover:text-orange-400 transition-colors">★ GitHub</a>
+      <a href="https://pypi.org/project/banditdb-python/" class="hover:text-orange-400 transition-colors">🐍 PyPI</a>
+      <a href="https://hub.docker.com/r/simeonlukov/banditdb" class="hover:text-orange-400 transition-colors">🐳 Docker Hub</a>
+      <span class="text-zinc-700">Apache-2.0</span>
     </div>
   </div>
 
@@ -175,106 +187,138 @@
     const H    = { 'Content-Type': 'application/json', 'X-Api-Key': KEY };
 
     const HINTS = {
-      sleep:           'Feature: [sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]\nExample: 1.0, 0.35, 0.50, 0.60, 0.96',
-      prompt_strategy: 'Feature: [task_complexity, domain, input_length_norm, session_turn_norm, user_expertise]\nExample: 0.7, 0.5, 0.4, 0.3, 0.8',
-      client_intake:   'Feature: [case_value_norm, matter_complexity, org_size_norm, conflict_risk, capacity_norm]\nExample: 0.6, 0.5, 0.3, 0.2, 0.8',
+      sleep:
+        'Features: sex · age/100 · weight_kg/150 · activity[0-1] · bedtime_hour/24\n' +
+        'Example:  1.0, 0.35, 0.50, 0.60, 0.96\n' +
+        '          (female · 35y · 75kg · moderate · 23:00)',
+      prompt_strategy:
+        'Features: task_complexity · domain · input_length · session_turn · user_expertise\n' +
+        'Example:  0.80, 0.60, 0.70, 0.20, 0.25\n' +
+        '          (complex · mixed · long · early · novice)',
+      client_intake:
+        'Features: case_value · matter_complexity · org_size · conflict_risk · capacity\n' +
+        'Example:  0.85, 0.80, 0.75, 0.10, 0.65\n' +
+        '          (high value · complex · large org · low conflict · good capacity)',
     };
 
     let currentInteractionId = null;
+    let allCampaigns = [];
 
     // ── Health ────────────────────────────────────────────────────────────────
     async function checkHealth() {
       try {
         const ok = (await fetch(`${BASE}/health`)).ok;
-        document.getElementById('health-dot').className  = `w-2 h-2 rounded-full ${ok ? 'bg-green-500' : 'bg-red-500'}`;
+        document.getElementById('health-dot').className  = `w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`;
         document.getElementById('health-text').textContent = ok ? 'online' : 'offline';
       } catch {
-        document.getElementById('health-dot').className  = 'w-2 h-2 rounded-full bg-red-500';
+        document.getElementById('health-dot').className  = 'w-1.5 h-1.5 rounded-full bg-red-500';
         document.getElementById('health-text').textContent = 'offline';
       }
     }
 
-    // ── Campaigns tab ─────────────────────────────────────────────────────────
-    async function loadCampaigns() {
-      const el = document.getElementById('campaigns-list');
-      el.innerHTML = '<div class="text-zinc-500 text-sm">Loading...</div>';
+    // ── Campaigns ─────────────────────────────────────────────────────────────
+    async function loadCampaigns(showRefresh = false) {
+      if (showRefresh) {
+        document.getElementById('campaigns-list').innerHTML = '<div class="text-zinc-600 text-sm">Refreshing...</div>';
+      }
       try {
-        const campaigns = await (await fetch(`${BASE}/campaigns`, { headers: H })).json();
-        if (!campaigns.length) {
-          el.innerHTML = '<div class="text-zinc-500 text-sm">No campaigns found.</div>';
-          return;
-        }
-        el.innerHTML = campaigns.map(c => `
-          <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-            <button onclick="toggleDiag('${c.campaign_id}')"
-                    class="w-full px-6 py-4 flex items-center justify-between hover:bg-zinc-800/50 transition-colors">
-              <div class="flex items-center gap-4 min-w-0">
-                <span class="font-mono font-semibold text-orange-400">${c.campaign_id}</span>
-                <span class="text-xs text-zinc-500">${c.arm_count} arms · ${c.algorithm} · α=${c.alpha}</span>
-              </div>
-              <span id="chevron-${c.campaign_id}" class="text-zinc-600 text-xs shrink-0 ml-4">▼ diagnostics</span>
-            </button>
-            <div id="diag-${c.campaign_id}" class="hidden border-t border-zinc-800 px-6 py-4">
-              <div class="text-zinc-500 text-xs">Loading...</div>
-            </div>
-          </div>
-        `).join('');
+        allCampaigns = await (await fetch(`${BASE}/campaigns`, { headers: H })).json();
+
+        // Load all diagnostics in parallel
+        const diags = await Promise.all(
+          allCampaigns.map(c =>
+            fetch(`${BASE}/campaign/${c.campaign_id}`, { headers: H }).then(r => r.json())
+          )
+        );
+
+        let totalPredictions = 0;
+        let totalRewards = 0;
+        diags.forEach(d => {
+          totalPredictions += d.total_predictions || 0;
+          totalRewards     += d.total_rewards     || 0;
+        });
+        document.getElementById('total-stats').textContent =
+          `${totalPredictions.toLocaleString()} total predictions · ${totalRewards.toLocaleString()} rewards across all campaigns`;
+
+        document.getElementById('campaigns-list').innerHTML = allCampaigns.map((c, i) =>
+          renderCampaign(c, diags[i])
+        ).join('');
+
+        document.getElementById('last-updated').textContent =
+          'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
         // populate Try It dropdown
         const sel = document.getElementById('try-campaign');
         sel.innerHTML = '<option value="">Select a campaign</option>' +
-          campaigns.map(c => `<option value="${c.campaign_id}">${c.campaign_id}</option>`).join('');
+          allCampaigns.map(c => `<option value="${c.campaign_id}">${c.campaign_id}</option>`).join('');
+
       } catch(e) {
-        el.innerHTML = `<div class="text-red-400 text-sm">Error: ${e.message}</div>`;
+        document.getElementById('campaigns-list').innerHTML =
+          `<div class="text-red-400 text-sm">Error: ${e.message}</div>`;
       }
     }
 
-    async function toggleDiag(id) {
-      const panel   = document.getElementById(`diag-${id}`);
-      const chevron = document.getElementById(`chevron-${id}`);
-      if (!panel.classList.contains('hidden')) {
-        panel.classList.add('hidden');
-        chevron.textContent = '▼ diagnostics';
-        return;
-      }
-      panel.classList.remove('hidden');
-      chevron.textContent = '▲ hide';
-      panel.innerHTML = '<div class="text-zinc-500 text-xs">Loading...</div>';
-      try {
-        const data = await (await fetch(`${BASE}/campaign/${id}`, { headers: H })).json();
-        panel.innerHTML = `
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead>
-                <tr class="text-zinc-500 border-b border-zinc-800">
-                  <th class="text-left py-2 pr-6 font-medium">Arm</th>
-                  <th class="text-right py-2 pr-6 font-medium">theta_norm</th>
-                  <th class="text-right py-2 pr-6 font-medium">predictions</th>
-                  <th class="text-right py-2 font-medium">rewards</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-zinc-800/50">
-                ${Object.entries(data.arms).map(([arm, s]) => `
-                  <tr>
-                    <td class="py-2.5 pr-6 font-mono text-orange-300">${arm}</td>
-                    <td class="py-2.5 pr-6 text-right text-zinc-300">${s.theta_norm.toFixed(4)}</td>
-                    <td class="py-2.5 pr-6 text-right text-zinc-400">${s.prediction_count}</td>
-                    <td class="py-2.5 text-right text-zinc-400">${s.reward_count}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-          <div class="mt-3 text-xs text-zinc-600">
-            Total — predictions: ${data.total_predictions} · rewards: ${data.total_rewards}
+    function renderCampaign(c, diag) {
+      const arms    = diag.arms || {};
+      const entries = Object.entries(arms).sort((a, b) => b[1].theta_norm - a[1].theta_norm);
+      const maxTheta = Math.max(...entries.map(([, s]) => s.theta_norm), 0.001);
+      const maxPred  = Math.max(...entries.map(([, s]) => s.prediction_count), 1);
+
+      const armRows = entries.map(([arm, s]) => {
+        const thetaPct = ((s.theta_norm / maxTheta) * 100).toFixed(1);
+        const predPct  = ((s.prediction_count / maxPred) * 100).toFixed(1);
+        const rewardPct = s.prediction_count > 0
+          ? ((s.reward_count / s.prediction_count) * 100).toFixed(0)
+          : 0;
+        const isTop = s.theta_norm === maxTheta;
+
+        return `
+          <div class="py-3 ${isTop ? 'opacity-100' : 'opacity-70'}">
+            <div class="flex items-center justify-between mb-1.5">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-mono ${isTop ? 'text-orange-400 font-semibold' : 'text-zinc-400'}">${arm}</span>
+                ${isTop ? '<span class="text-xs bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded px-1.5 py-0 leading-5">top</span>' : ''}
+              </div>
+              <span class="text-xs text-zinc-600 font-mono">${s.theta_norm.toFixed(4)}</span>
+            </div>
+            <div class="flex items-center gap-2 mb-1">
+              <div class="flex-1 bg-zinc-800 rounded-full h-1">
+                <div class="bar h-1 rounded-full ${isTop ? 'bg-orange-500' : 'bg-zinc-600'}" style="width:${thetaPct}%"></div>
+              </div>
+              <span class="text-xs text-zinc-600 w-8 text-right">${thetaPct}%</span>
+            </div>
+            <div class="flex items-center gap-3 text-xs text-zinc-600 mt-1">
+              <span>${s.prediction_count} predictions</span>
+              <span>·</span>
+              <span>${s.reward_count} rewards</span>
+              <span>·</span>
+              <span>${rewardPct}% rate</span>
+            </div>
           </div>
         `;
-      } catch(e) {
-        panel.innerHTML = `<div class="text-red-400 text-xs">Error: ${e.message}</div>`;
-      }
+      }).join('<div class="border-t border-zinc-800/50"></div>');
+
+      return `
+        <div class="bg-zinc-900/60 border border-zinc-800 rounded-xl overflow-hidden fade-in">
+          <div class="px-5 py-4 border-b border-zinc-800/50 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <span class="font-mono font-semibold text-orange-400">${c.campaign_id}</span>
+              <span class="text-xs text-zinc-600">${c.arm_count} arms</span>
+              <span class="text-xs bg-zinc-800 text-zinc-400 rounded px-2 py-0.5">${c.algorithm}</span>
+              <span class="text-xs text-zinc-600">α=${c.alpha}</span>
+            </div>
+            <div class="text-xs text-zinc-600">
+              ${(diag.total_predictions || 0).toLocaleString()} predictions
+            </div>
+          </div>
+          <div class="px-5 divide-y divide-zinc-800/30">
+            ${armRows}
+          </div>
+        </div>
+      `;
     }
 
-    // ── Try It tab ────────────────────────────────────────────────────────────
+    // ── Try It ────────────────────────────────────────────────────────────────
     function onCampaignSelect() {
       const id   = document.getElementById('try-campaign').value;
       const hint = document.getElementById('context-hint');
@@ -295,6 +339,10 @@
       const context = raw.split(',').map(v => parseFloat(v.trim()));
       if (context.some(isNaN)) { alert('Context must be comma-separated numbers.'); return; }
 
+      const btn = document.querySelector('#step1 button:last-child');
+      btn.textContent = 'Predicting...';
+      btn.disabled = true;
+
       try {
         const data = await (await fetch(`${BASE}/predict`, {
           method: 'POST', headers: H,
@@ -307,6 +355,10 @@
         document.getElementById('predict-result').classList.remove('hidden');
         document.getElementById('reward-result').classList.add('hidden');
       } catch(e) { alert(`Error: ${e.message}`); }
+      finally {
+        btn.textContent = 'Get Prediction';
+        btn.disabled = false;
+      }
     }
 
     function setReward(val) {
@@ -317,16 +369,24 @@
     async function doReward() {
       if (!currentInteractionId) return;
       const reward = parseFloat(document.getElementById('reward-slider').value) / 100;
+      const btn = document.querySelector('#predict-result button:last-child');
+      btn.textContent = 'Updating model...';
+      btn.disabled = true;
       try {
         const r = await fetch(`${BASE}/reward`, {
           method: 'POST', headers: H,
           body: JSON.stringify({ interaction_id: currentInteractionId, reward }),
         });
         if (!r.ok) { const e = await r.json(); alert(`Error: ${e.error}`); return; }
+        const arm = document.getElementById('result-arm').textContent;
         document.getElementById('reward-summary').textContent =
-          `"${document.getElementById('result-arm').textContent}" rewarded ${reward.toFixed(2)}.`;
+          `"${arm}" rewarded ${reward.toFixed(2)} — the model has updated its weights for this context.`;
         document.getElementById('reward-result').classList.remove('hidden');
       } catch(e) { alert(`Error: ${e.message}`); }
+      finally {
+        btn.textContent = 'Send Reward → Update Model';
+        btn.disabled = false;
+      }
     }
 
     function resetTryIt() {
@@ -344,12 +404,20 @@
         btn.classList.toggle('border-orange-500', t === name);
         btn.classList.toggle('text-white',         t === name);
         btn.classList.toggle('border-transparent', t !== name);
-        btn.classList.toggle('text-zinc-400',      t !== name);
+        btn.classList.toggle('text-zinc-500',      t !== name);
       });
+      if (name === 'campaigns') loadCampaigns();
     }
 
+    // ── Auto-refresh every 30s ────────────────────────────────────────────────
     checkHealth();
     loadCampaigns();
+    setInterval(checkHealth, 15000);
+    setInterval(() => {
+      if (!document.getElementById('panel-campaigns').classList.contains('hidden')) {
+        loadCampaigns();
+      }
+    }, 30000);
   </script>
 </body>
 </html>
