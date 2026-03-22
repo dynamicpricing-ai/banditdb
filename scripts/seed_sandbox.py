@@ -135,10 +135,10 @@ def seed_client_intake(n=300):
 if __name__ == "__main__":
     random.seed(42)
     print(f"Seeding sandbox at {URL}...\n")
-    seed_sleep(750)
+    seed_sleep(500)
     print()
-    seed_prompt_strategy(300)
+    seed_prompt_strategy(350)
     print()
-    seed_client_intake(300)
+    seed_client_intake(350)
     print("\nDone. Run a checkpoint to export Parquet:")
     print(f'  curl -s -X POST {URL}/checkpoint -H "X-Api-Key: {KEY}"')

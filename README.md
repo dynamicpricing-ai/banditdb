@@ -334,6 +334,79 @@ grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id
 
 ---
 
+## 🔄 How Recovery Works
+
+BanditDB survives crashes and restarts automatically. No manual intervention required. Here is exactly what happens under the hood so you can reason about data loss windows, design your backup strategy, and diagnose recovery edge cases.
+
+### The Two Files
+
+| File | Purpose |
+|------|---------|
+| `{DATA_DIR}/checkpoint.json` | Snapshot of all campaign matrices (A⁻¹, b, θ, counts) at a specific WAL byte offset |
+| `{DATA_DIR}/bandit_wal.jsonl` | Append-only event log: `CampaignCreated`, `Predicted`, `Rewarded`, `CampaignDeleted` |
+
+On startup, BanditDB restores itself in two phases:
+
+### Phase 1 — Load the Checkpoint
+
+If `checkpoint.json` exists, BanditDB reads it and restores all campaign matrices directly into memory. This is instant — no replaying, just deserialisation. The checkpoint also records the WAL byte offset at which it was taken.
+
+If no checkpoint exists, BanditDB starts from an empty state and replays the entire WAL from byte 0.
+
+### Phase 2 — Replay the WAL Tail
+
+BanditDB opens `bandit_wal.jsonl`, seeks to the checkpoint's byte offset, and replays every event written after that point. This catches up on anything that happened since the last checkpoint — recent campaigns, predictions, and rewards.
+
+One edge case: when a checkpoint is taken, the WAL is **rotated** (the pre-checkpoint prefix is discarded and only the tail is kept). After rotation, the stored byte offset in `checkpoint.json` will exceed the current file size. BanditDB detects this and seeks to byte 0 instead, replaying the entire (now-short) tail correctly.
+
+```
+Startup sequence:
+
+  checkpoint.json found?
+  ├── YES → restore all matrices from snapshot
+  │         → open WAL, seek to checkpoint.wal_offset
+  │         →   if offset > file size (post-rotation): seek to 0
+  │         → replay events from that position
+  └── NO  → open WAL, replay from byte 0
+```
+
+### What Is the Data Loss Window?
+
+**Everything in the WAL is durable.** The WAL writer task flushes after every write burst and `fsync`s before acknowledging a checkpoint. If you crash between two checkpoints, BanditDB replays the WAL tail on the next start — your model state is fully recovered.
+
+The only unrewarded data at risk is **in-flight predictions** (interactions that were predicted but not yet rewarded at the moment of a crash). These live in the Moka TTL cache in memory. They are not in the WAL until a reward arrives. After a crash, those interaction IDs are lost. Any reward sent for them after restart will return 404.
+
+To mitigate this: checkpoint frequently. BanditDB re-emits in-flight predictions into the WAL tail at each checkpoint, so any reward that arrives before the next crash will be captured.
+
+### What Does `POST /checkpoint` Actually Do?
+
+1. **Flush barrier** — sends a flush message through the WAL channel; the writer drains all pending events and `fsync`s to disk before responding with the confirmed byte offset.
+2. **Snapshot** — reads all campaign matrices under a read lock and serialises them to `checkpoint.tmp`, then atomically renames it to `checkpoint.json`.
+3. **Parquet export** — reads the WAL from byte 0 to the flush offset, joins `Predicted` + `Rewarded` events on `interaction_id`, and appends matched pairs to per-campaign Parquet files in `{DATA_DIR}/exports/`. Unmatched (in-flight) predictions are **re-emitted** into the WAL tail.
+4. **WAL rotation** — truncates the WAL to only the tail (events after the checkpoint offset). Pre-checkpoint history is no longer needed for recovery.
+
+### Parquet Files: Analytics Only, Not Recovery
+
+The Parquet files in `exports/` are **not** used for recovery. They are analytics exports. Losing them does not affect model state. Recovery uses only `checkpoint.json` + `bandit_wal.jsonl`.
+
+### Recommended Production Setup
+
+```bash
+# Auto-checkpoint every 10,000 rewards (model stays durable within 10K events)
+BANDITDB_CHECKPOINT_INTERVAL=10000
+
+# Or cap WAL size regardless of event count (useful on edge deployments)
+BANDITDB_MAX_WAL_SIZE_MB=50
+
+# Back up the two recovery files on a schedule
+cp /data/checkpoint.json  /backup/checkpoint-$(date +%s).json
+cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl
+```
+
+To move BanditDB to a new host: copy `checkpoint.json` and `bandit_wal.jsonl` to the same `DATA_DIR` on the new machine and start. Recovery is automatic.
+
+---
+
 ## 📈 Benchmark
 
 BanditDB is validated against the **MovieLens 100K** dataset using the standard [replay method](https://arxiv.org/abs/1003.5956) (Li et al. 2010) — the same unbiased offline estimator used in the original LinUCB paper.

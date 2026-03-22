@@ -55,11 +55,11 @@
     <div class="flex items-center justify-between mb-2">
       <h2 class="text-base font-semibold">Live Campaigns</h2>
       <div class="flex items-center gap-3">
-        <span id="last-updated" class="text-xs text-zinc-600"></span>
-        <button onclick="loadCampaigns(true)" class="text-xs text-zinc-500 hover:text-orange-400 transition-colors">↻ Refresh</button>
+        <span id="last-updated" class="text-xs text-zinc-500"></span>
+        <button onclick="loadCampaigns(true)" class="text-xs text-zinc-400 hover:text-orange-400 transition-colors">↻ Refresh</button>
       </div>
     </div>
-    <p class="text-xs text-zinc-600 mb-6">Resets nightly at 03:00 UTC · <span id="total-stats"></span></p>
+    <p class="text-xs text-zinc-400 mb-6">Resets nightly at 03:00 UTC · <span id="total-stats"></span></p>
     <div id="campaigns-list" class="space-y-3">
       <div class="text-zinc-600 text-sm">Loading...</div>
     </div>
@@ -279,20 +279,18 @@
                 <span class="text-xs font-mono ${isTop ? 'text-orange-400 font-semibold' : 'text-zinc-400'}">${arm}</span>
                 ${isTop ? '<span class="text-xs bg-orange-500/10 text-orange-400 border border-orange-500/20 rounded px-1.5 py-0 leading-5">top</span>' : ''}
               </div>
-              <span class="text-xs text-zinc-600 font-mono">${s.theta_norm.toFixed(4)}</span>
+              <span class="text-xs text-zinc-400 font-mono">${s.theta_norm.toFixed(4)}</span>
             </div>
-            <div class="flex items-center gap-2 mb-1">
-              <div class="flex-1 bg-zinc-800 rounded-full h-1">
-                <div class="bar h-1 rounded-full ${isTop ? 'bg-orange-500' : 'bg-zinc-600'}" style="width:${thetaPct}%"></div>
+            <div class="flex items-center gap-2 mb-2">
+              <div class="flex-1 bg-zinc-800 rounded-full h-1.5">
+                <div class="bar h-1.5 rounded-full ${isTop ? 'bg-orange-500' : 'bg-zinc-500'}" style="width:${thetaPct}%"></div>
               </div>
-              <span class="text-xs text-zinc-600 w-8 text-right">${thetaPct}%</span>
+              <span class="text-xs text-zinc-400 w-10 text-right">${thetaPct}%</span>
             </div>
-            <div class="flex items-center gap-3 text-xs text-zinc-600 mt-1">
-              <span>${s.prediction_count} predictions</span>
-              <span>·</span>
-              <span>${s.reward_count} rewards</span>
-              <span>·</span>
-              <span>${s.avg_reward != null ? 'avg reward ' + s.avg_reward.toFixed(3) : 'no rewards yet'}</span>
+            <div class="flex items-center gap-4 text-xs mt-1">
+              <span class="text-zinc-400"><span class="text-zinc-300 font-medium">${s.prediction_count}</span> predictions</span>
+              <span class="text-zinc-400"><span class="text-zinc-300 font-medium">${s.reward_count}</span> rewards</span>
+              <span class="text-zinc-400">avg reward <span class="font-medium ${s.avg_reward != null ? (s.avg_reward > 0.6 ? 'text-green-400' : s.avg_reward > 0.4 ? 'text-yellow-400' : 'text-zinc-300') : 'text-zinc-500'}">${s.avg_reward != null ? s.avg_reward.toFixed(3) : '—'}</span></span>
             </div>
           </div>
         `;
@@ -303,11 +301,11 @@
           <div class="px-5 py-4 border-b border-zinc-800/50 flex items-center justify-between">
             <div class="flex items-center gap-3">
               <span class="font-mono font-semibold text-orange-400">${c.campaign_id}</span>
-              <span class="text-xs text-zinc-600">${c.arm_count} arms</span>
-              <span class="text-xs bg-zinc-800 text-zinc-400 rounded px-2 py-0.5">${c.algorithm}</span>
-              <span class="text-xs text-zinc-600">α=${c.alpha}</span>
+              <span class="text-xs text-zinc-400">${c.arm_count} arms</span>
+              <span class="text-xs bg-zinc-800 text-zinc-300 rounded px-2 py-0.5">${c.algorithm}</span>
+              <span class="text-xs text-zinc-400">α=${c.alpha}</span>
             </div>
-            <div class="text-xs text-zinc-600">
+            <div class="text-xs text-zinc-400">
               ${(diag.total_predictions || 0).toLocaleString()} predictions
             </div>
           </div>
