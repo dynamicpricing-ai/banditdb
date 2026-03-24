@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BanditDB — Documentation</title>
+  <meta name="description" content="BanditDB documentation — Quick Start, Algorithms, Data Science, Recovery." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎰</text></svg>" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    code, pre { font-family: 'JetBrains Mono', monospace; }
+    .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 1.5rem !important; font-size: 0.875rem !important; line-height: 1.7 !important; }
+    /* Inline code */
+    :not(pre) > code { background: #27272a; color: #fb923c; padding: 0.15em 0.4em; border-radius: 0.25rem; font-size: 0.875em; }
+    /* Active sidebar link */
+    .nav-link.active { color: #f97316; border-left-color: #f97316; }
+    /* Smooth scroll */
+    html { scroll-behavior: smooth; }
+    /* Section offset for sticky nav */
+    .section-anchor { scroll-margin-top: 80px; }
+    /* Prose headings */
+    .prose h3 { font-size: 1.125rem; font-weight: 600; color: #f4f4f5; margin-top: 2rem; margin-bottom: 0.75rem; }
+    .prose h4 { font-size: 0.9375rem; font-weight: 600; color: #d4d4d8; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    .prose p  { color: #a1a1aa; line-height: 1.75; margin-bottom: 1rem; }
+    .prose ul { list-style: disc; padding-left: 1.5rem; color: #a1a1aa; line-height: 1.75; margin-bottom: 1rem; }
+    .prose li { margin-bottom: 0.25rem; }
+    .prose table { width: 100%; border-collapse: collapse; font-size: 0.875rem; margin-bottom: 1.5rem; }
+    .prose th { text-align: left; padding: 0.625rem 1rem; background: #18181b; color: #d4d4d8; font-weight: 500; border-bottom: 1px solid #3f3f46; }
+    .prose td { padding: 0.625rem 1rem; color: #a1a1aa; border-bottom: 1px solid #27272a; vertical-align: top; }
+    .prose pre { margin-bottom: 1.25rem; }
+    .prose strong { color: #e4e4e7; font-weight: 600; }
+    .prose a { color: #fb923c; text-decoration: none; }
+    .prose a:hover { text-decoration: underline; }
+    /* Callout box */
+    .callout { background: #18181b; border-left: 3px solid #f97316; padding: 1rem 1.25rem; border-radius: 0 0.5rem 0.5rem 0; margin-bottom: 1.25rem; }
+    .callout p { margin: 0; color: #a1a1aa; font-size: 0.9rem; }
+    /* ASCII diagram */
+    .ascii { background: #0c0a09; border: 1px solid #27272a; border-radius: 0.5rem; padding: 1.25rem 1.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8125rem; color: #a1a1aa; line-height: 1.6; overflow-x: auto; margin-bottom: 1.25rem; white-space: pre; }
+  </style>
+</head>
+
+<body class="bg-zinc-950 text-zinc-100 antialiased">
+
+  <!-- Nav -->
+  <nav class="border-b border-zinc-800 px-6 py-4 sticky top-0 bg-zinc-950/95 backdrop-blur z-10">
+    <div class="max-w-6xl mx-auto flex items-center justify-between">
+      <div class="flex items-center gap-2 font-semibold text-xl">
+        <a href="index.html" class="flex items-center gap-2 hover:opacity-80 transition-opacity">
+          <span>🎰</span>
+          <span>BanditDB</span>
+        </a>
+        <span class="text-zinc-700 font-normal ml-1">/</span>
+        <span class="text-zinc-400 font-normal text-base ml-1">Docs</span>
+      </div>
+      <div class="flex items-center gap-6 text-sm text-zinc-400">
+        <a href="index.html"                                    class="hover:text-white transition-colors hidden sm:block">Home</a>
+        <a href="https://github.com/dynamicpricing-ai/banditdb" class="hover:text-white transition-colors hidden sm:block">GitHub</a>
+        <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener"
+           class="bg-orange-500 hover:bg-orange-400 text-white px-4 py-1.5 rounded-full font-medium transition-colors text-sm">
+          Live Sandbox
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="max-w-6xl mx-auto px-6 py-10 flex gap-10">
+
+    <!-- Sidebar -->
+    <aside class="w-52 shrink-0 hidden lg:block">
+      <nav class="sticky top-24 space-y-0.5 text-sm">
+        <div class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Documentation</div>
+        <a href="#quick-start"   class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Quick Start</a>
+        <a href="#mcp"           class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Native Agent Use (MCP)</a>
+        <a href="#algorithms"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Choosing an Algorithm</a>
+        <a href="#data-science"  class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Data Science Escape Hatch</a>
+        <a href="#recovery"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">How Recovery Works</a>
+      </nav>
+    </aside>
+
+    <!-- Content -->
+    <main class="flex-1 min-w-0 prose max-w-3xl">
+
+      <!-- Quick Start -->
+      <section id="quick-start" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Quick Start</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">A complete predict→reward cycle for a sleep improvement campaign.</p>
+
+        <h3>Sleep Improvement</h3>
+        <p>One-size-fits-all sleep advice ignores individual physiology. A 25-year-old male athlete and a 60-year-old sedentary woman respond differently to the same environmental change. BanditDB learns those differences automatically — routing each participant to the intervention most likely to work for their profile, improving with every reported outcome.</p>
+
+        <pre><code class="language-python">from banditdb import Client
+
+db = Client("http://localhost:8080", api_key="your-secret-key")
+
+# 1. Create the campaign once at startup
+db.create_campaign(
+    "sleep",
+    arms=["decrease_temperature", "decrease_light", "decrease_noise"],
+    feature_dim=5,
+)
+
+# 2. A participant is ready for tonight's intervention.
+# Context: [sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]
+context = [
+    1.0,   # female
+    0.35,  # age 35
+    0.50,  # 75 kg
+    0.60,  # moderately active
+    0.96,  # bedtime 23:00
+]
+
+# 3. Ask BanditDB which intervention to apply
+arm, interaction_id = db.predict("sleep", context)
+print(f"Tonight's intervention: {arm}")  # e.g., "decrease_temperature"
+
+# 4. Apply the intervention, then reward the next morning
+score_before = 62
+score_after  = 79
+reward = (score_after - score_before) / score_before  # → 0.27
+
+db.reward(interaction_id, reward)</code></pre>
+
+        <div class="callout">
+          <p>Rewards must be normalised to <code>[0, 1]</code>. Divide your business metric by its maximum possible value, or use a ratio like the example above.</p>
+        </div>
+      </section>
+
+      <!-- MCP -->
+      <section id="mcp" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Native Agent Tool Use (MCP)</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Give any Claude-based agent persistent decision memory via the Model Context Protocol.</p>
+
+        <p>Standard LLM agents are stateless — if they route a task to the wrong model and fail, they repeat the same mistake tomorrow. BanditDB's built-in MCP server gives the entire agent swarm shared persistent memory.</p>
+
+        <pre><code class="language-bash">pip install banditdb-python</code></pre>
+
+        <p>Add the server to your Claude Desktop config at <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>:</p>
+
+        <pre><code class="language-json">{
+  "mcpServers": {
+    "banditdb": {
+      "command": "banditdb-mcp",
+      "env": {
+        "BANDITDB_URL": "http://localhost:8080",
+        "BANDITDB_API_KEY": "your-secret-key"
+      }
+    }
+  }
+}</code></pre>
+
+        <p>The agent now has five tools:</p>
+
+        <table>
+          <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>create_campaign</code></td><td>Create a new decision campaign. Accepts <code>algorithm</code> and <code>alpha</code>.</td></tr>
+            <tr><td><code>list_campaigns</code></td><td>List all active campaigns with arm count and alpha.</td></tr>
+            <tr><td><code>campaign_diagnostics</code></td><td>Per-arm <code>theta_norm</code>, prediction count, reward rate. Use when a campaign isn't learning.</td></tr>
+            <tr><td><code>get_intuition</code></td><td>Returns the recommended action and an <code>interaction_id</code> to save.</td></tr>
+            <tr><td><code>record_outcome</code></td><td>Reports success (1.0) or failure (0.0) and updates the shared model.</td></tr>
+          </tbody>
+        </table>
+
+        <p>Every agent in a swarm shares the same BanditDB instance, so the learned model improves with every interaction across the entire fleet.</p>
+      </section>
+
+      <!-- Algorithms -->
+      <section id="algorithms" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Choosing an Algorithm</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Both algorithms share identical per-arm state. Switching is a single field at campaign creation.</p>
+
+        <table>
+          <thead><tr><th>Algorithm</th><th>Value</th><th>How it explores</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>LinUCB</strong></td>
+              <td><code>"linucb"</code> (default)</td>
+              <td>Deterministic UCB bonus: <code>θ·x + α·√(x·A⁻¹·x)</code></td>
+              <td>Predictable, tunable. Sweep <code>alpha</code> offline to calibrate exploration.</td>
+            </tr>
+            <tr>
+              <td><strong>Linear Thompson Sampling</strong></td>
+              <td><code>"thompson_sampling"</code></td>
+              <td>Samples θ̃ ~ N(θ, α²·A⁻¹), scores by θ̃·x</td>
+              <td>Natural Bayesian exploration. <code>alpha=1.0</code> is the principled default. Concurrent users automatically diversify arm coverage.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-python"># LinUCB — tune alpha to control exploration duration
+db.create_campaign("routing", ["fast", "cheap"], feature_dim=4, alpha=1.5)
+
+# Thompson Sampling — natural Bayesian exploration, alpha=1.0 is ideal
+db.create_campaign("routing_ts", ["fast", "cheap"], feature_dim=4,
+                   algorithm="thompson_sampling")</code></pre>
+
+        <div class="callout">
+          <p>The <code>algorithm</code> field is stored in both the WAL and checkpoint files. Old WAL records and checkpoints without an <code>algorithm</code> field recover as <code>"linucb"</code> automatically.</p>
+        </div>
+      </section>
+
+      <!-- Data Science -->
+      <section id="data-science" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">The Data Science Escape Hatch</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Every interaction is event-sourced. Export to Parquet and evaluate policies offline.</p>
+
+        <p><code>POST /checkpoint</code> compiles completed prediction→reward pairs into Snappy-compressed Apache Parquet files — one file per campaign — for offline analysis in Pandas or Polars.</p>
+
+        <p>Every prediction will eventually appear in the Parquet file even if its reward arrives hours later. BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.</p>
+
+        <p>Each row includes a <strong>propensity</strong> column — the softmax-normalised probability that the logging policy selected the chosen arm given the context (LinUCB only; <code>null</code> for Thompson Sampling). This is the <code>P(a | x)</code> term required by Inverse Propensity Scoring estimators.</p>
+
+        <pre><code class="language-python">import polars as pl
+import requests
+
+HEADERS = {"X-Api-Key": "your-secret-key"}
+
+# Snapshot models, export Parquet, rotate the WAL
+requests.post("http://localhost:8080/checkpoint", headers=HEADERS)
+
+# Flat schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity | feature_0 …
+df = pl.read_parquet("/data/exports/sleep.parquet")
+print(df.head())</code></pre>
+
+        <h3>Offline Policy Evaluation</h3>
+        <p>The Python SDK ships three OPE estimators in <code>banditdb.eval</code>. Install with:</p>
+
+        <pre><code class="language-bash">pip install "banditdb-python[eval]"</code></pre>
+
+        <table>
+          <thead><tr><th>Estimator</th><th>Function</th><th>When to use</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Replay</strong></td><td><code>replay(df)</code></td><td>Sanity check baseline. Unbiased but low coverage (~1/K interactions used).</td></tr>
+            <tr><td><strong>IPS / SNIPS</strong></td><td><code>ips(df, clip=10.0)</code></td><td>Primary estimator. Uses every interaction with importance weights.</td></tr>
+            <tr><td><strong>Doubly Robust</strong></td><td><code>doubly_robust(df, clip=10.0)</code></td><td>Best statistical efficiency. Use when comparing multiple policies or sweeping <code>alpha</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-python">from banditdb.eval import replay, ips, doubly_robust
+
+df = pl.read_parquet("/data/exports/sleep.parquet")
+
+print(replay(df))
+# OPEResult(method='replay', estimate=0.4821, std_error=0.0312, coverage=22.1% [33/149])
+
+print(ips(df))
+# OPEResult(method='ips', estimate=0.5103, std_error=0.0187, coverage=100.0% [149/149])
+
+print(doubly_robust(df))
+# OPEResult(method='doubly_robust', estimate=0.5219, std_error=0.0141, coverage=100.0% [149/149])
+
+# Compare against the observed reward of the logging policy:
+print("Observed:", df["reward"].mean())
+# If observed >> estimate, the campaign has learned something real.</code></pre>
+
+        <h3>Inspecting the WAL</h3>
+        <p>The WAL is plain JSONL — every event is human-readable on disk.</p>
+
+        <pre><code class="language-bash"># All campaigns ever created
+grep "CampaignCreated" /data/bandit_wal.jsonl | jq '.CampaignCreated.campaign_id'
+
+# Campaigns that have been deleted
+grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id'</code></pre>
+      </section>
+
+      <!-- Recovery -->
+      <section id="recovery" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">How Recovery Works</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">BanditDB survives crashes and restarts automatically. No manual intervention required.</p>
+
+        <h3>The Two Files</h3>
+        <table>
+          <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>checkpoint.json</code></td><td>Snapshot of all campaign matrices (A⁻¹, b, θ, counts) at a specific WAL byte offset.</td></tr>
+            <tr><td><code>bandit_wal.jsonl</code></td><td>Append-only event log: <code>CampaignCreated</code>, <code>Predicted</code>, <code>Rewarded</code>, <code>CampaignDeleted</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Phase 1 — Load the Checkpoint</h3>
+        <p>If <code>checkpoint.json</code> exists, BanditDB reads it and restores all campaign matrices directly into memory — no replaying, just deserialisation. The checkpoint records the WAL byte offset at which it was taken.</p>
+        <p>If no checkpoint exists, BanditDB starts from an empty state and replays the entire WAL from byte 0.</p>
+
+        <h3>Phase 2 — Replay the WAL Tail</h3>
+        <p>BanditDB opens <code>bandit_wal.jsonl</code>, seeks to the checkpoint's byte offset, and replays every event written after that point. One edge case: after WAL rotation the stored offset may exceed the current file size. BanditDB detects this and seeks to byte 0 instead.</p>
+
+        <div class="ascii">checkpoint.json found?
+├── YES → restore all matrices from snapshot
+│         → open WAL, seek to checkpoint.wal_offset
+│         →   if offset > file size (post-rotation): seek to 0
+│         → replay events from that position
+└── NO  → open WAL, replay from byte 0</div>
+
+        <h3>Data Loss Window</h3>
+        <p><strong>Everything in the WAL is durable.</strong> The WAL writer flushes after every write burst and <code>fsync</code>s before acknowledging a checkpoint. A crash between checkpoints is fully recovered by replaying the WAL tail.</p>
+        <p>The only data at risk is <strong>in-flight predictions</strong> — interactions predicted but not yet rewarded at the moment of a crash. These live in the Moka TTL cache in memory. After a crash those interaction IDs are lost and any reward sent for them will return 404.</p>
+        <p>Mitigate this by checkpointing frequently. BanditDB re-emits in-flight predictions into the WAL tail at each checkpoint, so rewards arriving before the next crash are captured.</p>
+
+        <h3>What <code>POST /checkpoint</code> Does</h3>
+        <ol style="list-style:decimal;padding-left:1.5rem;color:#a1a1aa;line-height:1.75;margin-bottom:1rem;">
+          <li style="margin-bottom:0.5rem"><strong>Flush barrier</strong> — drains all pending events and <code>fsync</code>s to disk, responds with confirmed byte offset.</li>
+          <li style="margin-bottom:0.5rem"><strong>Snapshot</strong> — serialises all campaign matrices to <code>checkpoint.tmp</code>, atomically renames to <code>checkpoint.json</code>.</li>
+          <li style="margin-bottom:0.5rem"><strong>Parquet export</strong> — joins <code>Predicted</code> + <code>Rewarded</code> events, appends matched pairs to per-campaign Parquet files. Unmatched predictions are re-emitted into the WAL tail.</li>
+          <li><strong>WAL rotation</strong> — truncates WAL to only the tail. Pre-checkpoint history is no longer needed for recovery.</li>
+        </ol>
+
+        <div class="callout">
+          <p>Parquet files are <strong>analytics exports only</strong> — not used for recovery. Losing them does not affect model state. Recovery uses only <code>checkpoint.json</code> + <code>bandit_wal.jsonl</code>.</p>
+        </div>
+
+        <h3>Recommended Production Setup</h3>
+        <pre><code class="language-bash"># Auto-checkpoint every 10,000 rewards
+BANDITDB_CHECKPOINT_INTERVAL=10000
+
+# Or cap WAL size (useful on edge deployments)
+BANDITDB_MAX_WAL_SIZE_MB=50
+
+# Back up the two recovery files on a schedule
+cp /data/checkpoint.json  /backup/checkpoint-$(date +%s).json
+cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl</code></pre>
+
+        <p>To move BanditDB to a new host: copy <code>checkpoint.json</code> and <code>bandit_wal.jsonl</code> to the same <code>DATA_DIR</code> on the new machine and start. Recovery is automatic.</p>
+      </section>
+
+    </main>
+  </div>
+
+  <script>
+    hljs.highlightAll();
+
+    // Sidebar active link on scroll
+    const sections = document.querySelectorAll('.section-anchor');
+    const navLinks = document.querySelectorAll('.nav-link');
+
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          navLinks.forEach(l => l.classList.remove('active'));
+          const active = document.querySelector(`.nav-link[href="#${entry.target.id}"]`);
+          if (active) active.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+
+    sections.forEach(s => observer.observe(s));
+  </script>
+</body>
+</html>

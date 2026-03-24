@@ -169,10 +169,17 @@ After enough predict→reward cycles the model converges: patients with similar 
 
 ---
 
+## 📚 Documentation
+
+Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and How Recovery Works — is available at:
+
+**[https://dynamicpricing-ai.github.io/banditdb/docs.html](https://dynamicpricing-ai.github.io/banditdb/docs.html)**
+
+---
+
 ## Quick Start
 
 ### Sleep Improvement
-**The Goal:** One-size-fits-all sleep advice ignores individual physiology. A 25-year-old male athlete and a 60-year-old sedentary woman respond differently to the same environmental change. BanditDB learns those differences automatically — routing each participant to the intervention most likely to work for *their* profile, improving with every reported outcome.
 
 ```python
 from banditdb import Client
@@ -248,152 +255,6 @@ The agent now has five tools available:
 Every agent in a swarm shares the same BanditDB instance, so the learned model improves with every interaction across the entire fleet.
 
 For more domain-specific walkthroughs — e-commerce personalisation, dynamic pricing — browse the [`examples/`](./examples/) directory.
-
----
-
-## Choosing an Algorithm
-
-BanditDB supports two contextual bandit algorithms. Both share identical per-arm state (A⁻¹, b, θ), so switching is a single field in the campaign creation call.
-
-| Algorithm | `algorithm` value | How it explores | When to use |
-|-----------|------------------|-----------------|-------------|
-| **LinUCB** | `"linucb"` (default) | Adds a deterministic UCB bonus: `θ·x + α·√(x·A⁻¹·x)` | When you want predictable, tunable exploration. Sweep `alpha` offline to find the right exploration level. |
-| **Linear Thompson Sampling** | `"thompson_sampling"` | Samples θ̃ from the posterior N(θ, α²·A⁻¹) and scores by θ̃·x | When you want natural Bayesian exploration with no sweep. `alpha=1.0` is the principled default — it equals the natural posterior width. Concurrent users automatically diversify arm coverage. |
-
-```python
-# LinUCB (default) — same as before
-db.create_campaign("ucb_offers", ["offer_a", "offer_b"], feature_dim=3, alpha=1.5)
-
-# Thompson Sampling — natural posterior exploration
-db.create_campaign("ts_offers", ["offer_a", "offer_b"], feature_dim=3,
-                   algorithm="thompson_sampling")
-```
-
-The `algorithm` field is stored in both the WAL and checkpoint files. Old WAL records and checkpoints without an `algorithm` field recover as `"linucb"` automatically.
-
----
-
-## The Data Science Escape Hatch
-
-We know Data Scientists hate black boxes. While BanditDB learns instantly in memory, it uses **Event Sourcing** to write every interaction to a disk WAL.
-
-`POST /checkpoint` compiles completed prediction→reward pairs into Snappy-compressed **Apache Parquet** files — one file per campaign — allowing your ML team to perform Offline Policy Evaluation (OPE) directly in Pandas or Polars.
-
-Every prediction will eventually appear in the Parquet file even if its reward arrives hours later. BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.
-
-Each row includes a **`propensity`** column — the softmax-normalised probability that the logging policy selected the chosen arm given the context (LinUCB campaigns; `null` for Thompson Sampling). This is the `P(a | x)` term required by Inverse Propensity Scoring (IPS) estimators. It answers the question you can't answer without it: *"what would my cumulative reward have been with `alpha=2.0` instead of `1.0`?"* — without running a live experiment.
-
-```python
-import polars as pl
-import requests
-
-HEADERS = {"X-Api-Key": "your-secret-key"}
-
-# Checkpoint: snapshot models, export Parquet, rotate the WAL.
-# Call this on a schedule or trigger it from your application.
-requests.post("http://localhost:8080/checkpoint", headers=HEADERS)
-
-# One Parquet file per campaign, written to {DATA_DIR}/exports/
-# Mount the volume and read directly, or copy out of the container.
-df = pl.read_parquet("/data/exports/llm_routing.parquet")
-
-# Flat schema — one row per completed prediction→reward pair:
-# interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity | feature_0 | feature_1 | ...
-print(df.head())
-print(df.columns)
-```
-
-To list which Parquet files have been written so far:
-
-```bash
-curl -s http://localhost:8080/export -H "X-Api-Key: your-secret-key"
-# e.g. "Parquet files in /data/exports: [\"llm_routing.parquet\"]"
-```
-
-### Inspecting Campaigns via the WAL
-
-The WAL is plain JSONL — every campaign lifecycle event is human-readable on disk.
-
-```bash
-# See all campaigns ever created
-grep "CampaignCreated" /data/bandit_wal.jsonl | jq '.CampaignCreated.campaign_id'
-
-# See which campaigns have been deleted
-grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id'
-```
-
----
-
-## How Recovery Works
-
-BanditDB survives crashes and restarts automatically. No manual intervention required. Here is exactly what happens under the hood so you can reason about data loss windows, design your backup strategy, and diagnose recovery edge cases.
-
-### The Two Files
-
-| File | Purpose |
-|------|---------|
-| `{DATA_DIR}/checkpoint.json` | Snapshot of all campaign matrices (A⁻¹, b, θ, counts) at a specific WAL byte offset |
-| `{DATA_DIR}/bandit_wal.jsonl` | Append-only event log: `CampaignCreated`, `Predicted`, `Rewarded`, `CampaignDeleted` |
-
-On startup, BanditDB restores itself in two phases:
-
-### Phase 1 — Load the Checkpoint
-
-If `checkpoint.json` exists, BanditDB reads it and restores all campaign matrices directly into memory. This is instant — no replaying, just deserialisation. The checkpoint also records the WAL byte offset at which it was taken.
-
-If no checkpoint exists, BanditDB starts from an empty state and replays the entire WAL from byte 0.
-
-### Phase 2 — Replay the WAL Tail
-
-BanditDB opens `bandit_wal.jsonl`, seeks to the checkpoint's byte offset, and replays every event written after that point. This catches up on anything that happened since the last checkpoint — recent campaigns, predictions, and rewards.
-
-One edge case: when a checkpoint is taken, the WAL is **rotated** (the pre-checkpoint prefix is discarded and only the tail is kept). After rotation, the stored byte offset in `checkpoint.json` will exceed the current file size. BanditDB detects this and seeks to byte 0 instead, replaying the entire (now-short) tail correctly.
-
-```
-Startup sequence:
-
-  checkpoint.json found?
-  ├── YES → restore all matrices from snapshot
-  │         → open WAL, seek to checkpoint.wal_offset
-  │         →   if offset > file size (post-rotation): seek to 0
-  │         → replay events from that position
-  └── NO  → open WAL, replay from byte 0
-```
-
-### What Is the Data Loss Window?
-
-**Everything in the WAL is durable.** The WAL writer task flushes after every write burst and `fsync`s before acknowledging a checkpoint. If you crash between two checkpoints, BanditDB replays the WAL tail on the next start — your model state is fully recovered.
-
-The only unrewarded data at risk is **in-flight predictions** (interactions that were predicted but not yet rewarded at the moment of a crash). These live in the Moka TTL cache in memory. They are not in the WAL until a reward arrives. After a crash, those interaction IDs are lost. Any reward sent for them after restart will return 404.
-
-To mitigate this: checkpoint frequently. BanditDB re-emits in-flight predictions into the WAL tail at each checkpoint, so any reward that arrives before the next crash will be captured.
-
-### What Does `POST /checkpoint` Actually Do?
-
-1. **Flush barrier** — sends a flush message through the WAL channel; the writer drains all pending events and `fsync`s to disk before responding with the confirmed byte offset.
-2. **Snapshot** — reads all campaign matrices under a read lock and serialises them to `checkpoint.tmp`, then atomically renames it to `checkpoint.json`.
-3. **Parquet export** — reads the WAL from byte 0 to the flush offset, joins `Predicted` + `Rewarded` events on `interaction_id`, and appends matched pairs to per-campaign Parquet files in `{DATA_DIR}/exports/`. Unmatched (in-flight) predictions are **re-emitted** into the WAL tail.
-4. **WAL rotation** — truncates the WAL to only the tail (events after the checkpoint offset). Pre-checkpoint history is no longer needed for recovery.
-
-### Parquet Files: Analytics Only, Not Recovery
-
-The Parquet files in `exports/` are **not** used for recovery. They are analytics exports. Losing them does not affect model state. Recovery uses only `checkpoint.json` + `bandit_wal.jsonl`.
-
-### Recommended Production Setup
-
-```bash
-# Auto-checkpoint every 10,000 rewards (model stays durable within 10K events)
-BANDITDB_CHECKPOINT_INTERVAL=10000
-
-# Or cap WAL size regardless of event count (useful on edge deployments)
-BANDITDB_MAX_WAL_SIZE_MB=50
-
-# Back up the two recovery files on a schedule
-cp /data/checkpoint.json  /backup/checkpoint-$(date +%s).json
-cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl
-```
-
-To move BanditDB to a new host: copy `checkpoint.json` and `bandit_wal.jsonl` to the same `DATA_DIR` on the new machine and start. Recovery is automatic.
 
 ---
 
