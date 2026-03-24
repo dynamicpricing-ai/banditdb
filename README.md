@@ -30,7 +30,7 @@ Under the hood, BanditDB is a database written in Rust that runs **Contextual Ba
 
 ---
 
-## 🚀 Installation
+## Installation
 
 BanditDB consists of the **Rust Engine** (~11MB native binary for Linux, macOS, and Windows — also available as a Docker image) and the **Python SDK** (installed via pip).
 
@@ -177,85 +177,6 @@ Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and How
 
 ---
 
-## Quick Start
-
-### Sleep Improvement
-
-```python
-from banditdb import Client
-
-db = Client("http://localhost:8080", api_key="your-secret-key")
-
-# 1. Create the campaign once at startup
-db.create_campaign(
-    "sleep",
-    arms=["decrease_temperature", "decrease_light", "decrease_noise"],
-    feature_dim=5,
-)
-
-# 2. A participant is ready for tonight's intervention. Build their context vector.
-# Context: [sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]
-context = [
-    1.0,   # female
-    0.35,  # age 35
-    0.50,  # 75 kg
-    0.60,  # moderately active
-    0.96,  # bedtime 23:00
-]
-
-# 3. Ask BanditDB which intervention to apply
-arm, interaction_id = db.predict("sleep", context)
-print(f"Tonight's intervention: {arm}")  # e.g., "decrease_temperature"
-
-# 4. Apply the intervention, then reward the next morning with a PSQI-based score
-apply_intervention(user_id, arm)
-
-# next morning: sleep quality improved from 62 → 79
-score_before = 62
-score_after  = 79
-reward = (score_after - score_before) / score_before  # → 0.27
-
-db.reward(interaction_id, reward)
-```
-
-### Native Agent Tool Use (MCP)
-
-If you are running an AI agent rather than writing application code, `banditdb-mcp` exposes the same predict→reward loop as native MCP tools that any Claude-based agent can call directly.
-
-```bash
-pip install banditdb-python
-```
-
-Add the server to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "banditdb": {
-      "command": "banditdb-mcp",
-      "env": {
-        "BANDITDB_URL": "http://localhost:8080",
-        "BANDITDB_API_KEY": "your-secret-key"
-      }
-    }
-  }
-}
-```
-
-The agent now has five tools available:
-
-| Tool | Arguments | What it does |
-|------|-----------|--------------|
-| `create_campaign` | `campaign_id`, `arms`, `feature_dim`, `alpha=1.0`, `algorithm="linucb"` | Create a new decision campaign. Set `algorithm="thompson_sampling"` for natural Bayesian exploration — no alpha-sweep needed. |
-| `list_campaigns` | — | List all active campaigns with arm count and alpha |
-| `campaign_diagnostics` | `campaign_id` | Per-arm `theta_norm`, prediction count, reward rate — use when a campaign isn't learning |
-| `get_intuition` | `campaign_id`, `context` | Returns the recommended action and an `interaction_id` to save |
-| `record_outcome` | `interaction_id`, `reward` | Reports success (1.0) or failure (0.0) and updates the model |
-
-Every agent in a swarm shares the same BanditDB instance, so the learned model improves with every interaction across the entire fleet.
-
-For more domain-specific walkthroughs — e-commerce personalisation, dynamic pricing — browse the [`examples/`](./examples/) directory.
-
 ---
 
 ## 📈 Benchmark
@@ -298,7 +219,7 @@ Sweeps concurrency levels 1→128 and reports p50/p99 latency and RPS at each le
 
 ---
 
-## 🏗 Architecture Under the Hood
+## Architecture Under the Hood
 
 *   **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
 *   **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; μs write locks for reward updates only.
