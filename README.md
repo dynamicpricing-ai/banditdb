@@ -3,7 +3,7 @@
 
   <h1>🎰 BanditDB</h1>
   <p><b>The Intuition Database.</b></p>
-  <p>Your app learns from every interaction and makes smarter decisions — automatically.</p>
+  <!-- <p>Your app learns from every interaction and makes smarter decisions — automatically.</p> -->
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
@@ -13,25 +13,20 @@
   <br />
 </div>
 
-## 💡 What is BanditDB?
+## What is BanditDB?
 
-Standard databases store *what happened*. **BanditDB stores *what works*.**
+An in-memory decision database that learns from feedback.
 
-Every time an agent succeeds, a patient responds, or a customer converts, BanditDB refines its intuition. The very next user gets a smarter experience. No data pipeline. No ML team. No retraining cycle.
+Under the hood, BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling**. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. BanditDB provides entire backup and restore via rotational Write-Ahead Log + Checkpoint and exports complete Parquet files. Recovery on restart is automatic.
 
-Under the hood, BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling** — entirely in memory. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a Sherman-Morrison rank-1 matrix update. The math is hidden. The results are not.
 
-### The Problem It Solves
-Building a self-learning personalisation engine today requires stitching together Kafka (event streaming), Redis (state), a Python worker (matrix math), and Postgres (logs).
+### High-level features
 
-**BanditDB replaces all of that with a single 50MB binary.**
-
-### What You Get
 * **Your app gets smarter automatically.** Pass a context vector, get a decision. Send a reward when it works. BanditDB does the rest.
 * **Instant learning.** Matrices update in microseconds. No batch jobs, no retraining, no lag.
 * **Built-in delayed rewards.** A concurrent TTL cache remembers the user's context while waiting for their future reward — purchases, conversions, or outcomes that arrive hours later.
-* **Data Science escape hatch.** Every interaction is event-sourced to a Write-Ahead Log and exportable to **Apache Parquet** for offline analysis in Pandas or Polars.
-* **AI agents that remember what works.** The Python SDK ships with `banditdb-mcp`, a Model Context Protocol server that gives any Claude-based agent native `get_intuition` and `record_outcome` tools. Your agent swarm builds shared intuition — autonomously.
+* **Data Science escape hatch.** Every interaction is event-sourced and exportable for Offline Policy Evaluation.
+* **Python SDK.** ships with `banditdb-mcp`, a MCP server that gives agents native `get_intuition` and `record_outcome` tools. Your agent swarm builds shared intuition — autonomously.
 
 ---
 
@@ -54,11 +49,6 @@ banditdb
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
 ```
 
-**Build from source:**
-```bash
-cargo build --release
-./target/release/banditdb
-```
 
 ```bash
 curl http://localhost:8080/health   # {"status":"ok"}
@@ -96,7 +86,7 @@ pip install banditdb-python
 
 ---
 
-## 🔌 API Reference
+## API Reference
 
 All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is set, every request except `/health` must include the header `X-Api-Key: <key>`.
 
@@ -116,7 +106,7 @@ Error responses are always structured: `{"error": "<message>"}` with an appropri
 
 ---
 
-## 🌐 Live Sandbox
+## Live Sandbox
 
 Want to try BanditDB without installing anything? A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
 
@@ -139,7 +129,7 @@ curl -s -X POST https://sandbox.banditdb.com/predict \
 
 ---
 
-## 🖥 Try It — curl
+## Try It — CURL
 
 A complete predict→reward cycle for a **sleep improvement** campaign.
 Arms: `decrease_temperature`, `decrease_light`, `decrease_noise`.
@@ -179,7 +169,7 @@ After enough predict→reward cycles the model converges: patients with similar 
 
 ---
 
-## 📖 Quick Start
+## Quick Start
 
 ### Sleep Improvement
 **The Goal:** One-size-fits-all sleep advice ignores individual physiology. A 25-year-old male athlete and a 60-year-old sedentary woman respond differently to the same environmental change. BanditDB learns those differences automatically — routing each participant to the intervention most likely to work for *their* profile, improving with every reported outcome.
@@ -261,7 +251,7 @@ For more domain-specific walkthroughs — e-commerce personalisation, dynamic pr
 
 ---
 
-## 🧠 Choosing an Algorithm
+## Choosing an Algorithm
 
 BanditDB supports two contextual bandit algorithms. Both share identical per-arm state (A⁻¹, b, θ), so switching is a single field in the campaign creation call.
 
@@ -283,7 +273,7 @@ The `algorithm` field is stored in both the WAL and checkpoint files. Old WAL re
 
 ---
 
-## 📊 The Data Science Escape Hatch
+## The Data Science Escape Hatch
 
 We know Data Scientists hate black boxes. While BanditDB learns instantly in memory, it uses **Event Sourcing** to write every interaction to a disk WAL.
 
@@ -334,7 +324,7 @@ grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id
 
 ---
 
-## 🔄 How Recovery Works
+## How Recovery Works
 
 BanditDB survives crashes and restarts automatically. No manual intervention required. Here is exactly what happens under the hood so you can reason about data loss windows, design your backup strategy, and diagnose recovery edge cases.
 
@@ -455,6 +445,6 @@ Sweeps concurrency levels 1→128 and reports p50/p99 latency and RPS at each le
 *   **Durability:** Asynchronous MPSC channels pipe interactions to a JSON-lines WAL for perfect crash recovery without impacting API latency.
 
 ## 🤝 Contributing
-BanditDB is an open-source project. Whether you want to add Proximal Policy Optimization (PPO) for Version 2, optimize the SIMD math routines, or build SDKs for Go and TypeScript, PRs are welcome! 
+BanditDB is an open-source project. Whether you want to add new model for Version 2 or build SDKs for Go and TypeScript, PRs are welcome! 
 
 Visit [banditdb](https://dynamicpricing-ai.github.io/banditdb/) to read the full documentation.

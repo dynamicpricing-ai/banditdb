@@ -91,6 +91,7 @@
         <div>
           <label class="text-xs text-zinc-500 block mb-1">Context vector <span class="text-zinc-700">(comma-separated, values in [0,1])</span></label>
           <input id="try-context" type="text" placeholder="e.g. 1.0, 0.35, 0.50, 0.60, 0.96"
+                 oninput="updatePredictCurl()"
                  class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-zinc-700 focus:outline-none focus:border-orange-500 transition-colors">
         </div>
         <button onclick="doPredirect()"
@@ -145,6 +146,46 @@
       <button onclick="resetTryIt()" class="mt-4 text-xs text-zinc-500 hover:text-orange-400 transition-colors">
         Try another prediction →
       </button>
+    </div>
+
+    <!-- curl Reference -->
+    <div class="mt-6 border-t border-zinc-800 pt-6">
+      <h3 class="text-sm font-medium text-zinc-300 mb-1">curl Reference</h3>
+      <p class="text-xs text-zinc-500 mb-4">Same calls, from your terminal. Updates as you interact above.</p>
+
+      <!-- List campaigns -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-xs text-zinc-500 font-medium uppercase tracking-wide">List campaigns</span>
+          <button onclick="copyCurl('curl-list')" class="text-xs text-zinc-600 hover:text-orange-400 transition-colors">copy</button>
+        </div>
+        <pre id="curl-list" class="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-xs font-mono text-zinc-300 overflow-x-auto whitespace-pre">curl -s https://sandbox.banditdb.com/campaigns \
+  -H "X-Api-Key: banditdb-demo"</pre>
+      </div>
+
+      <!-- Predict -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-xs text-zinc-500 font-medium uppercase tracking-wide">Predict</span>
+          <button onclick="copyCurl('curl-predict')" class="text-xs text-zinc-600 hover:text-orange-400 transition-colors">copy</button>
+        </div>
+        <pre id="curl-predict" class="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-xs font-mono text-zinc-300 overflow-x-auto whitespace-pre">curl -s -X POST https://sandbox.banditdb.com/predict \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: banditdb-demo" \
+  -d '{"campaign_id":"sleep","context":[1.0,0.35,0.50,0.60,0.96]}'</pre>
+      </div>
+
+      <!-- Reward -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-xs text-zinc-500 font-medium uppercase tracking-wide">Reward</span>
+          <button onclick="copyCurl('curl-reward')" class="text-xs text-zinc-600 hover:text-orange-400 transition-colors">copy</button>
+        </div>
+        <pre id="curl-reward" class="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-xs font-mono text-zinc-300 overflow-x-auto whitespace-pre">curl -s -X POST https://sandbox.banditdb.com/reward \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: banditdb-demo" \
+  -d '{"interaction_id":"&lt;from predict response&gt;","reward":0.80}'</pre>
+      </div>
     </div>
   </div>
 
@@ -316,6 +357,40 @@
       `;
     }
 
+    // ── curl helpers ──────────────────────────────────────────────────────────
+    function updatePredictCurl() {
+      const campaign = document.getElementById('try-campaign').value || 'sleep';
+      const raw      = document.getElementById('try-context').value.trim();
+      const context  = raw
+        ? raw.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v))
+        : [1.0, 0.35, 0.50, 0.60, 0.96];
+      document.getElementById('curl-predict').textContent =
+        `curl -s -X POST https://sandbox.banditdb.com/predict \\\n` +
+        `  -H "Content-Type: application/json" \\\n` +
+        `  -H "X-Api-Key: banditdb-demo" \\\n` +
+        `  -d '{"campaign_id":"${campaign}","context":[${context.join(',')}]}'`;
+    }
+
+    function updateRewardCurl(interactionId, reward) {
+      const iid = interactionId || '<from predict response>';
+      const r   = reward !== undefined ? reward.toFixed(2) : '0.80';
+      document.getElementById('curl-reward').textContent =
+        `curl -s -X POST https://sandbox.banditdb.com/reward \\\n` +
+        `  -H "Content-Type: application/json" \\\n` +
+        `  -H "X-Api-Key: banditdb-demo" \\\n` +
+        `  -d '{"interaction_id":"${iid}","reward":${r}}'`;
+    }
+
+    function copyCurl(id) {
+      const text = document.getElementById(id).textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = event.target;
+        btn.textContent = 'copied!';
+        btn.classList.add('text-orange-400');
+        setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('text-orange-400'); }, 1500);
+      });
+    }
+
     // ── Try It ────────────────────────────────────────────────────────────────
     function onCampaignSelect() {
       const id   = document.getElementById('try-campaign').value;
@@ -327,6 +402,7 @@
       } else {
         hint.classList.add('hidden');
       }
+      updatePredictCurl();
     }
 
     async function doPredirect() {
@@ -350,6 +426,7 @@
         currentInteractionId = data.interaction_id;
         document.getElementById('result-arm').textContent = data.arm_id;
         document.getElementById('result-id').textContent  = data.interaction_id;
+        updateRewardCurl(data.interaction_id);
         document.getElementById('predict-result').classList.remove('hidden');
         document.getElementById('reward-result').classList.add('hidden');
       } catch(e) { alert(`Error: ${e.message}`); }
@@ -379,6 +456,7 @@
         const arm = document.getElementById('result-arm').textContent;
         document.getElementById('reward-summary').textContent =
           `"${arm}" rewarded ${reward.toFixed(2)} — the model has updated its weights for this context.`;
+        updateRewardCurl(currentInteractionId, reward);
         document.getElementById('reward-result').classList.remove('hidden');
       } catch(e) { alert(`Error: ${e.message}`); }
       finally {
