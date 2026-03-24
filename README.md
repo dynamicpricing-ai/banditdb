@@ -2,7 +2,6 @@
 <div align="center">
 
   <h1>🎰 BanditDB</h1>
-  <p><b>The Intuition Database.</b></p>
   <!-- <p>Your app learns from every interaction and makes smarter decisions — automatically.</p> -->
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
@@ -19,14 +18,11 @@ An in-memory decision database that learns from feedback.
 
 Under the hood, BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling**. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. BanditDB provides entire backup and restore via rotational Write-Ahead Log + Checkpoint and exports complete Parquet files. Recovery on restart is automatic.
 
-
-### High-level features
-
-* **Your app gets smarter automatically.** Pass a context vector, get a decision. Send a reward when it works. BanditDB does the rest.
-* **Instant learning.** Matrices update in microseconds. No batch jobs, no retraining, no lag.
-* **Built-in delayed rewards.** A concurrent TTL cache remembers the user's context while waiting for their future reward — purchases, conversions, or outcomes that arrive hours later.
-* **Data Science escape hatch.** Every interaction is event-sourced and exportable for Offline Policy Evaluation.
-* **Python SDK.** ships with `banditdb-mcp`, a MCP server that gives agents native `get_intuition` and `record_outcome` tools. Your agent swarm builds shared intuition — autonomously.
+* Two HTTP calls: `POST /predict` returns which decision to take, `POST /reward` updates the model.                                                            
+* Delayed rewards handled via a TTL cache — rewards can arrive hours / days after the prediction.                                                                
+* Every interaction is appended to a Write-Ahead Log and exportable to Parquet for offline analysis.                                                      
+* Python SDK includes an MCP server for AI agents.
+* IPS, Doubly Robust estimators for offline policy evaluation.  
 
 ---
 
@@ -61,7 +57,7 @@ Create a `docker-compose.yml` file and start the server:
 version: '3.8'
 services:
   banditdb:
-    image: simeonlukov/banditdb:latest # Or build from source!
+    image: simeonlukov/banditdb:latest
     ports:
       - "8080:8080"
     volumes:
@@ -108,7 +104,7 @@ Error responses are always structured: `{"error": "<message>"}` with an appropri
 
 ## Live Sandbox
 
-Want to try BanditDB without installing anything? A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
+A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
 
 | Campaign | Arms | Context |
 |----------|------|---------|
@@ -165,7 +161,6 @@ curl -s -X POST http://localhost:8080/reward \
 ```
 > `"OK"`
 
-After enough predict→reward cycles the model converges: patients with similar profiles are routed to the arm that consistently produced the highest improvement ratio.
 
 ---
 
@@ -219,14 +214,14 @@ Sweeps concurrency levels 1→128 and reports p50/p99 latency and RPS at each le
 
 ---
 
-## Architecture Under the Hood
+## Architecture
 
 *   **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
 *   **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; μs write locks for reward updates only.
-*   **Memory:** Delayed rewards are mapped to historical context vectors via `moka`, a blazing-fast concurrent TTL cache that prevents OOM crashes.
+*   **Memory:** Delayed rewards are mapped to historical context vectors via `moka`, a fast concurrent TTL cache that prevents OOM crashes.
 *   **Durability:** Asynchronous MPSC channels pipe interactions to a JSON-lines WAL for perfect crash recovery without impacting API latency.
 
 ## Contributing
-BanditDB is an open-source project. Whether you want to add new model for Version 2 or build SDKs for Go and TypeScript, PRs are welcome! 
+BanditDB is an open-source project. PRs are welcome! 
 
 Visit [banditdb.com](https://banditdb.com) to read the full documentation.
