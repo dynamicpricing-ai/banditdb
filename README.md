@@ -169,11 +169,11 @@ After enough predict→reward cycles the model converges: patients with similar 
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and How Recovery Works — is available at:
 
-**[https://dynamicpricing-ai.github.io/banditdb/docs.html](https://dynamicpricing-ai.github.io/banditdb/docs.html)**
+**[https://banditdb.com/docs.html](https://banditdb.com/docs.html)**
 
 ---
 
@@ -226,7 +226,7 @@ Sweeps concurrency levels 1→128 and reports p50/p99 latency and RPS at each le
 *   **Memory:** Delayed rewards are mapped to historical context vectors via `moka`, a blazing-fast concurrent TTL cache that prevents OOM crashes.
 *   **Durability:** Asynchronous MPSC channels pipe interactions to a JSON-lines WAL for perfect crash recovery without impacting API latency.
 
-## 🤝 Contributing
+## Contributing
 BanditDB is an open-source project. Whether you want to add new model for Version 2 or build SDKs for Go and TypeScript, PRs are welcome! 
 
-Visit [banditdb](https://dynamicpricing-ai.github.io/banditdb/) to read the full documentation.
+Visit [banditdb.com](https://banditdb.com) to read the full documentation.
