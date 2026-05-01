@@ -55,49 +55,48 @@
   </nav>
 
   <!-- Hero -->
-  <section class="px-6 pt-28 pb-24 text-center">
+  <section class="px-6 pt-12 pb-10 sm:pt-28 sm:pb-24 text-center">
     <div class="max-w-3xl mx-auto">
 
-      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-base text-zinc-300 mb-12">
-        <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></span>
-        Written in Rust &nbsp;·&nbsp; Concurrent reads · μs writes &nbsp;·&nbsp; ~11MB binary
+      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-xs sm:text-sm text-zinc-300 mb-6 sm:mb-12">
+        <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse shrink-0"></span>
+        <span>Rust · ~11MB binary · ~10K predictions/s · WAL durability</span>
       </div>
 
-      <h1 class="text-5xl sm:text-6xl font-extrabold mb-6 leading-tight tracking-tight">
+      <h1 class="text-4xl sm:text-5xl md:text-6xl font-extrabold mb-5 leading-tight tracking-tight">
         The <span class="gradient-text">Intuition</span> Database
       </h1>
 
-      <p class="text-2xl text-zinc-300 mb-14 leading-relaxed">
-        An in-memory decision database — your app learns from every interaction and makes smarter decisions automatically.
+      <p class="text-lg sm:text-2xl text-zinc-300 mb-8 sm:mb-14 leading-relaxed">
+        An in-memory decision database for agents and applications that need to learn which decisions work — and get better with every outcome.
       </p>
 
       <!-- Install commands -->
-      <div class="flex flex-col gap-3 max-w-xl mx-auto mb-12">
-        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 font-mono text-base min-w-0">
+      <div class="flex flex-col gap-3 max-w-xl mx-auto mb-8 sm:mb-12">
+        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
             <span class="text-zinc-500 shrink-0">$</span>
             <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
           </div>
           <button onclick="copy(this, 'docker run -d -p 8080:8080 simeonlukov/banditdb:latest')"
-                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
         </div>
-        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-3 font-mono text-base">
-            <span class="text-zinc-500">$</span>
+        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
+            <span class="text-zinc-500 shrink-0">$</span>
             <span class="text-zinc-100">pip install banditdb-python</span>
           </div>
           <button onclick="copy(this, 'pip install banditdb-python')"
-                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0 text-base" title="Copy">⎘</button>
+                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
         </div>
       </div>
 
-      <div class="flex items-center justify-center flex-wrap gap-x-6 gap-y-2 text-base text-zinc-500">
+      <div class="flex items-center justify-center flex-wrap gap-x-5 gap-y-2 text-sm text-zinc-500">
         <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-white transition-colors">★ GitHub</a>
         <span class="text-zinc-700">·</span>
-        <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-white transition-colors">🐳 Docker Hub</a>
+        <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-white transition-colors">Docker Hub</a>
         <span class="text-zinc-700">·</span>
-        <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-white transition-colors">🐍 PyPI</a>
-        <span class="text-zinc-700">·</span>
+        <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-white transition-colors">PyPI</a>
         <span class="text-zinc-700">·</span>
         <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener" class="hover:text-white transition-colors">🟢 Live Sandbox</a>
         <span class="text-zinc-700">·</span>
@@ -108,9 +107,9 @@
   </section>
 
   <!-- Problem -->
-  <section class="px-6 py-36 section-divider">
+  <section class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-4xl font-bold text-center mb-3">
+      <h2 class="text-2xl sm:text-4xl font-bold text-center mb-3">
         Building a self-learning system today is a plumbing nightmare
       </h2>
       <p class="text-zinc-400 text-center mb-14 text-lg">Four moving parts. Four failure modes. Weeks to build. Months to maintain.</p>
@@ -161,14 +160,14 @@
   </section>
 
   <!-- How it works -->
-  <section id="how-it-works" class="px-6 py-36 section-divider">
+  <section id="how-it-works" class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-4xl font-bold text-center mb-3">How it works</h2>
+      <h2 class="text-2xl sm:text-4xl font-bold text-center mb-3">How it works</h2>
       <p class="text-zinc-400 text-center mb-4 text-base">Four API calls — one to define, three to learn.</p>
-      <p class="text-zinc-500 text-center mb-16 text-base leading-relaxed max-w-2xl mx-auto">BanditDB keeps weight matrices in memory. Every outcome you report updates those weights in microseconds, gradually building intuition about which choice wins for which context.</p>
+      <p class="text-zinc-500 text-center mb-8 md:mb-16 text-base leading-relaxed max-w-2xl mx-auto">BanditDB keeps weight matrices in memory. Every outcome you report updates those weights in microseconds, gradually building intuition about which choice wins for which context.</p>
 
       <!-- Step 1: Create (run once) -->
-      <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-8 mb-5">
+      <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-5 md:p-8 mb-5">
         <div class="flex flex-col md:flex-row gap-8 items-start">
           <div class="md:w-72 shrink-0">
             <div class="flex items-center gap-3 mb-4">
@@ -197,7 +196,11 @@
       "decrease_light",
       "decrease_noise"
     ],
-    "feature_dim": 5
+    "feature_dim": 5,
+    "metadata": {
+      "owner": "wellness-team",
+      "features": ["sex","age_norm","weight_norm","activity","bedtime_norm"]
+    }
   }'</code></pre>
             </div>
             <div class="tab-panel hidden" data-group="step-1" data-tab="python">
@@ -209,6 +212,10 @@
         "decrease_noise",
     ],
     feature_dim=5,
+    metadata={
+        "owner": "wellness-team",
+        "features": ["sex","age_norm","weight_norm","activity","bedtime_norm"],
+    },
 )</code></pre>
             </div>
           </div>
@@ -226,7 +233,7 @@
       </div>
 
       <!-- Step 2: Predict -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8 mb-5">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 md:p-8 mb-5">
         <div class="flex flex-col md:flex-row gap-8 items-start">
           <div class="md:w-72 shrink-0">
             <div class="flex items-center gap-3 mb-4">
@@ -270,7 +277,7 @@ arm, iid = db.predict("sleep", context)
       </div>
 
       <!-- Step 3: Act (no BanditDB API call — your application code) -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8 mb-5">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 md:p-8 mb-5">
         <div class="flex flex-col md:flex-row gap-8 items-start">
           <div class="md:w-72 shrink-0">
             <div class="flex items-center gap-3 mb-4">
@@ -290,7 +297,7 @@ apply_intervention(user_id, arm)
       </div>
 
       <!-- Step 4: Reward -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 md:p-8">
         <div class="flex flex-col md:flex-row gap-8 items-start">
           <div class="md:w-72 shrink-0">
             <div class="flex items-center gap-3 mb-4">
@@ -334,15 +341,54 @@ db.reward(iid, reward)</code></pre>
 
 
   <!-- For AI agents (MCP) -->
-  <section id="agents" class="px-6 py-36 section-divider">
+  <section id="agents" class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <div class="grid md:grid-cols-2 gap-14 items-center">
 
-        <div class="order-2 md:order-1">
+      <div class="text-center mb-14">
+        <div class="text-orange-400 text-base font-semibold uppercase tracking-wider mb-4">For AI Agents</div>
+        <h2 class="text-2xl sm:text-4xl font-bold mb-5">Your agent swarm builds shared intuition</h2>
+        <p class="text-zinc-400 text-lg max-w-2xl mx-auto">
+          Standard LLM agents are stateless — if they make a bad decision, they repeat it tomorrow.
+          BanditDB's MCP server gives your entire fleet shared, persistent decision memory.
+        </p>
+      </div>
+
+      <!-- Terminal art: agent swarm diagram -->
+      <div class="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden mb-12">
+        <!-- Terminal chrome -->
+        <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center gap-2">
+          <div class="flex gap-1.5">
+            <div class="w-3 h-3 rounded-full bg-red-500/50"></div>
+            <div class="w-3 h-3 rounded-full bg-yellow-500/50"></div>
+            <div class="w-3 h-3 rounded-full bg-green-500/50"></div>
+          </div>
+          <span class="text-xs text-zinc-500 font-mono ml-2">banditdb-swarm</span>
+        </div>
+        <!-- ASCII art -->
+        <pre class="p-5 sm:p-8 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto select-none" style="color:#52525b"><span style="color:#3f3f46">$</span> <span style="color:#71717a">banditdb-swarm --agents 3 --campaign prompt_strategy</span>
+
+  <span style="color:#3f3f46">┌─────────────────────┐</span>  <span style="color:#f97316">get_intuition(context)</span>    <span style="color:#f97316">┌──────────────────────┐</span>
+  <span style="color:#3f3f46">│                     │</span> <span style="color:#f97316">─────────────────────────►</span> <span style="color:#f97316">│                      │</span>
+  <span style="color:#3f3f46">│</span>   agent swarm       <span style="color:#3f3f46">│</span>                            <span style="color:#f97316">│</span>   <span style="color:#fb923c">BanditDB</span>           <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>   N agents · one    <span style="color:#3f3f46">│◄──</span> <span style="color:#e4e4e7">"chain_of_thought"</span> <span style="color:#3f3f46">─────</span><span style="color:#f97316">│</span>                      <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>   shared model      <span style="color:#3f3f46">│</span>                            <span style="color:#f97316">│</span>   <span style="color:#fb923c">prompt_strategy</span>    <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">└──────────┬──────────┘</span>                            <span style="color:#f97316">│</span>   <span style="color:#3f3f46">LinUCB · 4 arms</span>    <span style="color:#f97316">│</span>
+             <span style="color:#3f3f46">│</span>                                       <span style="color:#f97316">└──────────────────────┘</span>
+             <span style="color:#3f3f46">│</span>  execute · score · <span style="color:#4ade80">reward: 0.84  ✓</span>                <span style="color:#3f3f46">▲</span>
+             <span style="color:#3f3f46">│</span>                                                   <span style="color:#3f3f46">│</span>
+             <span style="color:#3f3f46">└</span><span style="color:#3b82f6">────────────  record_outcome(iid, 0.84)  ──────────</span><span style="color:#3f3f46">┘</span>
+
+  <span style="color:#27272a">every reward updates the shared model for the entire swarm</span></pre>
+      </div>
+
+      <!-- MCP install + tools -->
+      <div class="grid md:grid-cols-2 gap-14 items-start">
+
+        <div>
           <div class="mb-6">
             <div class="text-xs text-zinc-500 font-mono mb-1.5">register with claude</div>
             <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-3.5 flex items-center justify-between gap-3">
-              <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+              <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
                 <span class="text-zinc-500 shrink-0">$</span>
                 <span class="text-zinc-100 truncate">claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080</span>
               </div>
@@ -370,17 +416,15 @@ db.reward(iid, reward)</code></pre>
           </div>
         </div>
 
-        <div class="order-1 md:order-2">
-          <div class="text-orange-400 text-base font-semibold uppercase tracking-wider mb-4">For AI Agents</div>
-          <h2 class="text-4xl font-bold mb-5">Your agent swarm builds shared intuition</h2>
+        <div class="pt-2">
           <p class="text-zinc-300 leading-relaxed mb-5">
-            Standard LLM agents are stateless — if they make a bad decision, they repeat it tomorrow. BanditDB's built-in MCP server gives your entire agent swarm shared persistent memory.
+            Two commands and BanditDB is a native tool in Claude, Cursor, or any MCP-compatible host. Agents can get intuition, record outcomes, and inspect learning state — no config file editing required.
           </p>
-          <p class="text-zinc-300 leading-relaxed mb-5">
-            Two commands and BanditDB is a native tool in Claude. Your agents can get intuition, record outcomes, and inspect learning state — no config file editing required.
+          <p class="text-zinc-400 leading-relaxed mb-5">
+            Every decision made by any agent in the swarm improves the routing for all future agents. The network accumulates judgment that no single agent could build alone.
           </p>
-          <p class="text-zinc-400">
-            Every decision made by any agent in the network improves the routing for all future agents.
+          <p class="text-zinc-500 leading-relaxed text-base">
+            BanditDB is not a chat memory or a vector store. It is a decision layer that learns <em>which choices work</em> for <em>which context</em> — and gets better with every outcome.
           </p>
         </div>
 
@@ -388,52 +432,115 @@ db.reward(iid, reward)</code></pre>
     </div>
   </section>
 
-  <!-- Use cases -->
-  <section class="px-6 py-36 section-divider">
+  <!-- Causal inference -->
+  <section class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-4xl font-bold text-center mb-3">Any decision with a measurable outcome</h2>
-      <p class="text-zinc-400 text-center mb-14 text-lg">BanditDB works wherever you can define a context, a set of choices, and a reward.</p>
 
-      <div class="grid sm:grid-cols-2 md:grid-cols-3 gap-5">
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">🤖</div>
-          <h3 class="font-semibold text-lg mb-2">LLM Routing</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Route tasks to the right model. Learn which model wins for which task type across your entire agent fleet.</p>
+      <div class="text-orange-400 text-base font-semibold uppercase tracking-wider text-center mb-4">Causal Analysis</div>
+      <h2 class="text-2xl sm:text-4xl font-bold text-center mb-3">Understand <em>why</em> the model learned what it learned</h2>
+      <p class="text-zinc-400 text-center mb-14 text-lg max-w-2xl mx-auto">
+        BanditDB logs propensity scores at prediction time. Export to Parquet, run a Causal Forest,
+        and go beyond correlation to genuine treatment effect estimates — with confidence intervals and user-segment breakdowns.
+      </p>
+
+      <div class="grid md:grid-cols-5 gap-10 items-start">
+
+        <!-- Terminal output -->
+        <div class="md:col-span-3">
+          <div class="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
+            <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-3 flex items-center gap-2">
+              <div class="flex gap-1.5">
+                <div class="w-3 h-3 rounded-full bg-red-500/50"></div>
+                <div class="w-3 h-3 rounded-full bg-yellow-500/50"></div>
+                <div class="w-3 h-3 rounded-full bg-green-500/50"></div>
+              </div>
+              <span class="text-xs text-zinc-500 font-mono ml-2">scripts/causal_analysis.py --parquet exports/sleep.parquet</span>
+            </div>
+            <pre class="p-5 text-xs font-mono leading-relaxed overflow-x-auto" style="color:#a1a1aa"><span style="color:#71717a">Loading exports/sleep.parquet ...
+  1,847 interactions · 3 arms
+
+Fitting causal forests (one per arm) ...
+</span>
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span style="color:#e4e4e7">1. AVERAGE TREATMENT EFFECT  (90% CI)</span>
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+  decrease_temperature  <span style="color:#fb923c">+0.1842</span>  [+0.098, +0.270]  <span style="color:#4ade80">✓</span>
+  decrease_light        <span style="color:#a1a1aa">+0.0421</span>  [-0.018, +0.103]  <span style="color:#52525b">~</span>
+  decrease_noise        <span style="color:#a1a1aa">-0.0297</span>  [-0.104, +0.045]  <span style="color:#52525b">~</span>
+
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span style="color:#e4e4e7">2. CAUSAL ARM ASSIGNMENT</span>
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+  decrease_temperature  61.3%  <span style="color:#f97316">██████████████████████████████</span>
+  decrease_light        24.7%  <span style="color:#f97316">████████████</span>
+  decrease_noise        14.0%  <span style="color:#f97316">███████</span>
+
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span style="color:#e4e4e7">3. FEATURE IMPORTANCE</span>
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+  decrease_temperature:
+    activity      0.341  <span style="color:#f97316">█████████████</span>
+    age_norm      0.287  <span style="color:#f97316">████████████</span>
+    weight_norm   0.198  <span style="color:#f97316">████████</span>
+    sex           0.104  <span style="color:#f97316">████</span>
+    bedtime_norm  0.070  <span style="color:#f97316">███</span>
+
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+<span style="color:#e4e4e7">4. WINNING SEGMENTS</span>
+<span style="color:#52525b">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
+  decrease_temperature:
+    activity (high, Δ=+0.31), age_norm (high, Δ=+0.19)
+
+  decrease_light:
+    sex (female, Δ=+0.24), bedtime_norm (late, Δ=+0.18)
+
+  decrease_noise:
+    age_norm (young, Δ=+0.22), activity (low, Δ=+0.14)</pre>
+          </div>
         </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">💰</div>
-          <h3 class="font-semibold text-lg mb-2">Dynamic Pricing</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Learn which price maximises revenue for which customer profile. Adapt in real time as behaviour changes.</p>
+
+        <!-- Explanation cards -->
+        <div class="md:col-span-2 space-y-5">
+
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-green-400 font-semibold text-base mb-2">ATE ✓ — causally significant</div>
+            <p class="text-zinc-400 text-sm leading-relaxed">
+              Temperature reduction has a statistically significant causal effect on sleep quality (+0.18, 90% CI entirely above zero). Light and noise show no reliable causal signal despite correlation in the raw data.
+            </p>
+          </div>
+
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-orange-400 font-semibold text-base mb-2">Arm assignment vs. live bandit</div>
+            <p class="text-zinc-400 text-sm leading-relaxed">
+              61% of users are causally best served by temperature. If the bandit's live distribution (Campaigns tab) matches this ratio, it has converged to the correct causal structure. A large mismatch means the model is still exploring.
+            </p>
+          </div>
+
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-orange-400 font-semibold text-base mb-2">Winning segments → A/B tests</div>
+            <p class="text-zinc-400 text-sm leading-relaxed">
+              High-activity adults respond best to temperature. Women with late bedtimes respond better to light reduction. Use these segments to design targeted trials or audit whether the bandit routes each profile correctly.
+            </p>
+          </div>
+
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 border-dashed">
+            <div class="text-zinc-400 font-mono text-xs mb-2">pip install econml scikit-learn polars</div>
+            <p class="text-zinc-500 text-xs leading-relaxed">
+              Requires LinUCB campaigns — propensity scores are only logged for LinUCB. Thompson Sampling does not log propensities.
+            </p>
+          </div>
+
         </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">🎯</div>
-          <h3 class="font-semibold text-lg mb-2">Personalisation</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Show the right content, offer, or layout to each user segment without a data science team.</p>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">🏥</div>
-          <h3 class="font-semibold text-lg mb-2">Clinical Trials</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Adaptive trial designs that route patients to the most promising treatment arm as evidence accumulates.</p>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">🛒</div>
-          <h3 class="font-semibold text-lg mb-2">Checkout Optimisation</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Learn which upsell offer converts best for which cart composition and customer history.</p>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-6">
-          <div class="text-2xl mb-4">⚖️</div>
-          <h3 class="font-semibold text-lg mb-2">Legal Intake Routing</h3>
-          <p class="text-base text-zinc-400 leading-relaxed">Route inbound matters to the right response — consult, intake form, referral, or decline — based on case value, capacity, and conflict risk.</p>
-        </div>
+
       </div>
     </div>
   </section>
 
   <!-- Examples -->
-  <section id="examples" class="px-6 py-36 bg-zinc-900 border-t border-zinc-800">
+  <section id="examples" class="px-6 py-16 md:py-36 bg-zinc-900 border-t border-zinc-800">
     <div class="max-w-5xl mx-auto">
       <div class="text-orange-400 text-base font-semibold uppercase tracking-wider text-center mb-4">Walkthroughs</div>
-      <h2 class="text-4xl font-bold text-center mb-3">Learn by example</h2>
+      <h2 class="text-2xl sm:text-4xl font-bold text-center mb-3">Learn by example</h2>
       <p class="text-zinc-400 text-center mb-14 text-lg">Six end-to-end examples, ordered from simplest to most advanced.</p>
 
       <div class="grid sm:grid-cols-2 gap-5">
@@ -593,42 +700,42 @@ db.reward(iid, reward)</code></pre>
   </section>
 
   <!-- Stats -->
-  <section class="px-6 py-28 section-divider">
+  <section class="px-6 py-12 md:py-28 section-divider">
     <div class="max-w-5xl mx-auto">
       <div class="grid grid-cols-2 md:grid-cols-5 gap-5">
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-5xl font-extrabold text-orange-400 mb-3">~11MB</div>
+          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">~11MB</div>
           <div class="text-sm text-zinc-400">Native binary for Linux, macOS, and Windows</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-5xl font-extrabold text-orange-400 mb-3">μs</div>
+          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">μs</div>
           <div class="text-sm text-zinc-400">Matrix updates via Sherman-Morrison rank-1 formula</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-5xl font-extrabold text-orange-400 mb-3">~10K</div>
+          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">~10K</div>
           <div class="text-sm text-zinc-400">Predictions per second on a single node</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-4xl font-extrabold text-orange-400 mb-3">+16.7%</div>
+          <div class="text-3xl sm:text-4xl font-extrabold text-orange-400 mb-3">+16.7%</div>
           <div class="text-sm text-zinc-400">Lift over random on MovieLens 100K — up to <span class="text-zinc-300 font-medium">+24.6%</span> with feature engineering</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-5xl font-extrabold text-orange-400 mb-3">WAL</div>
-          <div class="text-sm text-zinc-400">Crash-safe durability with Parquet export</div>
+          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">WAL</div>
+          <div class="text-sm text-zinc-400">Write-Ahead Log with checkpoint &amp; Parquet export — every interaction is crash-safe and exportable</div>
         </div>
       </div>
     </div>
   </section>
 
   <!-- CTA -->
-  <section class="px-6 py-28 section-divider text-center">
+  <section class="px-6 py-12 md:py-28 section-divider text-center">
     <div class="max-w-xl mx-auto">
-      <h2 class="text-5xl font-extrabold mb-5">Start in one command</h2>
+      <h2 class="text-3xl sm:text-5xl font-extrabold mb-5">Start in one command</h2>
       <p class="text-zinc-400 mb-10 text-lg">No sign-up. No cloud account. No configuration required.</p>
 
       <p class="text-xs text-zinc-500 uppercase tracking-widest mb-2">Binary — Linux, macOS, Windows</p>
       <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-4 flex items-center justify-between gap-3 max-w-md mx-auto mb-5">
-        <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+        <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
           <span class="text-zinc-500 shrink-0">$</span>
           <span class="text-zinc-100 truncate">curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh</span>
         </div>
@@ -638,7 +745,7 @@ db.reward(iid, reward)</code></pre>
 
       <p class="text-xs text-zinc-500 uppercase tracking-widest mb-2">Docker</p>
       <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-5 py-4 flex items-center justify-between gap-3 max-w-md mx-auto mb-8">
-        <div class="flex items-center gap-3 font-mono text-sm min-w-0">
+        <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
           <span class="text-zinc-500 shrink-0">$</span>
           <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
         </div>

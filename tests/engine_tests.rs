@@ -1,3 +1,4 @@
+use banditdb::engine::WalMessage;
 use banditdb::state::Algorithm;
 use banditdb::BanditDB;
 
@@ -13,7 +14,7 @@ async fn test_1_2_asymptotic_convergence() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let true_theta = [3.0_f64, -2.0_f64];
 
@@ -59,7 +60,7 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     // Baseline: correct dim must succeed.
     assert!(db.predict("dim_test", vec![1.0, 0.0]).is_some());
@@ -98,7 +99,7 @@ async fn test_v1_duplicate_campaign_rejected() {
     let db = BanditDB::new(wal, "/tmp");
 
     // First create must succeed
-    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb));
+    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None));
 
     // Train it so theta is non-zero
     let (_, iid) = db.predict("dup_test", vec![1.0, 0.0]).unwrap();
@@ -114,7 +115,7 @@ async fn test_v1_duplicate_campaign_rejected() {
 
     // Second create with same id must be rejected
     assert!(
-        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb),
+        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None),
         "Duplicate campaign creation must return false"
     );
 
@@ -146,7 +147,7 @@ async fn test_v2_double_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
 
@@ -193,7 +194,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let theta_before = {
         let c = db.campaigns.read();
@@ -235,7 +236,7 @@ async fn test_v4_reward_range_behaviour() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     // Non-finite reward: engine must reject it, theta stays at zero
     let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
@@ -280,7 +281,7 @@ async fn test_bandit_learns_context() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb);
+    db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let mobile_context = vec![1.0, 0.0];
     let desktop_context = vec![0.0, 1.0];
@@ -311,7 +312,7 @@ async fn test_ts_learns_context() {
     for attempt in 0..3 {
         let _ = std::fs::remove_file(wal);
         let db = BanditDB::new(wal, "/tmp");
-        db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+        db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
         let mobile_context  = vec![1.0, 0.0];
         let desktop_context = vec![0.0, 1.0];
@@ -347,7 +348,7 @@ async fn test_ts_explores() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+    db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..50 {
@@ -376,7 +377,7 @@ async fn test_ts_checkpoint_recovery() {
     std::fs::create_dir_all(data_dir).unwrap();
 
     let db = BanditDB::new(&wal_path, data_dir);
-    db.add_campaign("ts_camp", vec!["x".to_string(), "y".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+    db.add_campaign("ts_camp", vec!["x".to_string(), "y".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     for i in 0..20_usize {
         let ctx = vec![(i as f64 * 0.3).sin(), (i as f64 * 0.3).cos()];
@@ -414,8 +415,8 @@ async fn test_linucb_ts_coexist() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb);
-    db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling);
+    db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     for _ in 0..20 {
         if let Some((_, iid)) = db.predict("ucb_camp", vec![1.0, 0.0]) {
@@ -436,4 +437,133 @@ async fn test_linucb_ts_coexist() {
     }
 
     let _ = std::fs::remove_file(wal);
+}
+
+/// Campaign metadata is stored, survives checkpoint+recovery, and is absent when not set.
+#[tokio::test]
+async fn test_campaign_metadata_roundtrip() {
+    let data_dir = "/tmp/banditdb_metadata_test_data";
+    let wal = format!("{}/bandit_wal.jsonl", data_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    let meta = serde_json::json!({
+        "owner": "recommendations-team",
+        "features": ["user_age", "session_length"],
+        "version": 1
+    });
+
+    {
+        let db = BanditDB::new(&wal, data_dir);
+        db.add_campaign("meta_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, Some(meta.clone()));
+        db.add_campaign("bare_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, None);
+
+        // Verify metadata is in memory immediately
+        let campaigns = db.campaigns.read();
+        let stored = campaigns.get("meta_camp").unwrap().metadata.as_ref().unwrap();
+        assert_eq!(stored["owner"], "recommendations-team");
+        assert_eq!(stored["features"][0], "user_age");
+        assert!(campaigns.get("bare_camp").unwrap().metadata.is_none());
+        drop(campaigns);
+
+        db.checkpoint().await.unwrap();
+    }
+
+    // Recover from checkpoint and verify metadata survives
+    {
+        let db2 = BanditDB::new(&wal, data_dir);
+        let campaigns = db2.campaigns.read();
+        let stored = campaigns.get("meta_camp").unwrap().metadata.as_ref().unwrap();
+        assert_eq!(stored["owner"], "recommendations-team");
+        assert_eq!(stored["version"], 1);
+        assert!(campaigns.get("bare_camp").unwrap().metadata.is_none());
+    }
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+/// Metadata must survive WAL-only recovery (pre-checkpoint crash path).
+///
+/// If the process dies before checkpoint() is ever called, the CampaignCreated
+/// event in the WAL is the only persistence record. This test simulates that by
+/// using the WAL flush barrier (WalMessage::Checkpoint) to guarantee the event
+/// is on disk, then dropping the db without ever calling db.checkpoint(). The
+/// recovered instance must see identical metadata via pure WAL replay.
+#[tokio::test]
+async fn test_campaign_metadata_wal_only_recovery() {
+    let data_dir = "/tmp/banditdb_metadata_wal_test_data";
+    let wal = format!("{}/bandit_wal.jsonl", data_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    let meta = serde_json::json!({
+        "owner": "recommendations-team",
+        "features": ["user_age", "session_length"],
+        "version": 2,
+        "active": true
+    });
+
+    {
+        let db = BanditDB::new(&wal, data_dir);
+        db.add_campaign(
+            "meta_wal_camp",
+            vec!["a".to_string(), "b".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            Some(meta.clone()),
+        );
+        db.add_campaign(
+            "bare_wal_camp",
+            vec!["a".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+        );
+
+        // Flush barrier: guarantees both CampaignCreated events are on disk.
+        // This is NOT db.checkpoint() — no checkpoint.json is written.
+        let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
+        db.event_tx.send(WalMessage::Checkpoint { reply: ftx }).unwrap();
+        let wal_size = frx.await.unwrap();
+        assert!(wal_size > 0, "WAL must be non-empty after add_campaign");
+
+        // Drop without checkpointing — simulates a crash before any checkpoint
+    }
+
+    // Confirm no checkpoint.json was created — we are testing pure WAL recovery
+    assert!(
+        !std::path::Path::new(&format!("{}/checkpoint.json", data_dir)).exists(),
+        "checkpoint.json must not exist — this test verifies WAL-only recovery"
+    );
+
+    // Recover from WAL alone
+    {
+        let db2 = BanditDB::new(&wal, data_dir);
+        let campaigns = db2.campaigns.read();
+
+        assert!(campaigns.contains_key("meta_wal_camp"), "meta_wal_camp must survive WAL replay");
+        assert!(campaigns.contains_key("bare_wal_camp"), "bare_wal_camp must survive WAL replay");
+
+        let stored = campaigns
+            .get("meta_wal_camp")
+            .unwrap()
+            .metadata
+            .as_ref()
+            .expect("metadata must survive WAL replay");
+
+        assert_eq!(stored["owner"], "recommendations-team");
+        assert_eq!(stored["features"][0], "user_age");
+        assert_eq!(stored["features"][1], "session_length");
+        assert_eq!(stored["version"], 2);
+        assert_eq!(stored["active"], true);
+
+        assert!(
+            campaigns.get("bare_wal_camp").unwrap().metadata.is_none(),
+            "bare_wal_camp metadata must remain None after WAL replay"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(data_dir);
 }

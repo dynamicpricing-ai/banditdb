@@ -1,5 +1,6 @@
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 
 fn default_none_map() -> Option<HashMap<String, f64>> { None }
@@ -74,6 +75,8 @@ pub struct CampaignCheckpoint {
     #[serde(default)]
     pub algorithm: Algorithm,
     pub arms: HashMap<String, ArmState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -96,6 +99,8 @@ pub enum DbEvent {
         alpha: f64,
         #[serde(default)]
         algorithm: Algorithm,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
     },
     Predicted {
         interaction_id: String,

@@ -22,6 +22,7 @@ pub struct Campaign {
     pub alpha: f64,
     pub algorithm: Algorithm,
     pub arms: RwLock<HashMap<String, ArmState>>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub struct BanditDB {
@@ -158,7 +159,7 @@ impl BanditDB {
                 for (campaign_id, camp) in checkpoint.campaigns {
                     self.campaigns.write().insert(
                         campaign_id,
-                        Campaign { alpha: camp.alpha, algorithm: camp.algorithm, arms: RwLock::new(camp.arms) },
+                        Campaign { alpha: camp.alpha, algorithm: camp.algorithm, arms: RwLock::new(camp.arms), metadata: camp.metadata },
                     );
                 }
             }
@@ -214,7 +215,7 @@ impl BanditDB {
                     .iter()
                     .map(|(arm_id, state)| (arm_id.clone(), state.clone()))
                     .collect();
-                (id.clone(), CampaignCheckpoint { alpha: campaign.alpha, algorithm: campaign.algorithm.clone(), arms: arms_snapshot })
+                (id.clone(), CampaignCheckpoint { alpha: campaign.alpha, algorithm: campaign.algorithm.clone(), arms: arms_snapshot, metadata: campaign.metadata.clone() })
             }).collect()
         };
 
@@ -324,14 +325,14 @@ impl BanditDB {
     /// The unified math & memory updater
     fn apply_event_to_memory(&self, event: DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm } => {
+            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata } => {
                 let mut arms_map = HashMap::new();
                 for arm in arms {
                     arms_map.insert(arm, ArmState::new(feature_dim));
                 }
                 self.campaigns.write().insert(
                     campaign_id,
-                    Campaign { alpha, algorithm, arms: RwLock::new(arms_map) },
+                    Campaign { alpha, algorithm, arms: RwLock::new(arms_map), metadata },
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
@@ -368,11 +369,11 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64, algorithm: Algorithm) -> bool {
+    pub fn add_campaign(&self, campaign_id: &str, arms: Vec<String>, feature_dim: usize, alpha: f64, algorithm: Algorithm, metadata: Option<serde_json::Value>) -> bool {
         if self.campaigns.read().contains_key(campaign_id) {
             return false;
         }
-        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm };
+        let event = DbEvent::CampaignCreated { campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata };
         self.apply_event_to_memory(event.clone());
         let _ = self.event_tx.send(WalMessage::Event(event));
         true

@@ -84,6 +84,7 @@
         <a href="#algorithms"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Choosing an Algorithm</a>
         <a href="#data-science"  class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Data Science Escape Hatch</a>
         <a href="#recovery"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">How Recovery Works</a>
+        <a href="#use-cases"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Use Cases</a>
       </nav>
     </aside>
 
@@ -107,6 +108,10 @@ db.create_campaign(
     "sleep",
     arms=["decrease_temperature", "decrease_light", "decrease_noise"],
     feature_dim=5,
+    metadata={
+        "owner": "wellness-team",
+        "features": ["sex", "age_norm", "weight_norm", "activity", "bedtime_norm"],
+    },
 )
 
 # 2. A participant is ready for tonight's intervention.
@@ -161,8 +166,8 @@ db.reward(interaction_id, reward)</code></pre>
         <table>
           <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
           <tbody>
-            <tr><td><code>create_campaign</code></td><td>Create a new decision campaign. Accepts <code>algorithm</code> and <code>alpha</code>.</td></tr>
-            <tr><td><code>list_campaigns</code></td><td>List all active campaigns with arm count and alpha.</td></tr>
+            <tr><td><code>create_campaign</code></td><td>Create a new decision campaign. Accepts <code>algorithm</code>, <code>alpha</code>, and an optional free-form <code>metadata</code> object for attaching context (feature names, owner, version, etc.).</td></tr>
+            <tr><td><code>list_campaigns</code></td><td>List all active campaigns with arm count, alpha, and metadata.</td></tr>
             <tr><td><code>campaign_diagnostics</code></td><td>Per-arm <code>theta_norm</code>, prediction count, reward rate. Use when a campaign isn't learning.</td></tr>
             <tr><td><code>get_intuition</code></td><td>Returns the recommended action and an <code>interaction_id</code> to save.</td></tr>
             <tr><td><code>record_outcome</code></td><td>Reports success (1.0) or failure (0.0) and updates the shared model.</td></tr>
@@ -205,6 +210,22 @@ db.create_campaign("routing_ts", ["fast", "cheap"], feature_dim=4,
         <div class="callout">
           <p>The <code>algorithm</code> field is stored in both the WAL and checkpoint files. Old WAL records and checkpoints without an <code>algorithm</code> field recover as <code>"linucb"</code> automatically.</p>
         </div>
+
+        <h3>Campaign Metadata</h3>
+        <p>Pass an optional free-form <code>metadata</code> JSON object when creating a campaign to attach any context — feature names, owner, version, description. BanditDB stores it in the WAL and checkpoint; it survives restarts and is returned by <code>GET /campaigns</code> and <code>GET /campaign/:id</code>. There is no schema enforcement — store whatever is useful to your agents or data consumers.</p>
+
+        <pre><code class="language-python">db.create_campaign(
+    "routing",
+    arms=["fast", "cheap"],
+    feature_dim=4,
+    metadata={
+        "owner": "infra-team",
+        "features": ["latency_ms", "cost_usd", "error_rate", "queue_depth"],
+        "version": 2,
+    },
+)</code></pre>
+
+        <p>Campaigns without a <code>metadata</code> field behave identically — it is omitted from API responses when absent.</p>
       </section>
 
       <!-- Data Science -->
@@ -328,6 +349,90 @@ cp /data/checkpoint.json  /backup/checkpoint-$(date +%s).json
 cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl</code></pre>
 
         <p>To move BanditDB to a new host: copy <code>checkpoint.json</code> and <code>bandit_wal.jsonl</code> to the same <code>DATA_DIR</code> on the new machine and start. Recovery is automatic.</p>
+      </section>
+
+      <!-- Use Cases -->
+      <section id="use-cases" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Use Cases</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Any decision that has a context, a finite set of choices, and a measurable outcome is a candidate for BanditDB.</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Arms (choices)</th>
+              <th>Context</th>
+              <th>Reward signal</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>LLM routing</strong></td>
+              <td>GPT-4o, Claude Sonnet, Gemini Flash, …</td>
+              <td>Task type, input length, session turn, user expertise</td>
+              <td>LLM-as-judge score, user thumbs up, task completion</td>
+            </tr>
+            <tr>
+              <td><strong>Prompt strategy</strong></td>
+              <td>Zero-shot, chain-of-thought, few-shot, structured output</td>
+              <td>Task complexity, domain, input length, session context</td>
+              <td>LLM-as-judge quality score (0–1)</td>
+            </tr>
+            <tr>
+              <td><strong>Agent tool selection</strong></td>
+              <td>Which tool or sub-agent to invoke for a given step</td>
+              <td>Task type, prior tool results, cost budget</td>
+              <td>Task success, latency, cost</td>
+            </tr>
+            <tr>
+              <td><strong>Dynamic pricing</strong></td>
+              <td>Price tiers or discount levels</td>
+              <td>Inventory, seasonality, competitor pricing, customer segment</td>
+              <td>Revenue per unit or sell-through rate</td>
+            </tr>
+            <tr>
+              <td><strong>Checkout optimisation</strong></td>
+              <td>Upsell offer, free shipping, no offer</td>
+              <td>Cart value, customer history, device type</td>
+              <td>Conversion (binary) or order value lift</td>
+            </tr>
+            <tr>
+              <td><strong>Content personalisation</strong></td>
+              <td>Article, offer, layout variant</td>
+              <td>User demographics, history, session signals</td>
+              <td>Click, time-on-page, downstream conversion</td>
+            </tr>
+            <tr>
+              <td><strong>Legal intake routing</strong></td>
+              <td>Consult, intake form, refer, decline</td>
+              <td>Case value, matter complexity, conflict risk, capacity</td>
+              <td>Matter opened, revenue collected</td>
+            </tr>
+            <tr>
+              <td><strong>Adaptive clinical trials</strong></td>
+              <td>Treatment arms</td>
+              <td>Patient demographics, comorbidities, baseline score</td>
+              <td>Outcome score normalised to [0, 1]</td>
+            </tr>
+            <tr>
+              <td><strong>Sleep / wellness</strong></td>
+              <td>Temperature, light, noise reduction</td>
+              <td>Sex, age, weight, activity level, bedtime</td>
+              <td>PSQI score improvement ratio</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>The reward must be a scalar in <code>[0, 1]</code>. If your natural metric has a different range, divide by its maximum (e.g. <code>revenue / max_possible_revenue</code>) or use a ratio like <code>(after - before) / before</code>, clipped to [0, 1].</p>
+        </div>
+
+        <h3>When BanditDB is not the right tool</h3>
+        <ul>
+          <li><strong>Pure exploration / discovery</strong> — if you have no feedback signal yet and are building a dataset from scratch, start with random assignment and switch to BanditDB once you have ~100 outcomes per arm.</li>
+          <li><strong>Very high-dimensional action spaces</strong> (thousands of arms) — LinUCB scales with arms × feature_dim² in memory. For catalogue-scale recommendation, consider embedding-based retrieval first and use BanditDB for the final re-ranking stage.</li>
+          <li><strong>Non-stationary rewards with hard concept drift</strong> — LinUCB assumes rewards are stationary. If the distribution shifts sharply (e.g. a major product change), delete and recreate the campaign to reset the priors.</li>
+        </ul>
       </section>
 
     </main>

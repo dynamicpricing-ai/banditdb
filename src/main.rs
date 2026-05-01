@@ -39,6 +39,7 @@ struct CreateCampaignRequest {
     alpha: f64,
     #[serde(default)]
     algorithm: Algorithm,
+    metadata: Option<serde_json::Value>,
 }
 
 fn default_alpha() -> f64 { 1.0 }
@@ -72,6 +73,8 @@ struct CampaignSummary {
     alpha: f64,
     algorithm: Algorithm,
     arm_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +94,8 @@ struct CampaignInfo {
     total_predictions: u64,
     total_rewards: u64,
     arms: HashMap<String, ArmInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
 }
 
 // --- Route handlers ---
@@ -105,7 +110,7 @@ async fn handle_create_campaign(
     if payload.arms.is_empty() {
         return Err(AppError(StatusCode::BAD_REQUEST, "Campaign must have at least one arm".to_string()));
     }
-    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha, payload.algorithm) {
+    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha, payload.algorithm, payload.metadata) {
         true  => Ok(Json("Campaign Created")),
         false => Err(AppError(
             StatusCode::CONFLICT,
@@ -167,6 +172,7 @@ async fn handle_list_campaigns(State(db): State<Arc<BanditDB>>) -> Json<Vec<Camp
             alpha: campaign.alpha,
             algorithm: campaign.algorithm.clone(),
             arm_count: campaign.arms.read().len(),
+            metadata: campaign.metadata.clone(),
         })
         .collect();
     list.sort_by(|a, b| a.campaign_id.cmp(&b.campaign_id));
@@ -210,6 +216,7 @@ async fn handle_campaign_info(
         total_predictions,
         total_rewards,
         arms,
+        metadata: campaign.metadata.clone(),
     }))
 }
 

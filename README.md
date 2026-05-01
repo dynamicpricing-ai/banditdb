@@ -91,7 +91,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is s
 | `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
 | `GET` | `/campaigns` | Yes | List all live campaigns with their `alpha` and arm count. |
 | `GET` | `/campaign/:id` | Yes | Full diagnostic for one campaign: per-arm `theta`, `theta_norm`, `prediction_count`, `reward_count`, and campaign-level totals. Returns 404 if not found. |
-| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha","algorithm"}`. `alpha` is optional (default `1.0`). `algorithm` is optional (default `"linucb"`) — also accepts `"thompson_sampling"` for Linear Thompson Sampling, which samples from the posterior instead of adding a UCB bonus. |
+| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha","algorithm","metadata"}`. `alpha` is optional (default `1.0`). `algorithm` is optional (default `"linucb"`) — also accepts `"thompson_sampling"` for Linear Thompson Sampling. `metadata` is an optional free-form JSON object for attaching any campaign context (owner, feature names, version, etc.) — stored, persisted through checkpoints, and returned by `GET /campaigns` and `GET /campaign/:id`. |
 | `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
 | `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
 | `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
@@ -135,7 +135,15 @@ Context vector: `[sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]`
 ```bash
 curl -s -X POST http://localhost:8080/campaign \
   -H "Content-Type: application/json" \
-  -d '{"campaign_id":"sleep","arms":["decrease_temperature","decrease_light","decrease_noise"],"feature_dim":5}'
+  -d '{
+    "campaign_id": "sleep",
+    "arms": ["decrease_temperature","decrease_light","decrease_noise"],
+    "feature_dim": 5,
+    "metadata": {
+      "owner": "wellness-team",
+      "features": ["sex","age_norm","weight_norm","activity","bedtime_norm"]
+    }
+  }'
 ```
 > `"Campaign Created"`
 
@@ -143,7 +151,7 @@ curl -s -X POST http://localhost:8080/campaign \
 ```bash
 curl -s http://localhost:8080/campaigns
 ```
-> `[{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3}]`
+> `[{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3,"metadata":{"owner":"wellness-team","features":["sex","age_norm","weight_norm","activity","bedtime_norm"]}}]`
 
 **Predict** — female, 35yo, 75 kg, moderately active, bedtime 23:00: - see above how the context was calculated out of the actual values to fit in [0-1] interval.
 ```bash
