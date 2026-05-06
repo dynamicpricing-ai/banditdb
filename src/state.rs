@@ -8,10 +8,39 @@ fn default_none_map() -> Option<HashMap<String, f64>> { None }
 fn default_alpha() -> f64 { 1.0 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NeuralLinUCBConfig {
+    pub context_dim:    usize,
+    pub embed_dim:      usize,
+    pub hidden_dim:     usize,
+    pub hidden_layers:  usize,
+    pub retrain_every:  usize,
+    pub retrain_steps:  usize,
+    pub learning_rate:  f64,
+    pub lambda:         f64,
+}
+
+impl Default for NeuralLinUCBConfig {
+    fn default() -> Self {
+        Self {
+            context_dim:   64,
+            embed_dim:     32,
+            hidden_dim:    128,
+            hidden_layers: 2,
+            retrain_every: 200,
+            retrain_steps: 100,
+            learning_rate: 1e-3,
+            lambda:        1.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
     Linucb,
     ThompsonSampling,
+    #[serde(rename = "neural_lin_ucb")]
+    NeuralLinUCB(NeuralLinUCBConfig),
 }
 
 impl Default for Algorithm {

@@ -17,3 +17,10 @@ serde_json = "1.0"
 polars = { version = "0.41", features = ["json", "parquet", "lazy"] }
 rand = "0.8"
 rand_distr = "0.4"
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+
+[features]
+neural = ["dep:candle-core", "dep:candle-nn"]
+cuda   = ["neural", "candle-core/cuda"]
+metal  = ["neural", "candle-core/metal"]

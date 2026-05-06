@@ -110,7 +110,19 @@ async fn handle_create_campaign(
     if payload.arms.is_empty() {
         return Err(AppError(StatusCode::BAD_REQUEST, "Campaign must have at least one arm".to_string()));
     }
-    match db.add_campaign(&payload.campaign_id, payload.arms, payload.feature_dim, payload.alpha, payload.algorithm, payload.metadata) {
+    // For NeuralLinUCB, ArmState matrices live in embed_dim space (not context_dim).
+    // The context_dim is embedded in the algorithm config and validated at predict time.
+    let arm_dim = match &payload.algorithm {
+        Algorithm::NeuralLinUCB(cfg) => cfg.embed_dim,
+        _ => {
+            if payload.feature_dim == 0 {
+                return Err(AppError(StatusCode::BAD_REQUEST, "feature_dim must be > 0".into()));
+            }
+            payload.feature_dim
+        }
+    };
+
+    match db.add_campaign(&payload.campaign_id, payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata) {
         true  => Ok(Json("Campaign Created")),
         false => Err(AppError(
             StatusCode::CONFLICT,

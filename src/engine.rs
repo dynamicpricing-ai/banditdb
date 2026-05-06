@@ -1,4 +1,6 @@
 use crate::state::{Algorithm, ArmState, CampaignCheckpoint, CheckpointData, CompletedInteraction, DbEvent, InteractionRecord};
+#[cfg(feature = "neural")]
+use crate::neural::NeuralLinUCBState;
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
@@ -23,6 +25,63 @@ pub struct Campaign {
     pub algorithm: Algorithm,
     pub arms: RwLock<HashMap<String, ArmState>>,
     pub metadata: Option<serde_json::Value>,
+    #[cfg(feature = "neural")]
+    pub neural: Option<parking_lot::Mutex<NeuralLinUCBState>>,
+}
+
+impl Campaign {
+    pub fn new(
+        alpha:     f64,
+        algorithm: Algorithm,
+        arms:      RwLock<HashMap<String, ArmState>>,
+        metadata:  Option<serde_json::Value>,
+    ) -> Self {
+        #[cfg(feature = "neural")]
+        let neural = match &algorithm {
+            Algorithm::NeuralLinUCB(cfg) => {
+                match NeuralLinUCBState::new(cfg) {
+                    Ok(state) => Some(parking_lot::Mutex::new(state)),
+                    Err(e) => {
+                        println!("[neural] Failed to init network: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        Self {
+            alpha,
+            algorithm,
+            arms,
+            metadata,
+            #[cfg(feature = "neural")]
+            neural,
+        }
+    }
+
+    /// Returns the embedding of `context` for Algorithm 1 scoring.
+    /// Identity for LinUCB / ThompsonSampling; MLP forward pass for NeuralLinUCB.
+    #[cfg(feature = "neural")]
+    pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
+        if let Some(neural) = &self.neural {
+            return neural.lock().embed(context);
+        }
+        context.clone()
+    }
+
+    #[cfg(not(feature = "neural"))]
+    pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
+        context.clone()
+    }
+
+    /// The dimension the caller must supply in the context vector.
+    pub fn context_dim(&self) -> Option<usize> {
+        match &self.algorithm {
+            Algorithm::NeuralLinUCB(cfg) => Some(cfg.context_dim),
+            _ => None,
+        }
+    }
 }
 
 pub struct BanditDB {
@@ -159,8 +218,26 @@ impl BanditDB {
                 for (campaign_id, camp) in checkpoint.campaigns {
                     self.campaigns.write().insert(
                         campaign_id,
-                        Campaign { alpha: camp.alpha, algorithm: camp.algorithm, arms: RwLock::new(camp.arms), metadata: camp.metadata },
+                        Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), camp.metadata),
                     );
+                }
+
+                // Load saved neural weights if present
+                #[cfg(feature = "neural")]
+                {
+                    let neural_dir = format!("{}/neural", data_dir);
+                    let campaigns = self.campaigns.read();
+                    for (campaign_id, campaign) in campaigns.iter() {
+                        if let Some(neural) = &campaign.neural {
+                            let path = format!("{}/{}.safetensors", neural_dir, campaign_id);
+                            if std::path::Path::new(&path).exists() {
+                                match neural.lock().load(&path) {
+                                    Ok(_)  => println!("[recovery] Loaded neural weights for {campaign_id}"),
+                                    Err(e) => println!("[recovery] Failed to load neural weights for {campaign_id}: {e}"),
+                                }
+                            }
+                        }
+                    }
                 }
             }
             None => {
@@ -307,7 +384,52 @@ impl BanditDB {
             }
         }
 
-        // 7. Rotate WAL — discard the prefix already embedded in the checkpoint
+        // 7. (Neural) Run Algorithm 2 on campaigns that have accumulated enough rewards,
+        //    then re-accumulate arm matrices in embedding space (warm start).
+        //    Runs before WAL rotation so the updated weights are included in the checkpoint.
+        #[cfg(feature = "neural")]
+        {
+            let neural_dir = format!("{}/neural", self.data_dir);
+            fs::create_dir_all(&neural_dir).ok();
+
+            let campaigns = self.campaigns.read();
+            for (campaign_id, campaign) in campaigns.iter() {
+                let Some(neural_mutex) = &campaign.neural else { continue };
+                let mut neural = neural_mutex.lock();
+                if !neural.should_retrain() { continue }
+
+                // Snapshot arm states for Algorithm 2 (read θ while arms.read() is held)
+                let arms_snapshot: HashMap<String, ArmState> = campaign.arms.read()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                match neural.retrain(&arms_snapshot) {
+                    Err(e) => {
+                        println!("[checkpoint] Neural retrain failed for {campaign_id}: {e}");
+                        continue;
+                    }
+                    Ok(_) => {}
+                }
+
+                // Re-accumulate arm matrices in new embedding space
+                let new_arm_states = neural.reaccumulate(&arms_snapshot);
+                let mut arms_write = campaign.arms.write();
+                for (arm_id, new_state) in new_arm_states {
+                    arms_write.insert(arm_id, new_state);
+                }
+
+                // Persist network weights as a safetensors sidecar
+                let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
+                if let Err(e) = neural.save(&weights_path) {
+                    println!("[checkpoint] Failed to save neural weights for {campaign_id}: {e}");
+                }
+
+                println!("[checkpoint] Neural retrain complete for {campaign_id}");
+            }
+        }
+
+        // 9. Rotate WAL — discard the prefix already embedded in the checkpoint
         let (rot_tx, rot_rx) = oneshot::channel::<()>();
         self.event_tx
             .send(WalMessage::Rotate { checkpoint_offset: wal_offset, reply: rot_tx })
@@ -332,7 +454,7 @@ impl BanditDB {
                 }
                 self.campaigns.write().insert(
                     campaign_id,
-                    Campaign { alpha, algorithm, arms: RwLock::new(arms_map), metadata },
+                    Campaign::new(alpha, algorithm, RwLock::new(arms_map), metadata),
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
@@ -352,8 +474,21 @@ impl BanditDB {
             DbEvent::Rewarded { interaction_id, reward, .. } => {
                 if let Some(record) = self.interactions.get(&interaction_id) {
                     if let Some(campaign) = self.campaigns.read().get(&record.campaign_id) {
+                        // Embed before acquiring arms.write() to avoid nested lock ordering issues
+                        let features = campaign.embed(&record.context);
+
                         if let Some(arm_state) = campaign.arms.write().get_mut(&record.arm_id) {
-                            arm_state.update(&record.context, reward);
+                            arm_state.update(&features, reward);
+                        }
+
+                        // Push raw context + reward into the neural buffer for Algorithm 2
+                        #[cfg(feature = "neural")]
+                        if let Some(neural) = &campaign.neural {
+                            neural.lock().push(
+                                record.context.to_vec(),
+                                record.arm_id.clone(),
+                                reward,
+                            );
                         }
                     }
                     // Remove after rewarding — prevents the same interaction being
@@ -390,18 +525,23 @@ impl BanditDB {
             let context_arr = Array1::from_vec(context.clone());
             let arms = campaign.arms.read();
 
-            // Guard: reject context whose dimension doesn't match the campaign's feature space.
-            if let Some((_, first_arm)) = arms.iter().next() {
-                if context_arr.len() != first_arm.theta.len() {
-                    return None;
-                }
+            // Guard: reject context whose dimension doesn't match the campaign's expected input.
+            // For NeuralLinUCB, context_dim is in the algorithm config; for others it equals embed_dim.
+            let expected_context_dim = campaign.context_dim()
+                .unwrap_or_else(|| arms.iter().next().map(|(_, a)| a.theta.len()).unwrap_or(0));
+            if context_arr.len() != expected_context_dim {
+                return None;
             }
+
+            // Compute embedding once (identity for LinUCB/TS, MLP forward for NeuralLinUCB)
+            let features = campaign.embed(&context_arr);
 
             // Collect all arm scores in one pass.
             let scores: Vec<(String, f64)> = arms.iter().map(|(arm_id, state)| {
-                let score = match campaign.algorithm {
-                    Algorithm::Linucb           => state.score(&context_arr, campaign.alpha),
-                    Algorithm::ThompsonSampling => state.score_ts(&context_arr, campaign.alpha),
+                let score = match &campaign.algorithm {
+                    Algorithm::ThompsonSampling       => state.score_ts(&features, campaign.alpha),
+                    Algorithm::Linucb
+                    | Algorithm::NeuralLinUCB(_)      => state.score(&features, campaign.alpha),
                 };
                 (arm_id.clone(), score)
             }).collect();
@@ -411,10 +551,11 @@ impl BanditDB {
                 .map(|(id, _)| id.clone())
                 .unwrap_or_default();
 
-            // Propensity: softmax over UCB scores for LinUCB. None for Thompson Sampling.
-            let arm_propensities = match campaign.algorithm {
-                Algorithm::Linucb => Some(softmax_propensities(&scores)),
+            // Propensity: softmax over UCB scores for LinUCB and NeuralLinUCB. None for TS.
+            let arm_propensities = match &campaign.algorithm {
                 Algorithm::ThompsonSampling => None,
+                Algorithm::Linucb
+                | Algorithm::NeuralLinUCB(_) => Some(softmax_propensities(&scores)),
             };
 
             (best_arm, arm_propensities)
