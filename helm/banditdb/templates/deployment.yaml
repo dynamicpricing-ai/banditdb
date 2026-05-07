@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "banditdb.fullname" . }}
+  labels:
+    {{- include "banditdb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "banditdb.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate   # BanditDB is single-writer; RollingUpdate would create split-brain
+  template:
+    metadata:
+      annotations:
+        # Force pod restart when the auth secret changes
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "banditdb.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "banditdb.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: banditdb
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.port }}
+              protocol: TCP
+          env:
+            - name: DATA_DIR
+              value: /data
+            - name: PORT
+              value: {{ .Values.config.port | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.config.logFormat | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.config.rustLog | quote }}
+            - name: BANDITDB_TENANT_MODE
+              value: {{ .Values.tenantMode | quote }}
+            - name: BANDITDB_WAL_FORMAT
+              value: {{ .Values.config.walFormat | quote }}
+            - name: BANDITDB_MAX_FEATURE_DIM
+              value: {{ .Values.config.maxFeatureDim | quote }}
+            - name: BANDITDB_MAX_ARMS
+              value: {{ .Values.config.maxArms | quote }}
+            - name: BANDITDB_RATE_LIMIT_PER_SEC
+              value: {{ .Values.config.rateLimitPerSec | quote }}
+            {{- if .Values.config.checkpointInterval }}
+            - name: BANDITDB_CHECKPOINT_INTERVAL
+              value: {{ .Values.config.checkpointInterval | quote }}
+            {{- end }}
+            {{- if .Values.config.maxWalSizeMb }}
+            - name: BANDITDB_MAX_WAL_SIZE_MB
+              value: {{ .Values.config.maxWalSizeMb | quote }}
+            {{- end }}
+            {{- if .Values.config.auditLog }}
+            - name: BANDITDB_AUDIT_LOG
+              value: {{ .Values.config.auditLog | quote }}
+            {{- end }}
+            {{- if or .Values.auth.apiKeys .Values.auth.apiKey }}
+            {{- if .Values.auth.apiKeys }}
+            - name: BANDITDB_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "banditdb.fullname" . }}-auth
+                  key: BANDITDB_API_KEYS
+            {{- end }}
+            {{- if .Values.auth.apiKey }}
+            - name: BANDITDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "banditdb.fullname" . }}-auth
+                  key: BANDITDB_API_KEY
+            {{- end }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "banditdb.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

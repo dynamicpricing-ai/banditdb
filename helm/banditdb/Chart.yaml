@@ -1,0 +1,18 @@
+apiVersion: v2
+name: banditdb
+description: Ultra-fast Contextual Bandit Database with WAL durability and causal analysis
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - bandit
+  - contextual-bandit
+  - machine-learning
+  - personalization
+  - decision-making
+home: https://github.com/simeonlkv/banditdb
+sources:
+  - https://github.com/simeonlkv/banditdb
+maintainers:
+  - name: Simeon Lukov
+    email: s.lukov@dynamicpricing.ai

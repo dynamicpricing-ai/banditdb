@@ -1,0 +1,40 @@
+BanditDB {{ .Chart.AppVersion }} has been deployed.
+
+  Release name : {{ .Release.Name }}
+  Namespace    : {{ .Release.Namespace }}
+
+1. Get the server URL:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+  NOTE: It may take a few minutes for the external IP to be assigned.
+  watch kubectl get svc --namespace {{ .Release.Namespace }} {{ include "banditdb.fullname" . }}
+{{- else if eq .Values.service.type "NodePort" }}
+  export NODE_PORT=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "banditdb.fullname" . }} -o jsonpath="{.spec.ports[0].nodePort}")
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "http://$NODE_IP:$NODE_PORT"
+{{- else }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "banditdb.fullname" . }} 8080:{{ .Values.service.port }}
+  echo "http://127.0.0.1:8080"
+{{- end }}
+
+2. Health check:
+  curl http://<SERVER>/health
+
+3. Python SDK quickstart:
+  pip install banditdb-python
+  from banditdb import Client
+  db = Client("http://<SERVER>", api_key="<YOUR_KEY>")
+  db.create_campaign("my-campaign", ["A", "B"], feature_dim=4)
+
+4. Persistent data:
+   WAL and checkpoints are stored in the /data volume.
+   Back up the PVC regularly. Recovery: checkpoint.json + wal tail.
+
+{{- if not (or .Values.auth.apiKeys .Values.auth.apiKey) }}
+
+⚠ WARNING: No API key configured. The server is running in open mode.
+  Set auth.apiKeys or auth.apiKey in values.yaml before exposing to the network.
+{{- end }}

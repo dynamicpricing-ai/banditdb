@@ -1,0 +1,141 @@
+# BanditDB Helm Chart — default values
+# Override with: helm install banditdb . -f my-values.yaml
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: banditdb
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+  # pullSecrets: [{ name: regcred }]
+
+replicaCount: 1  # BanditDB is single-writer; always keep at 1
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP   # Use LoadBalancer to expose externally
+  port: 8080
+  annotations: {}
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: banditdb.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - hosts: [banditdb.example.com]
+  #   secretName: banditdb-tls
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  # storageClass: "" # leave empty for cluster default
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  # existingClaim: ""
+
+# ── Authentication ────────────────────────────────────────────────────────────
+# Stored in a Kubernetes Secret. Fill exactly ONE of:
+auth:
+  # Multi-key RBAC (recommended):
+  #   "key1=admin;key2=writer;key3=reader"
+  # With tenants:
+  #   "key1=admin;key2=admin:tenant_a;key3=writer:tenant_b"
+  apiKeys: ""
+  # Legacy single admin key (backward compat):
+  apiKey: ""
+
+# ── Multi-tenancy ──────────────────────────────────────────────────────────────
+tenantMode: false
+
+# ── Server configuration ──────────────────────────────────────────────────────
+config:
+  port: 8080
+  logFormat: ""          # set to "json" for production structured logging
+  rustLog: "info"
+
+  # Checkpoint after N rewards (0 = disabled)
+  checkpointInterval: 5000
+  # Checkpoint when WAL exceeds N MB (0 = disabled)
+  maxWalSizeMb: 100
+
+  maxFeatureDim: 4096
+  maxArms: 1000
+  rateLimitPerSec: 1000
+
+  # "msgpack" for 3–5× smaller WAL (opt-in)
+  walFormat: "json"
+
+  # Path inside the container for audit log (empty = disabled)
+  auditLog: ""
+
+# ── Compute resources ─────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# ── Health probes ─────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# ── Pod configuration ─────────────────────────────────────────────────────────
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: [ALL]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── Autoscaling ───────────────────────────────────────────────────────────────
+# BanditDB is single-writer: maxReplicas MUST stay at 1.
+# HPA is provided for platform completeness and future read-replica support.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 1  # Do not raise — no multi-writer support yet
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
