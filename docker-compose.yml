@@ -1,19 +1,72 @@
 version: '3.8'
 
+# ── BanditDB — single-node production compose ────────────────────────────────
+# Copy .env.example to .env and fill in BANDITDB_API_KEY before starting.
+#
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+
 services:
   banditdb:
-    build: .
+    build:
+      context: .
+      args:
+        # Uncomment to compile with NeuralLinUCB (requires candle build deps):
+        # FEATURES: neural
     image: banditdb:latest
-    container_name: banditdb_engine
+    container_name: banditdb
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:${PORT:-8080}"
     environment:
-      - DATA_DIR=/data
-      - BANDITDB_API_KEY=d18cb8cbab687b0a94ab390798f9d12f920c59df8a39d3e1fef3b2224e0c7f31
+      DATA_DIR: /data
+      PORT: ${PORT:-8080}
+
+      # ── Authentication ─────────────────────────────────────────────────────
+      # Multi-key RBAC (recommended):
+      #   BANDITDB_API_KEYS: key1=admin;key2=writer;key3=reader
+      # With multi-tenancy:
+      #   BANDITDB_API_KEYS: key1=admin;key2=admin:tenant_a;key3=writer:tenant_b
+      BANDITDB_API_KEYS: ${BANDITDB_API_KEYS:-}
+      # Legacy single-key (admin):
+      BANDITDB_API_KEY: ${BANDITDB_API_KEY:-}
+
+      # ── Multi-tenancy ──────────────────────────────────────────────────────
+      # Set to "true" to enforce per-tenant namespace isolation.
+      BANDITDB_TENANT_MODE: ${BANDITDB_TENANT_MODE:-false}
+
+      # ── Checkpointing ─────────────────────────────────────────────────────
+      # Checkpoint after this many rewarded events (recommended: 1000–10000)
+      BANDITDB_CHECKPOINT_INTERVAL: ${BANDITDB_CHECKPOINT_INTERVAL:-5000}
+      # Also checkpoint when WAL exceeds this many MB
+      BANDITDB_MAX_WAL_SIZE_MB: ${BANDITDB_MAX_WAL_SIZE_MB:-100}
+
+      # ── Limits ────────────────────────────────────────────────────────────
+      BANDITDB_MAX_FEATURE_DIM: ${BANDITDB_MAX_FEATURE_DIM:-4096}
+      BANDITDB_MAX_ARMS: ${BANDITDB_MAX_ARMS:-1000}
+      BANDITDB_RATE_LIMIT_PER_SEC: ${BANDITDB_RATE_LIMIT_PER_SEC:-1000}
+
+      # ── Logging ───────────────────────────────────────────────────────────
+      # LOG_FORMAT=json for structured production logs
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      RUST_LOG: ${RUST_LOG:-info}
+      # Path inside the container for the audit log (optional)
+      BANDITDB_AUDIT_LOG: ${BANDITDB_AUDIT_LOG:-}
+
+      # ── WAL format ────────────────────────────────────────────────────────
+      # BANDITDB_WAL_FORMAT=msgpack for 3–5× smaller WAL (opt-in)
+      BANDITDB_WAL_FORMAT: ${BANDITDB_WAL_FORMAT:-json}
+
     volumes:
       - banditdb_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   banditdb_data:
-    name: banditdb_production_volume
+    name: banditdb_data

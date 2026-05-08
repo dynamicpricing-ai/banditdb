@@ -1,5 +1,6 @@
 use ndarray::Array1;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering;
 use crate::state::{ArmState, NeuralLinUCBConfig};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Linear, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -32,30 +33,30 @@ pub fn select_device() -> Device {
 #[cfg(feature = "cuda")]
 fn try_cuda(ordinal: usize) -> Device {
     Device::new_cuda(ordinal).unwrap_or_else(|_| {
-        println!("[neural] CUDA:{ordinal} unavailable — falling back to CPU");
+        tracing::warn!(ordinal, "neural: CUDA unavailable — falling back to CPU");
         Device::Cpu
     })
 }
 #[cfg(not(feature = "cuda"))]
 fn try_cuda(_ordinal: usize) -> Device {
-    println!("[neural] CUDA requested but binary not compiled with --features cuda");
+    tracing::warn!("neural: CUDA requested but binary not compiled with --features cuda");
     Device::Cpu
 }
 
 #[cfg(feature = "metal")]
 fn try_metal() -> Device {
     Device::new_metal(0).unwrap_or_else(|_| {
-        println!("[neural] Metal unavailable — falling back to CPU");
+        tracing::warn!("neural: Metal unavailable — falling back to CPU");
         Device::Cpu
     })
 }
 #[cfg(not(feature = "metal"))]
 fn try_metal() -> Device {
-    println!("[neural] Metal requested but binary not compiled with --features metal");
+    tracing::warn!("neural: Metal requested but binary not compiled with --features metal");
     Device::Cpu
 }
 
-const BUFFER_CAP: usize = 10_000;
+const BUFFER_CAP: usize = 200_000;
 
 pub struct NeuralLinUCBState {
     varmap:        VarMap,
@@ -69,13 +70,13 @@ pub struct NeuralLinUCBState {
     learning_rate: f64,
     lambda:        f64,
     pub reward_count:  usize,
-    pub buffer:    VecDeque<(Vec<f64>, String, f64)>,
+    pub buffer:    VecDeque<(Vec<f64>, String, f64, f64)>, // context, arm_id, reward, propensity
 }
 
 impl NeuralLinUCBState {
     pub fn new(cfg: &NeuralLinUCBConfig) -> candle_core::Result<Self> {
         let device = select_device();
-        println!("[neural] device={device:?}");
+        tracing::info!(device = ?device, "neural: device selected");
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
@@ -136,11 +137,11 @@ impl NeuralLinUCBState {
         h.broadcast_div(&norm)
     }
 
-    pub fn push(&mut self, context: Vec<f64>, arm_id: String, reward: f64) {
+    pub fn push(&mut self, context: Vec<f64>, arm_id: String, reward: f64, propensity: f64) {
         if self.buffer.len() >= BUFFER_CAP {
             self.buffer.pop_front();
         }
-        self.buffer.push_back((context, arm_id, reward));
+        self.buffer.push_back((context, arm_id, reward, propensity));
         self.reward_count += 1;
     }
 
@@ -167,12 +168,12 @@ impl NeuralLinUCBState {
         //   batch_theta: (n, embed_dim)   — θ of the selected arm per interaction
         //   batch_r:     (n, 1)           — observed rewards
         let flat_x: Vec<f32> = buffer.iter()
-            .flat_map(|(ctx, _, _)| ctx.iter().map(|&v| v as f32))
+            .flat_map(|(ctx, _, _, _)| ctx.iter().map(|&v| v as f32))
             .collect();
         let batch_x = Tensor::from_slice(&flat_x, (n, self.context_dim), &self.device)?;
 
         let flat_theta: Vec<f32> = buffer.iter()
-            .flat_map(|(_, arm_id, _)| {
+            .flat_map(|(_, arm_id, _, _)| {
                 arm_states.get(arm_id)
                     .map(|a| a.theta.iter().map(|&v| v as f32).collect::<Vec<_>>())
                     .unwrap_or_else(|| vec![0.0f32; self.embed_dim])
@@ -180,7 +181,7 @@ impl NeuralLinUCBState {
             .collect();
         let batch_theta = Tensor::from_slice(&flat_theta, (n, self.embed_dim), &self.device)?;
 
-        let rewards: Vec<f32> = buffer.iter().map(|(_, _, r)| *r as f32).collect();
+        let rewards: Vec<f32> = buffer.iter().map(|(_, _, r, _)| *r as f32).collect();
         let batch_r = Tensor::from_slice(&rewards, (n, 1), &self.device)?;
 
         let mut opt = AdamW::new(
@@ -207,8 +208,8 @@ impl NeuralLinUCBState {
         Ok(())
     }
 
-    fn w0_reg(&self, n_params: f64) -> candle_core::Result<Tensor> {
-        let scale = n_params * self.lambda / 2.0;
+    fn w0_reg(&self, _n_params: f64) -> candle_core::Result<Tensor> {
+        let scale = self.lambda / 2.0;
         let all_vars = self.varmap.all_vars();
         let mut reg = Tensor::zeros((), DType::F32, &self.device)?;
 
@@ -229,13 +230,13 @@ impl NeuralLinUCBState {
         // Preserve counters from old states (they are stats, not algorithm state)
         for (arm_id, new_state) in new_arms.iter_mut() {
             if let Some(old) = old_arms.get(arm_id) {
-                new_state.prediction_count = old.prediction_count;
-                new_state.reward_count     = old.reward_count;
-                new_state.total_reward     = old.total_reward;
+                new_state.prediction_count.store(old.prediction_count.load(Ordering::Relaxed), Ordering::Relaxed);
+                new_state.reward_count.store(old.reward_count.load(Ordering::Relaxed), Ordering::Relaxed);
+                new_state.total_reward.store(old.total_reward.load(Ordering::Relaxed), Ordering::Relaxed);
             }
         }
 
-        for (ctx, arm_id, reward) in &self.buffer {
+        for (ctx, arm_id, reward, _) in &self.buffer {
             if let Some(state) = new_arms.get_mut(arm_id) {
                 let h = self.embed(&Array1::from_vec(ctx.clone()));
                 state.update(&h, *reward);

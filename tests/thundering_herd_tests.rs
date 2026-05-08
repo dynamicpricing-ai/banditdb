@@ -16,7 +16,7 @@ async fn test_2_1_commutative_b_assertion() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, "/tmp"));
-    db.add_campaign("stress", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("stress", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     const N: usize = 1000;
 
@@ -24,7 +24,7 @@ async fn test_2_1_commutative_b_assertion() {
     // All land on the same arm (it's the only one) with context = [1.0, 0.0].
     let mut interaction_ids = Vec::with_capacity(N);
     for _ in 0..N {
-        if let Some((_, iid)) = db.predict("stress", vec![1.0, 0.0]) {
+        if let Ok((_, iid)) = db.predict("stress", vec![1.0, 0.0]) {
             interaction_ids.push(iid);
         }
     }
@@ -37,7 +37,7 @@ async fn test_2_1_commutative_b_assertion() {
         let db = Arc::clone(&db);
         let ids = Arc::clone(&ids);
         handles.push(tokio::spawn(async move {
-            db.reward(&ids[i], 1.0);
+            let _ = db.reward(&ids[i], 1.0);
         }));
     }
     for h in handles {
@@ -77,7 +77,7 @@ async fn test_2_2_wal_event_count_integrity() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, "/tmp"));
-    db.add_campaign("concurrent", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("concurrent", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None);
 
     const N: usize = 500;
     let mut handles = Vec::with_capacity(N);
@@ -90,8 +90,8 @@ async fn test_2_2_wal_event_count_integrity() {
                 (i as f64 * 0.01).cos(),
                 (i as f64 * 0.1) % 1.0,
             ];
-            if let Some((_, iid)) = db.predict("concurrent", ctx) {
-                db.reward(&iid, 1.0);
+            if let Ok((_, iid)) = db.predict("concurrent", ctx) {
+                let _ = db.reward(&iid, 1.0);
             }
         }));
     }
@@ -138,7 +138,7 @@ async fn test_2_3_reader_starvation_check() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, "/tmp"));
-    db.add_campaign("stress", vec!["a".to_string(), "b".to_string(), "c".to_string()], 4, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("stress", vec!["a".to_string(), "b".to_string(), "c".to_string()], 4, 1.0, Algorithm::Linucb, None);
 
     let error_count = Arc::new(AtomicUsize::new(0));
     let reward_count = Arc::new(AtomicUsize::new(0));
@@ -154,7 +154,7 @@ async fn test_2_3_reader_starvation_check() {
         handles.push(tokio::spawn(async move {
             let ctx = vec![(i as f64 * 0.1).sin(), (i as f64 * 0.1).cos(), 0.5, 0.5];
             while !stop.load(Ordering::Relaxed) {
-                if db.predict("stress", ctx.clone()).is_none() {
+                if db.predict("stress", ctx.clone()).is_err() {
                     errors.fetch_add(1, Ordering::Relaxed);
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -172,11 +172,11 @@ async fn test_2_3_reader_starvation_check() {
             let ctx = vec![0.5_f64, 0.5, 0.3, 0.7];
             while !stop.load(Ordering::Relaxed) {
                 match db.predict("stress", ctx.clone()) {
-                    Some((_, iid)) => {
-                        db.reward(&iid, 1.0);
+                    Ok((_, iid)) => {
+                        let _ = db.reward(&iid, 1.0);
                         rewards.fetch_add(1, Ordering::Relaxed);
                     }
-                    None => {
+                    Err(_) => {
                         errors.fetch_add(1, Ordering::Relaxed);
                     }
                 }

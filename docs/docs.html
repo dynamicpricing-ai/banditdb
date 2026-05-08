@@ -82,6 +82,8 @@
         <a href="#quick-start"   class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Quick Start</a>
         <a href="#mcp"           class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Native Agent Use (MCP)</a>
         <a href="#algorithms"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Choosing an Algorithm</a>
+        <a href="#model-architecture" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Model Architecture</a>
+        <a href="#neural-linucb" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">NeuralLinUCB</a>
         <a href="#data-science"  class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Data Science Escape Hatch</a>
         <a href="#recovery"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">How Recovery Works</a>
         <a href="#use-cases"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Use Cases</a>
@@ -197,35 +199,140 @@ db.reward(interaction_id, reward)</code></pre>
               <td>Samples θ̃ ~ N(θ, α²·A⁻¹), scores by θ̃·x</td>
               <td>Natural Bayesian exploration. <code>alpha=1.0</code> is the principled default. Concurrent users automatically diversify arm coverage.</td>
             </tr>
+            <tr>
+              <td><strong>NeuralLinUCB</strong></td>
+              <td><code>{"neural_lin_ucb": {…}}</code></td>
+              <td>Identical UCB formula to LinUCB, but applied to a learned embedding <code>h(x; W)</code> instead of raw context. MLP retrained in batch at checkpoint time once <code>retrain_every</code> rewards accumulate.</td>
+              <td>Non-linear or high-dimensional contexts where LinUCB has plateaued. Requires the <code>neural</code> feature flag at compile time.</td>
+            </tr>
+            <tr>
+              <td><strong>Progressive (Tournament)</strong></td>
+              <td><code>{"progressive": {"base": "linucb", "challenger": "neural_lin_ucb"}}</code></td>
+              <td>Runs both models in parallel. Uses the better-performing model for 90% of traffic.</td>
+              <td>The recommended default. Handles the cold-start with Linear and upgrades to Neural automatically when data justifies it.</td>
+            </tr>
           </tbody>
         </table>
 
-        <pre><code class="language-python"># LinUCB — tune alpha to control exploration duration
-db.create_campaign("routing", ["fast", "cheap"], feature_dim=4, alpha=1.5)
-
-# Thompson Sampling — natural Bayesian exploration, alpha=1.0 is ideal
-db.create_campaign("routing_ts", ["fast", "cheap"], feature_dim=4,
-                   algorithm="thompson_sampling")</code></pre>
+        <pre><code class="language-python"># Progressive — the internal tournament handled by BanditDB
+db.create_campaign("auto_agent", ["model_a", "model_b"], feature_dim=1536, 
+                   algorithm={"progressive": {"base": "linucb", "challenger": "neural_lin_ucb"}})</code></pre>
 
         <div class="callout">
           <p>The <code>algorithm</code> field is stored in both the WAL and checkpoint files. Old WAL records and checkpoints without an <code>algorithm</code> field recover as <code>"linucb"</code> automatically.</p>
         </div>
+      </section>
 
-        <h3>Campaign Metadata</h3>
-        <p>Pass an optional free-form <code>metadata</code> JSON object when creating a campaign to attach any context — feature names, owner, version, description. BanditDB stores it in the WAL and checkpoint; it survives restarts and is returned by <code>GET /campaigns</code> and <code>GET /campaign/:id</code>. There is no schema enforcement — store whatever is useful to your agents or data consumers.</p>
+      <!-- Model Architecture -->
+      <section id="model-architecture" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Model Architecture</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Why BanditDB uses the Neural-Linear handoff instead of end-to-end Deep RL.</p>
+
+        <h3>Why Neural-Linear?</h3>
+        <p>In the literature, this approach is often called the <strong>"Golden Middle"</strong> of Contextual Bandits. End-to-end Deep Reinforcement Learning (like PPO or Soft Actor-Critic) is notoriously unstable and requires thousands of interactions before it makes even basic sense of its environment. BanditDB is designed for production databases where the first 50 decisions are just as important as the 5,000th.</p>
+
+        <h4>1. Latency vs. Accuracy</h4>
+        <p>A full forward pass of a deep network for every arm is slow (10ms+). By using a <strong>Neural Feature Extractor</strong> with a <strong>Linear Head</strong>, BanditDB achieves sub-millisecond latencies. The heavy neural retraining happens in the background, while the live prediction path is a simple, ultra-fast vector dot product (<code>θᵀh</code>).</p>
+
+        <h4>2. Statistical Rigor (The Closed-Form Variance)</h4>
+        <p>Deep networks are "black boxes" that don't natively understand their own uncertainty. To explore efficiently, they often rely on heuristics like epsilon-greedy or dropout. Because BanditDB's final layer is linear, it can compute an <strong>exact closed-form variance</strong> for every prediction. This allows us to use <strong>UCB</strong> and <strong>Thompson Sampling</strong> with mathematical certainty, leading to lower cumulative regret.</p>
+
+        <h4>3. The Internal Tournament</h4>
+        <p>The <code>Progressive</code> algorithm is our unique technical moat. It runs a continuous internal tournament between a Linear model (safe, sample-efficient) and a Neural model (powerful, non-linear).
+        <ul>
+          <li><strong>Shadow Learning:</strong> Every reward received by the database updates both models simultaneously.</li>
+          <li><strong>Autonomous Handoff:</strong> Using Mean Squared Error (MSE) over the interaction buffer, the engine autonomously detects the exact moment the Neural model has "surpassed" the Linear model's intuition.</li>
+          <li><strong>Self-Correction:</strong> If the Neural model diverges or its performance drops due to noise, the tournament automatically demotes it back to the safe Linear baseline.</li>
+        </ul>
+      </section>
+
+      <!-- NeuralLinUCB -->
+      <section id="neural-linucb" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">NeuralLinUCB</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">An MLP preprocessing stage that gives LinUCB a learnable, non-linear view of the context.</p>
+
+        <p>Standard LinUCB assumes the expected reward is a linear function of the raw context — which breaks down when features interact non-linearly or when the context vector carries redundant dimensions. NeuralLinUCB adds a small MLP that projects the caller's context into a compact fixed-size embedding; LinUCB then operates entirely in that embedding space. The network is retrained in batches at checkpoint time — keeping the hot predict/reward path purely online with no ML overhead per request.</p>
+
+        <div class="ascii">context  x  (context_dim floats)
+      │
+ ┌────┴──────────────────────────────┐
+ │  hidden_layers × hidden_dim × ReLU│  MLP  h(x ; W)
+ └────┬──────────────────────────────┘  retrained every retrain_every rewards
+      │  L2-normalise
+      ▼
+ embedding  h  (embed_dim floats)
+      │
+ θᵀh  +  α · √(hᵀ A⁻¹ h)   ←  LinUCB  (Sherman-Morrison online update)</div>
+
+        <p>Two algorithms run in tandem:</p>
+        <ul>
+          <li><strong>Algorithm 1 (online, every request):</strong> Runs the same Sherman-Morrison LinUCB update used by <code>"linucb"</code>, but on the MLP embedding rather than raw context. No added latency — the MLP forward pass is a single matrix multiply chain.</li>
+          <li><strong>Algorithm 2 (batch, at checkpoint):</strong> Once <code>retrain_every</code> rewards have accumulated, AdamW minimises <code>½·MSE(θᵀh(x;W), r) + (m·λ/2)·‖W − W₀‖²</code> for <code>retrain_steps</code> steps. The L2 penalty toward the initialisation weights <code>W₀</code> prevents catastrophic forgetting across retrain cycles. Arm matrices are then <em>re-accumulated</em> — replayed through the new embedding via Sherman-Morrison — before WAL rotation.</li>
+        </ul>
+
+        <h3>Configuration</h3>
+
+        <table>
+          <thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>context_dim</code></td><td><em>required</em></td><td>Length of the context vector the caller sends at predict time. Fixed at campaign creation.</td></tr>
+            <tr><td><code>embed_dim</code></td><td>32</td><td>Embedding (arm matrix) dimension. Arm matrices are <code>embed_dim × embed_dim</code>. Smaller = faster online updates; larger = more expressive. 16–64 covers most use cases.</td></tr>
+            <tr><td><code>hidden_dim</code></td><td>128</td><td>Width of each hidden layer.</td></tr>
+            <tr><td><code>hidden_layers</code></td><td>2</td><td>Number of hidden layers before the final embedding projection.</td></tr>
+            <tr><td><code>retrain_every</code></td><td>200</td><td>Rewards to accumulate before triggering Algorithm 2. Larger = fewer retrains, more stable arm matrices between checkpoints.</td></tr>
+            <tr><td><code>retrain_steps</code></td><td>100</td><td>AdamW gradient-descent steps per retrain cycle.</td></tr>
+            <tr><td><code>learning_rate</code></td><td>0.001</td><td>AdamW learning rate.</td></tr>
+            <tr><td><code>lambda</code></td><td>1.0</td><td>L2 regularization coefficient toward initial weights <code>W₀</code>. Higher = slower adaptation, more stable. Lower = allows faster weight drift between cycles.</td></tr>
+          </tbody>
+        </table>
 
         <pre><code class="language-python">db.create_campaign(
-    "routing",
-    arms=["fast", "cheap"],
-    feature_dim=4,
-    metadata={
-        "owner": "infra-team",
-        "features": ["latency_ms", "cost_usd", "error_rate", "queue_depth"],
-        "version": 2,
+    "content",
+    arms=["article_a", "article_b", "article_c"],
+    algorithm={
+        "neural_lin_ucb": {
+            "context_dim": 32,    # must match the context vector you send at predict time
+            "embed_dim": 16,      # arm matrices are 16 × 16
+            "hidden_dim": 128,
+            "hidden_layers": 2,
+            "retrain_every": 500, # first retrain after 500 rewards
+            "retrain_steps": 100,
+            "learning_rate": 1e-3,
+            "lambda": 1.0,
+        }
     },
-)</code></pre>
+    alpha=1.0,
+)
 
-        <p>Campaigns without a <code>metadata</code> field behave identically — it is omitted from API responses when absent.</p>
+# context must be exactly context_dim=32 floats
+arm, interaction_id = db.predict("content", context)
+db.reward(interaction_id, reward)</code></pre>
+
+        <div class="callout">
+          <p><strong>Feature flag:</strong> NeuralLinUCB is compiled in only when the <code>neural</code> feature is enabled. The default binary contains no Candle or ML dependencies.<br><br>
+          <code>cargo build --release --features neural</code><br>
+          <code>cargo build --release --features neural,cuda</code><br>
+          <code>cargo build --release --features neural,metal</code></p>
+        </div>
+
+        <h3>Hardware Acceleration</h3>
+        <p>The compute device is selected at startup via the <code>BANDITDB_DEVICE</code> environment variable. When unset, BanditDB auto-detects: CUDA → Metal → CPU.</p>
+
+        <table>
+          <thead><tr><th>Value</th><th>Requires</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><em>unset</em> or <code>auto</code></td><td>—</td><td>CUDA if available, then Metal, then CPU.</td></tr>
+            <tr><td><code>cuda</code></td><td><code>--features neural,cuda</code></td><td>CUDA GPU 0.</td></tr>
+            <tr><td><code>cuda:N</code></td><td><code>--features neural,cuda</code></td><td>Specific CUDA device ordinal.</td></tr>
+            <tr><td><code>metal</code></td><td><code>--features neural,metal</code></td><td>Apple Silicon GPU.</td></tr>
+            <tr><td><code>cpu</code></td><td><code>--features neural</code></td><td>Force CPU regardless of available hardware.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Cold Start and Warm Restart</h3>
+        <p><strong>Cold start:</strong> a freshly created campaign uses randomly-initialised MLP weights until the first Algorithm 2 retrain fires at <code>retrain_every</code> rewards. Random projections are a usable baseline — LinUCB adapts even in a random embedding space — but expect lower sample efficiency than a trained network during this initial phase.</p>
+        <p><strong>Warm restart:</strong> after each retrain, arm matrices (A⁻¹, b, θ) are <em>re-accumulated</em> by replaying the reward buffer through the updated network. This preserves most of the learned signal across retrains instead of resetting LinUCB statistics from scratch.</p>
+        <p><strong>Recovery:</strong> MLP weights are saved as a <code>.safetensors</code> sidecar at <code>{DATA_DIR}/neural/{campaign_id}.safetensors</code> during each checkpoint and reloaded automatically on startup. If the sidecar is missing, the campaign recovers gracefully with fresh random weights and relearns from the WAL tail — model quality degrades temporarily but no data is lost.</p>
       </section>
 
       <!-- Data Science -->
@@ -329,7 +436,8 @@ grep "CampaignDeleted" /data/bandit_wal.jsonl | jq '.CampaignDeleted.campaign_id
         <ol style="list-style:decimal;padding-left:1.5rem;color:#a1a1aa;line-height:1.75;margin-bottom:1rem;">
           <li style="margin-bottom:0.5rem"><strong>Flush barrier</strong> — drains all pending events and <code>fsync</code>s to disk, responds with confirmed byte offset.</li>
           <li style="margin-bottom:0.5rem"><strong>Snapshot</strong> — serialises all campaign matrices to <code>checkpoint.tmp</code>, atomically renames to <code>checkpoint.json</code>.</li>
-          <li style="margin-bottom:0.5rem"><strong>Parquet export</strong> — joins <code>Predicted</code> + <code>Rewarded</code> events, appends matched pairs to per-campaign Parquet files. Unmatched predictions are re-emitted into the WAL tail.</li>
+          <li style="margin-bottom:0.5rem"><strong>Parquet export</strong> — joins <code>Predicted</code> + <code>Rewarded</code> events, writes matched pairs as a timestamped shard per campaign. Unmatched predictions are re-emitted into the WAL tail.</li>
+          <li style="margin-bottom:0.5rem"><strong>Neural retrain</strong> <em>(NeuralLinUCB campaigns only)</em> — if <code>retrain_every</code> rewards have accumulated since the last retrain, runs Algorithm 2, re-accumulates arm matrices in the new embedding space, and saves <code>.safetensors</code> weights to <code>{DATA_DIR}/neural/</code>.</li>
           <li><strong>WAL rotation</strong> — truncates WAL to only the tail. Pre-checkpoint history is no longer needed for recovery.</li>
         </ol>
 

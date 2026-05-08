@@ -2,10 +2,10 @@
 <div align="center">
 
   <h1>🎰 BanditDB</h1>
-  <!-- <p>Your app learns from every interaction and makes smarter decisions — automatically.</p> -->
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
+  [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org)
   [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
   [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](#)
 
@@ -16,28 +16,83 @@
 
 An in-memory decision database that learns from feedback.
 
-Under the hood, BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB** and **Linear Thompson Sampling**. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. BanditDB provides entire backup and restore via rotational Write-Ahead Log + Checkpoint and exports complete Parquet files. Recovery on restart is automatic.
+BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB** (deep contextual bandit), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
 
-* Two HTTP calls: `POST /predict` returns which decision to take, `POST /reward` updates the model.                                                            
-* Delayed rewards handled via a TTL cache — rewards can arrive hours / days after the prediction.                                                                
-* Every interaction is appended to a Write-Ahead Log and exportable to Parquet for offline analysis.                                                      
-* Python SDK includes an MCP server for AI agents.
-* IPS, Doubly Robust estimators for offline policy evaluation.  
+* **Four algorithms in one binary:** LinUCB, Thompson Sampling, NeuralLinUCB, and Progressive Tournament (autonomous algorithm selection via SNIPS-weighted shadow learning).
+* **Two HTTP calls:** `POST /predict` returns which decision to take, `POST /reward` updates the model.
+* **Built-in convergence signal:** `GET /campaign/:id/report` returns 95% CI bounds per arm and a `converged` flag — know exactly when to stop the experiment.
+* Delayed rewards handled via a TTL cache — rewards can arrive hours or days after the prediction.
+* Every interaction is appended to a Write-Ahead Log and exportable to Parquet for offline analysis.
+* RBAC with reader / writer / admin roles; optional multi-tenancy with namespace isolation.
+* Python SDK (with MCP server for AI agents) and JavaScript / TypeScript SDK.
+* IPS and Doubly Robust estimators for offline policy evaluation.
+
+---
+
+## Algorithms
+
+| Algorithm | When to use |
+|-----------|-------------|
+| `"linucb"` | Default. Linear reward signal, fast convergence, lowest computational cost. |
+| `"thompson_sampling"` | Bayesian exploration. Better empirical performance when rewards are highly stochastic. |
+| `{"neural_lin_ucb": {...}}` | Non-linear reward function. MLP embedding + LinUCB in embedding space. Retrains at checkpoint. |
+| `{"progressive": {...}}` | Unsure which algorithm fits? BanditDB runs a base and a challenger in parallel and shifts traffic to the winner. |
+
+### NeuralLinUCB
+
+Learns a deep embedding of the context vector, then applies LinUCB in the embedding space. Use this when the reward function is non-linear in the raw features. The MLP retrains at every `POST /checkpoint` call.
+
+```python
+from banditdb import Client, NeuralLinUCBConfig
+
+db = Client("http://localhost:8080")
+cfg = NeuralLinUCBConfig(
+    context_dim=10,   # must match feature_dim
+    embed_dim=32,     # arm matrix dimension
+    hidden_dim=128,
+    hidden_layers=2,
+    retrain_every=200,
+)
+db.create_campaign("prices", ["10", "15", "20"], feature_dim=10, algorithm=cfg)
+```
+
+### Progressive Tournament
+
+Runs two algorithms side-by-side in shadow mode. Every reward updates both models. At each checkpoint, both are evaluated with SNIPS: if the challenger wins `required_wins` consecutive rounds by > 10%, one `step_bps` of traffic (default 10%) shifts to the challenger — and vice-versa. Traffic is bounded: 10% floor to 90% ceiling.
+
+```python
+from banditdb import Client, NeuralLinUCBConfig, ProgressiveConfig
+
+db = Client("http://localhost:8080")
+cfg = ProgressiveConfig(
+    base="linucb",
+    challenger=NeuralLinUCBConfig(context_dim=10, embed_dim=32),
+    min_obs=100,
+    required_wins=3,
+    step_bps=1000,   # 10% per confirmed win run
+)
+db.create_campaign("prices", ["10", "15", "20"], feature_dim=10, algorithm=cfg)
+```
+
+Watch the tournament live:
+```bash
+curl http://localhost:8080/campaign/prices/diagnostics
+# → { "challenger_traffic_pct": 30.0, "tournament_win_streak": 2, ... }
+```
 
 ---
 
 ## Installation
 
-BanditDB consists of the **Rust Engine** (~11MB native binary for Linux, macOS, and Windows — also available as a Docker image) and the **Python SDK** (installed via pip).
+BanditDB consists of the **Rust Engine** (~11 MB native binary — also available as a Docker image and Helm chart), the **Python SDK** (pip), and the **JavaScript / TypeScript SDK** (npm, zero runtime dependencies).
 
 ### 1. Start the Database Engine
-
-Three ways to get the engine running — pick whichever fits your environment:
 
 **Binary (fastest, no Docker required):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh
 banditdb
+curl http://localhost:8080/health   # {"status":"ok"}
 ```
 
 **Docker:**
@@ -45,15 +100,9 @@ banditdb
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
 ```
 
-
-```bash
-curl http://localhost:8080/health   # {"status":"ok"}
-```
-
-**Production (with persistence and auth):**
-Create a `docker-compose.yml` file and start the server:
-
+**Production (with persistence and RBAC):**
 ```yaml
+# docker-compose.yml
 version: '3.8'
 services:
   banditdb:
@@ -64,10 +113,14 @@ services:
       - banditdb_data:/data
     environment:
       - DATA_DIR=/data
-      - BANDITDB_API_KEY=your-secret-key        # Remove to disable auth (dev mode)
-      - BANDITDB_REWARD_TTL_SECS=86400          # How long to remember a context while waiting for its reward (seconds)
-      # - BANDITDB_CHECKPOINT_INTERVAL=10000   # Auto-checkpoint after every N rewarded events
-      # - BANDITDB_MAX_WAL_SIZE_MB=50          # Auto-checkpoint when WAL exceeds this size (recommended for edge deployments)
+      # Role-based auth — format: <key>=<role>  or  <key>=<role>:<tenant_id>
+      # Roles: admin (all), writer (predict/reward), reader (GET only)
+      - BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
+      - BANDITDB_REWARD_TTL_SECS=86400
+      # - BANDITDB_CHECKPOINT_INTERVAL=10000   # auto-checkpoint after N rewarded events
+      # - BANDITDB_MAX_WAL_SIZE_MB=50          # auto-checkpoint when WAL exceeds N MB
+      # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
+      # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
 volumes:
   banditdb_data:
 ```
@@ -75,30 +128,110 @@ volumes:
 docker compose up -d
 ```
 
-### 2. Install the Developer SDK
+**Kubernetes (Helm):**
+```bash
+helm install banditdb ./helm/banditdb \
+  --set auth.apiKeys="admin-key=admin,app-key=writer" \
+  --set persistence.size=10Gi \
+  --set ingress.enabled=true \
+  --set ingress.host=banditdb.example.com
+```
+
+The Helm chart at `helm/banditdb/` includes a PersistentVolumeClaim, Secret for API keys, liveness/readiness probes, and a `Recreate` deployment strategy (required for single-writer WAL safety).
+
+### 2. Install the SDKs
+
+**Python:**
 ```bash
 pip install banditdb-python
+```
+
+**JavaScript / TypeScript (zero runtime dependencies):**
+```bash
+npm install banditdb-js
 ```
 
 ---
 
 ## API Reference
 
-All endpoints accept and return `application/json`. When `BANDITDB_API_KEY` is set, every request except `/health` must include the header `X-Api-Key: <key>`.
+All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is set, every request except `/health` and `/metrics` must include `X-Api-Key: <key>`. Use `BANDITDB_API_KEY` (singular) for a single admin key in development.
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/health` | No | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
-| `GET` | `/campaigns` | Yes | List all live campaigns with their `alpha` and arm count. |
-| `GET` | `/campaign/:id` | Yes | Full diagnostic for one campaign: per-arm `theta`, `theta_norm`, `prediction_count`, `reward_count`, and campaign-level totals. Returns 404 if not found. |
-| `POST` | `/campaign` | Yes | Create a new campaign. Body: `{"campaign_id","arms","feature_dim","alpha","algorithm","metadata"}`. `alpha` is optional (default `1.0`). `algorithm` is optional (default `"linucb"`) — also accepts `"thompson_sampling"` for Linear Thompson Sampling. `metadata` is an optional free-form JSON object for attaching any campaign context (owner, feature names, version, etc.) — stored, persisted through checkpoints, and returned by `GET /campaigns` and `GET /campaign/:id`. |
-| `DELETE` | `/campaign/:id` | Yes | Delete a campaign and write a `CampaignDeleted` event to the WAL. Returns 404 if not found. |
-| `POST` | `/predict` | Yes | Given a context vector, returns the optimal arm and an interaction ID. Body: `{"campaign_id","context"}` |
-| `POST` | `/reward` | Yes | Close the feedback loop. Body: `{"interaction_id","reward"}`. Reward must be normalised to `[0, 1]`. |
-| `POST` | `/checkpoint` | Yes | Flush the WAL, snapshot all campaign matrices to `checkpoint.json`, write completed prediction→reward pairs to per-campaign Parquet files in `exports/`, and rotate the WAL. Returns a summary string. |
-| `GET` | `/export` | Yes | List the per-campaign Parquet files available in the `exports/` directory. Files are created by `POST /checkpoint`. |
+| Method | Endpoint | Min Role | Description |
+|--------|----------|----------|-------------|
+| `GET` | `/health` | — | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
+| `GET` | `/metrics` | — | Prometheus text-format metrics. Public unless `BANDITDB_METRICS_PUBLIC=false`. |
+| `GET` | `/openapi.yaml` | — | OpenAPI 3.1 specification (this API). |
+| `GET` | `/campaigns` | reader | List all campaigns with algorithm, arm count, and metadata. |
+| `GET` | `/campaign/:id` | reader | Full per-arm state: theta vectors, reward counts, campaign-level totals. |
+| `POST` | `/campaign` | admin | Create a campaign. Body: `{campaign_id, arms, feature_dim, alpha?, algorithm?, metadata?}`. |
+| `DELETE` | `/campaign/:id` | admin | Permanently delete a campaign. Irreversible — use `/archive` for soft-delete. |
+| `POST` | `/campaign/:id/archive` | admin | Soft-delete. Frozen campaign preserves all data; recoverable via `/restore`. |
+| `POST` | `/campaign/:id/restore` | admin | Restore an archived campaign to active status. |
+| `GET` | `/campaign/:id/report` | reader | Convergence report: mean reward per arm with 95% CI, leading arm, `converged` flag. |
+| `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size. |
+| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. |
+| `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
+| `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
+| `POST` | `/checkpoint` | admin | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. |
+| `GET` | `/export` | reader | List per-campaign Parquet files in the `exports/` directory. |
 
-Error responses are always structured: `{"error": "<message>"}` with an appropriate HTTP status code.
+Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
+
+### Convergence Report
+
+`GET /campaign/:id/report` answers "is this campaign done?":
+
+```json
+{
+  "campaign_id": "prices",
+  "leading_arm": "15",
+  "converged": true,
+  "overall_reward_rate": 0.74,
+  "arms": {
+    "10": { "traffic_share": 0.18, "predictions": 312,  "rewards": 89,  "mean_reward": 0.61, "reward_lower_ci": 0.55, "reward_upper_ci": 0.67 },
+    "15": { "traffic_share": 0.64, "predictions": 1104, "rewards": 408, "mean_reward": 0.79, "reward_lower_ci": 0.76, "reward_upper_ci": 0.82 },
+    "20": { "traffic_share": 0.18, "predictions": 319,  "rewards": 98,  "mean_reward": 0.62, "reward_lower_ci": 0.56, "reward_upper_ci": 0.68 }
+  }
+}
+```
+
+| `converged` | Meaning |
+|-------------|---------|
+| `true` | Leading arm's 95% CI lower bound exceeds every other arm's upper bound — statistically significant. Stop. |
+| `false` | Leading arm is ahead but CIs overlap — keep collecting data. |
+| `null` | Fewer than 30 rewards per arm — insufficient data. |
+
+Cross-validate with `causal_analysis()` (Python SDK): if `arm.traffic_share` matches the causal assignment percentages, the bandit has converged to the correct causal structure.
+
+---
+
+## RBAC & Multi-Tenancy
+
+### Role-Based Access Control
+
+Set multiple API keys with roles via `BANDITDB_API_KEYS` (comma-separated `key=role` pairs):
+
+```
+BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
+```
+
+| Role | Allowed endpoints |
+|------|------------------|
+| `admin` | All operations |
+| `writer` | `POST /predict`, `POST /batch_predict`, `POST /reward` |
+| `reader` | All `GET` endpoints |
+
+### Multi-Tenancy
+
+Append a tenant ID to the key definition: `<key>=<role>:<tenant_id>`:
+
+```
+BANDITDB_API_KEYS=team-a-key=admin:team-a,team-b-key=admin:team-b
+BANDITDB_TENANT_MODE=true   # strict: tenants cannot see each other's campaigns
+```
+
+Campaign IDs are automatically namespaced — `team-a` creating `prices` stores it as `team-a/prices` internally, transparent to the API caller. With `BANDITDB_TENANT_MODE=true`, cross-tenant reads return 404.
 
 ---
 
@@ -113,10 +246,8 @@ A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loade
 | `client_intake` | `schedule_consultation`, `send_intake_form`, `refer_to_partner_firm`, `decline` | `[case_value_norm, matter_complexity, org_size_norm, conflict_risk, capacity_norm]` |
 
 ```bash
-# List live campaigns
 curl -s https://sandbox.banditdb.com/campaigns -H "X-Api-Key: banditdb-demo"
 
-# Get a prediction from the sleep campaign
 curl -s -X POST https://sandbox.banditdb.com/predict \
   -H "Content-Type: application/json" \
   -H "X-Api-Key: banditdb-demo" \
@@ -127,11 +258,9 @@ curl -s -X POST https://sandbox.banditdb.com/predict \
 
 ## Try It — CURL
 
-A complete predict→reward cycle for a **sleep improvement** campaign.
-Arms: `decrease_temperature`, `decrease_light`, `decrease_noise`.
-Context vector: `[sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]`
+A complete predict→reward→report cycle for a **sleep improvement** campaign.
 
-**Create** the campaign (run once):
+**Create** (run once):
 ```bash
 curl -s -X POST http://localhost:8080/campaign \
   -H "Content-Type: application/json" \
@@ -145,15 +274,8 @@ curl -s -X POST http://localhost:8080/campaign \
     }
   }'
 ```
-> `"Campaign Created"`
 
-**List** campaigns:
-```bash
-curl -s http://localhost:8080/campaigns
-```
-> `[{"campaign_id":"sleep","alpha":1.0,"algorithm":"linucb","arm_count":3,"metadata":{"owner":"wellness-team","features":["sex","age_norm","weight_norm","activity","bedtime_norm"]}}]`
-
-**Predict** — female, 35yo, 75 kg, moderately active, bedtime 23:00: - see above how the context was calculated out of the actual values to fit in [0-1] interval.
+**Predict:**
 ```bash
 curl -s -X POST http://localhost:8080/predict \
   -H "Content-Type: application/json" \
@@ -161,7 +283,7 @@ curl -s -X POST http://localhost:8080/predict \
 ```
 > `{"arm_id":"decrease_temperature","interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}`
 
-**Reward** — sleep quality improved by 80% (use `interaction_id` from the predict response):
+**Reward** (sleep quality improved 80%):
 ```bash
 curl -s -X POST http://localhost:8080/reward \
   -H "Content-Type: application/json" \
@@ -169,25 +291,26 @@ curl -s -X POST http://localhost:8080/reward \
 ```
 > `"OK"`
 
+**Check convergence:**
+```bash
+curl -s http://localhost:8080/campaign/sleep/report
+```
 
 ---
 
 ## Documentation
 
-Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and How Recovery Works — is available at:
+Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and Recovery — is at:
 
 **[https://banditdb.com/docs.html](https://banditdb.com/docs.html)**
 
 ---
 
----
-
-## 📈 Benchmark
+## Benchmark
 
 BanditDB is validated against the **MovieLens 100K** dataset using the standard [replay method](https://arxiv.org/abs/1003.5956) (Li et al. 2010) — the same unbiased offline estimator used in the original LinUCB paper.
 
-**Setup:** 92,698 ratings → 6 genre arms (Drama, Comedy, Action, Romance, Thriller, Adventure). 
-The final optimized context uses a **44-Dimensional vector** combining binned demographics, causal user history (like rates + exposure counts), feature-crossing (age × genre history), and movie era preferences. The model uses **Dynamic Per-User Alpha Decay** to balance exploration across the 90/10 chronological split.
+**Setup:** 92,698 ratings → 6 genre arms. 44-dimensional context with binned demographics, causal user history, feature-crossing, and era preferences. Dynamic Per-User Alpha Decay.
 
 | Metric | Value |
 |--------|-------|
@@ -200,36 +323,34 @@ The final optimized context uses a **44-Dimensional vector** combining binned de
 
 Reproduce the benchmark:
 ```bash
-python benchmark/movielens/convert.py   # download & convert MovieLens 100K
+python benchmark/movielens/convert.py
 docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
 docker exec <container> rm -f /data/checkpoint.json
 docker compose restart
-python benchmark/movielens/evaluate_improved.py  # run heavily optimized causal evaluation loop
+python benchmark/movielens/evaluate_improved.py
 ```
 
-Use `benchmark/movielens/offline_sweep.py` or create your own custom scripts to sweep alpha, reward type, and feature sets offline before deploying entirely to a live BanditDB workflow.
+### Throughput
 
-### Throughput Benchmark
-
-To measure predictions-per-second on your own hardware:
+Peak throughput on a commodity 4-core machine over loopback: **~10,000 predictions/second** at concurrency=64 with p50 latency of ~300µs.
 
 ```bash
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
 python benchmark/throughput/bench.py
 ```
 
-Sweeps concurrency levels 1→128 and reports p50/p99 latency and RPS at each level. On a commodity 4-core machine over loopback, peak throughput is **~10,000 predictions/second** at concurrency=64 with a p50 latency of ~300µs per request.
-
 ---
 
 ## Architecture
 
-*   **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
-*   **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; μs write locks for reward updates only.
-*   **Memory:** Delayed rewards are mapped to historical context vectors via `moka`, a fast concurrent TTL cache that prevents OOM crashes.
-*   **Durability:** Asynchronous MPSC channels pipe interactions to a JSON-lines WAL for perfect crash recovery without impacting API latency.
+* **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
+* **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; µs write locks for reward updates only.
+* **Memory:** Delayed rewards mapped to historical context vectors via `moka`, a fast concurrent TTL cache.
+* **Durability:** Asynchronous MPSC channel pipes interactions to a WAL (JSONL or binary MessagePack). Rotation and recovery are automatic.
+* **Auth:** Constant-time API key comparison via bitwise accumulation — no branch on comparison result (timing-safe against timing oracle attacks).
 
 ## Contributing
-BanditDB is an open-source project. PRs are welcome! 
+
+BanditDB is open source. PRs are welcome!
 
 Visit [banditdb.com](https://banditdb.com) to read the full documentation.

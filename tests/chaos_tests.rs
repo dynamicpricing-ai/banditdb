@@ -70,7 +70,7 @@ async fn test_3_1_torn_write_recovery() {
 
     // DB must be fully operational after recovery with a corrupt WAL tail.
     assert!(
-        db.predict("torn_test", vec![1.0, 0.0]).is_some(),
+        db.predict("torn_test", vec![1.0, 0.0]).is_ok(),
         "DB is not functional after torn-write recovery"
     );
 
@@ -89,7 +89,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let theta_before = {
         let campaigns = db.campaigns.read();
@@ -99,7 +99,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     };
 
     // Ghost reward: this interaction_id was never predicted — not in the Moka cache.
-    db.reward("ghost-id-that-was-never-predicted", 999.0);
+    let _ = db.reward("ghost-id-that-was-never-predicted", 999.0);
 
     let theta_after_ghost = {
         let campaigns = db.campaigns.read();
@@ -115,7 +115,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
 
     // Contrast: a valid reward DOES update theta, confirming the arm can learn.
     let (_, iid) = db.predict("orphan_test", vec![1.0, 0.0]).unwrap();
-    db.reward(&iid, 1.0);
+    let _ = db.reward(&iid, 1.0);
 
     let theta_after_valid = {
         let campaigns = db.campaigns.read();
@@ -147,13 +147,13 @@ async fn test_3_3_idempotent_recovery() {
     // Phase 1: train a model and capture its final theta.
     let theta_original = {
         let db = BanditDB::new(wal, "/tmp");
-        db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+        let _ = db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
         for i in 0..N {
             let angle = i as f64 * 0.1;
             let ctx = vec![angle.sin(), angle.cos()];
-            if let Some((_, iid)) = db.predict("recovery_campaign", ctx) {
-                db.reward(&iid, 1.0);
+            if let Ok((_, iid)) = db.predict("recovery_campaign", ctx) {
+                let _ = db.reward(&iid, 1.0);
             }
         }
 
@@ -223,7 +223,7 @@ async fn test_3_4_concurrent_export_safety() {
     let _ = std::fs::remove_file(format!("{}/checkpoint.json", data_dir));
 
     let db = Arc::new(BanditDB::new(wal, data_dir));
-    db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None);
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
@@ -236,8 +236,8 @@ async fn test_3_4_concurrent_export_safety() {
         handles.push(tokio::spawn(async move {
             let ctx = vec![(i as f64 * 0.1).sin(), (i as f64 * 0.1).cos(), 0.5];
             while !stop.load(Ordering::Relaxed) {
-                if let Some((_, iid)) = db.predict("export_stress", ctx.clone()) {
-                    db.reward(&iid, 1.0);
+                if let Ok((_, iid)) = db.predict("export_stress", ctx.clone()) {
+                    let _ = db.reward(&iid, 1.0);
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }

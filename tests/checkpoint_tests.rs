@@ -31,7 +31,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // Phase 1 — Train the model
     // ===================================================================
     let db = BanditDB::new(&wal_path, data_dir);
-    db.add_campaign(
+    let _ = db.add_campaign(
         "routing",
         vec!["fast".to_string(), "cheap".to_string()],
         2,
@@ -47,8 +47,8 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         let ctx = vec![angle.sin(), angle.cos()];
         let reward =
             (true_theta[0] * ctx[0] + true_theta[1] * ctx[1]).clamp(0.0, 1.0);
-        if let Some((_, iid)) = db.predict("routing", ctx) {
-            db.reward(&iid, reward);
+        if let Ok((_, iid)) = db.predict("routing", ctx) {
+            let _ = db.reward(&iid, reward);
         }
     }
 
@@ -56,8 +56,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // The Checkpoint message guarantees every Event sent before it is on disk.
     let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
     db.event_tx
-        .send(WalMessage::Checkpoint { reply: ftx })
-        .unwrap();
+        .send(WalMessage::Checkpoint { reply: ftx }).await.unwrap();
     let wal_size_before = frx.await.unwrap();
     assert!(wal_size_before > 0, "WAL must be non-empty after training");
 
@@ -173,13 +172,12 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // larger than the new WAL file (which only holds this one small event),
     // so recovery must detect that and seek to 0 instead.
     // ===================================================================
-    db.add_campaign("post_ckpt", vec!["x".to_string()], 1, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("post_ckpt", vec!["x".to_string()], 1, 1.0, Algorithm::Linucb, None);
 
     // Flush the post-checkpoint event to disk before we drop the handle
     let (ftx2, frx2) = tokio::sync::oneshot::channel::<u64>();
     db.event_tx
-        .send(WalMessage::Checkpoint { reply: ftx2 })
-        .unwrap();
+        .send(WalMessage::Checkpoint { reply: ftx2 }).await.unwrap();
     let tail_size = frx2.await.unwrap();
     assert!(
         tail_size > 0,
@@ -254,18 +252,18 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // Phase 9 — Post-recovery predictions are functional
     // ===================================================================
     let pred_routing = db2.predict("routing", vec![1.0, 0.0]);
-    assert!(pred_routing.is_some(), "predict must work on routing after recovery");
+    assert!(pred_routing.is_ok(), "predict must work on routing after recovery");
     let (arm_id, iid) = pred_routing.unwrap();
     assert!(
         arm_id == "fast" || arm_id == "cheap",
         "predicted arm must be a registered arm, got: {}",
         arm_id
     );
-    db2.reward(&iid, 1.0); // must not panic
+    let _ = db2.reward(&iid, 1.0); // must not panic
 
     let pred_post = db2.predict("post_ckpt", vec![0.5]);
     assert!(
-        pred_post.is_some(),
+        pred_post.is_ok(),
         "predict must work on post_ckpt campaign after recovery"
     );
 

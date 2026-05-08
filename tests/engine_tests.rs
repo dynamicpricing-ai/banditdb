@@ -14,7 +14,7 @@ async fn test_1_2_asymptotic_convergence() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let true_theta = [3.0_f64, -2.0_f64];
 
@@ -25,8 +25,8 @@ async fn test_1_2_asymptotic_convergence() {
         let ctx = vec![angle.sin(), angle.cos()];
         let reward = true_theta[0] * ctx[0] + true_theta[1] * ctx[1];
 
-        if let Some((_, iid)) = db.predict("convergence", ctx) {
-            db.reward(&iid, reward);
+        if let Ok((_, iid)) = db.predict("convergence", ctx) {
+            let _ = db.reward(&iid, reward);
         }
     }
 
@@ -60,26 +60,26 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     // Baseline: correct dim must succeed.
-    assert!(db.predict("dim_test", vec![1.0, 0.0]).is_some());
+    assert!(db.predict("dim_test", vec![1.0, 0.0]).is_ok());
 
     // Over-sized context: 3 features instead of 2.
     assert!(
-        db.predict("dim_test", vec![1.0, 0.0, 0.0]).is_none(),
+        db.predict("dim_test", vec![1.0, 0.0, 0.0]).is_err(),
         "Over-sized context should return None"
     );
 
     // Under-sized context: 1 feature instead of 2.
     assert!(
-        db.predict("dim_test", vec![1.0]).is_none(),
+        db.predict("dim_test", vec![1.0]).is_err(),
         "Under-sized context should return None"
     );
 
     // Edge case: empty context vector.
     assert!(
-        db.predict("dim_test", vec![]).is_none(),
+        db.predict("dim_test", vec![]).is_err(),
         "Empty context should return None"
     );
 
@@ -99,11 +99,11 @@ async fn test_v1_duplicate_campaign_rejected() {
     let db = BanditDB::new(wal, "/tmp");
 
     // First create must succeed
-    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None));
+    assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None).is_ok());
 
     // Train it so theta is non-zero
     let (_, iid) = db.predict("dup_test", vec![1.0, 0.0]).unwrap();
-    db.reward(&iid, 1.0);
+    let _ = db.reward(&iid, 1.0);
 
     let theta_before = {
         let c = db.campaigns.read();
@@ -115,7 +115,7 @@ async fn test_v1_duplicate_campaign_rejected() {
 
     // Second create with same id must be rejected
     assert!(
-        !db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None),
+        db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None).is_err(),
         "Duplicate campaign creation must return false"
     );
 
@@ -147,12 +147,12 @@ async fn test_v2_double_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
 
     // First reward must succeed and update the model
-    assert!(db.reward(&iid, 1.0), "First reward must return true");
+    assert!(db.reward(&iid, 1.0).is_ok(), "First reward must return true");
 
     let theta_after_first = {
         let c = db.campaigns.read();
@@ -164,7 +164,7 @@ async fn test_v2_double_reward_rejected() {
 
     // Second reward with the same id must be rejected
     assert!(
-        !db.reward(&iid, 1.0),
+        db.reward(&iid, 1.0).is_err(),
         "Second reward with same interaction_id must return false"
     );
 
@@ -194,7 +194,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let theta_before = {
         let c = db.campaigns.read();
@@ -205,7 +205,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     };
 
     assert!(
-        !db.reward("interaction-id-that-never-existed", 1.0),
+        db.reward("interaction-id-that-never-existed", 1.0).is_err(),
         "Reward for unknown interaction_id must return false"
     );
 
@@ -236,11 +236,11 @@ async fn test_v4_reward_range_behaviour() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     // Non-finite reward: engine must reject it, theta stays at zero
     let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    db.reward(&iid_inf, f64::INFINITY);
+    let _ = db.reward(&iid_inf, f64::INFINITY);
 
     let theta_after_inf = {
         let c = db.campaigns.read();
@@ -256,7 +256,7 @@ async fn test_v4_reward_range_behaviour() {
 
     // Out-of-range but finite reward: engine applies it (handler warns, but does not block)
     let (_, iid_oob) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    assert!(db.reward(&iid_oob, 5.0), "Out-of-range finite reward must still return true");
+    assert!(db.reward(&iid_oob, 5.0).is_ok(), "Out-of-range finite reward must still return true");
 
     let theta_after_oob = {
         let c = db.campaigns.read();
@@ -281,17 +281,17 @@ async fn test_bandit_learns_context() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
     let mobile_context = vec![1.0, 0.0];
     let desktop_context = vec![0.0, 1.0];
 
     for _ in 0..50 {
         let (arm, iid) = db.predict("homepage", mobile_context.clone()).unwrap();
-        db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
+        let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
 
         let (arm, iid) = db.predict("homepage", desktop_context.clone()).unwrap();
-        db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
+        let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
     }
 
     let (mobile_pred, _) = db.predict("homepage", mobile_context).unwrap();
@@ -312,17 +312,17 @@ async fn test_ts_learns_context() {
     for attempt in 0..3 {
         let _ = std::fs::remove_file(wal);
         let db = BanditDB::new(wal, "/tmp");
-        db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
+        let _ = db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
         let mobile_context  = vec![1.0, 0.0];
         let desktop_context = vec![0.0, 1.0];
 
         for _ in 0..100 {
             let (arm, iid) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
-            db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
 
             let (arm, iid) = db.predict("ts_homepage", desktop_context.clone()).unwrap();
-            db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
         }
 
         let (mobile_pred, _) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
@@ -348,11 +348,11 @@ async fn test_ts_explores() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
+    let _ = db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..50 {
-        if let Some((arm, _)) = db.predict("ts_explore", vec![1.0, 1.0]) {
+        if let Ok((arm, _)) = db.predict("ts_explore", vec![1.0, 1.0]) {
             seen.insert(arm);
         }
     }
@@ -377,12 +377,12 @@ async fn test_ts_checkpoint_recovery() {
     std::fs::create_dir_all(data_dir).unwrap();
 
     let db = BanditDB::new(&wal_path, data_dir);
-    db.add_campaign("ts_camp", vec!["x".to_string(), "y".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
+    let _ = db.add_campaign("ts_camp", vec!["x".to_string(), "y".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     for i in 0..20_usize {
         let ctx = vec![(i as f64 * 0.3).sin(), (i as f64 * 0.3).cos()];
-        if let Some((arm, iid)) = db.predict("ts_camp", ctx) {
-            db.reward(&iid, if arm == "x" { 1.0 } else { 0.0 });
+        if let Ok((arm, iid)) = db.predict("ts_camp", ctx) {
+            let _ = db.reward(&iid, if arm == "x" { 1.0 } else { 0.0 });
         }
     }
 
@@ -401,7 +401,7 @@ async fn test_ts_checkpoint_recovery() {
     }
 
     assert!(
-        db2.predict("ts_camp", vec![1.0, 0.0]).is_some(),
+        db2.predict("ts_camp", vec![1.0, 0.0]).is_ok(),
         "predict must work on recovered TS campaign"
     );
 
@@ -415,20 +415,20 @@ async fn test_linucb_ts_coexist() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, "/tmp");
-    db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
-    db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
+    let _ = db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None);
+    let _ = db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None);
 
     for _ in 0..20 {
-        if let Some((_, iid)) = db.predict("ucb_camp", vec![1.0, 0.0]) {
-            db.reward(&iid, 1.0);
+        if let Ok((_, iid)) = db.predict("ucb_camp", vec![1.0, 0.0]) {
+            let _ = db.reward(&iid, 1.0);
         }
-        if let Some((_, iid)) = db.predict("ts_camp", vec![1.0, 0.0]) {
-            db.reward(&iid, 1.0);
+        if let Ok((_, iid)) = db.predict("ts_camp", vec![1.0, 0.0]) {
+            let _ = db.reward(&iid, 1.0);
         }
     }
 
-    assert!(db.predict("ucb_camp", vec![1.0, 0.0]).is_some(), "LinUCB campaign must still predict");
-    assert!(db.predict("ts_camp",  vec![1.0, 0.0]).is_some(), "TS campaign must still predict");
+    assert!(db.predict("ucb_camp", vec![1.0, 0.0]).is_ok(), "LinUCB campaign must still predict");
+    assert!(db.predict("ts_camp",  vec![1.0, 0.0]).is_ok(), "TS campaign must still predict");
 
     {
         let campaigns = db.campaigns.read();
@@ -455,8 +455,8 @@ async fn test_campaign_metadata_roundtrip() {
 
     {
         let db = BanditDB::new(&wal, data_dir);
-        db.add_campaign("meta_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, Some(meta.clone()));
-        db.add_campaign("bare_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, None);
+        let _ = db.add_campaign("meta_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, Some(meta.clone()));
+        let _ = db.add_campaign("bare_camp", vec!["a".to_string()], 2, 1.0, Algorithm::Linucb, None);
 
         // Verify metadata is in memory immediately
         let campaigns = db.campaigns.read();
@@ -505,7 +505,7 @@ async fn test_campaign_metadata_wal_only_recovery() {
 
     {
         let db = BanditDB::new(&wal, data_dir);
-        db.add_campaign(
+        let _ = db.add_campaign(
             "meta_wal_camp",
             vec!["a".to_string(), "b".to_string()],
             2,
@@ -513,7 +513,7 @@ async fn test_campaign_metadata_wal_only_recovery() {
             Algorithm::Linucb,
             Some(meta.clone()),
         );
-        db.add_campaign(
+        let _ = db.add_campaign(
             "bare_wal_camp",
             vec!["a".to_string()],
             2,
@@ -525,7 +525,7 @@ async fn test_campaign_metadata_wal_only_recovery() {
         // Flush barrier: guarantees both CampaignCreated events are on disk.
         // This is NOT db.checkpoint() — no checkpoint.json is written.
         let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
-        db.event_tx.send(WalMessage::Checkpoint { reply: ftx }).unwrap();
+        db.event_tx.send(WalMessage::Checkpoint { reply: ftx }).await.unwrap();
         let wal_size = frx.await.unwrap();
         assert!(wal_size > 0, "WAL must be non-empty after add_campaign");
 

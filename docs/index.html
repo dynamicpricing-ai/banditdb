@@ -60,7 +60,7 @@
 
       <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-xs sm:text-sm text-zinc-300 mb-6 sm:mb-12">
         <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse shrink-0"></span>
-        <span>Rust · ~11MB binary · ~10K predictions/s · WAL durability</span>
+        <span>Rust · ~11MB binary · ~10K pred/s · 4 algorithms · WAL durability · RBAC</span>
       </div>
 
       <h1 class="text-4xl sm:text-5xl md:text-6xl font-extrabold mb-5 leading-tight tracking-tight">
@@ -89,6 +89,14 @@
           <button onclick="copy(this, 'pip install banditdb-python')"
                   class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
         </div>
+        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
+            <span class="text-zinc-500 shrink-0">$</span>
+            <span class="text-zinc-100">npm install banditdb-js</span>
+          </div>
+          <button onclick="copy(this, 'npm install banditdb-js')"
+                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
+        </div>
       </div>
 
       <div class="flex items-center justify-center flex-wrap gap-x-5 gap-y-2 text-sm text-zinc-500">
@@ -97,6 +105,8 @@
         <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-white transition-colors">Docker Hub</a>
         <span class="text-zinc-700">·</span>
         <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-white transition-colors">PyPI</a>
+        <span class="text-zinc-700">·</span>
+        <a href="https://www.npmjs.com/package/banditdb-js"       class="hover:text-white transition-colors">npm</a>
         <span class="text-zinc-700">·</span>
         <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener" class="hover:text-white transition-colors">🟢 Live Sandbox</a>
         <span class="text-zinc-700">·</span>
@@ -147,10 +157,12 @@
           </div>
           <ul class="space-y-2.5 text-base text-zinc-400">
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> In-memory matrix updates (microseconds)</li>
-            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Built-in exploration algorithms, tunable per campaign</li>
+            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> LinUCB · Thompson Sampling · NeuralLinUCB · Progressive Tournament</li>
+            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Convergence signal — 95% CI per arm, converged flag</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Write-Ahead Log for crash recovery</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> TTL cache for delayed rewards</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Propensity-logged Parquet export</li>
+            <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> RBAC + multi-tenancy, Python &amp; TypeScript SDKs</li>
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> Native MCP tools for AI agents</li>
           </ul>
         </div>
@@ -720,8 +732,8 @@ Fitting causal forests (one per arm) ...
           <div class="text-sm text-zinc-400">Lift over random on MovieLens 100K — up to <span class="text-zinc-300 font-medium">+24.6%</span> with feature engineering</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 text-center">
-          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">WAL</div>
-          <div class="text-sm text-zinc-400">Write-Ahead Log with checkpoint &amp; Parquet export — every interaction is crash-safe and exportable</div>
+          <div class="text-3xl sm:text-5xl font-extrabold text-orange-400 mb-3">4</div>
+          <div class="text-sm text-zinc-400">Algorithms: LinUCB · Thompson Sampling · NeuralLinUCB · Progressive Tournament</div>
         </div>
       </div>
     </div>
@@ -777,6 +789,7 @@ Fitting causal forests (one per arm) ...
         <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-zinc-300 transition-colors">GitHub</a>
         <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-zinc-300 transition-colors">Docker Hub</a>
         <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-zinc-300 transition-colors">PyPI</a>
+        <a href="https://www.npmjs.com/package/banditdb-js"       class="hover:text-zinc-300 transition-colors">npm</a>
         <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-zinc-300 transition-colors">Apache-2.0</a>
       </div>
       <div class="text-xs">Built with Rust in New York City. © 2026 Simeon Lukov.</div>

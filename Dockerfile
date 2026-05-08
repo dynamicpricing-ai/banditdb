@@ -1,36 +1,47 @@
-# ==========================================
-# Stage 1: The Builder (Heavy, contains compilers)
-# ==========================================
-FROM rust:1.93-slim-bookworm as builder
+# ── Stage 1: Builder ─────────────────────────────────────────────────────────
+FROM rust:1.78-bookworm AS builder
 
-# Install C/C++ build tools required by Polars and ndarray
-RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create a new empty shell project
 WORKDIR /usr/src/banditdb
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 
-# Build the project in Release mode (Maximum optimization)
-RUN cargo build --release
+# Release build. Add --features neural for NeuralLinUCB support.
+ARG FEATURES=""
+RUN if [ -z "$FEATURES" ]; then \
+        cargo build --release; \
+    else \
+        cargo build --release --features "$FEATURES"; \
+    fi
 
-# ==========================================
-# Stage 2: The Production Runtime (Tiny, Secure)
-# ==========================================
+# ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-# Install CA certificates (useful if DB ever needs to make outbound webhooks later)
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create a directory for our persistent data
-RUN mkdir -p /data
-ENV DATA_DIR="/data"
+RUN useradd -r -s /bin/false -u 1001 banditdb && mkdir -p /data && chown banditdb:banditdb /data
 
-# Copy the compiled Rust binary from the builder stage
 COPY --from=builder /usr/src/banditdb/target/release/banditdb /usr/local/bin/banditdb
 
-# Expose the Axum Web Server port
+USER banditdb
+WORKDIR /data
+
+ENV DATA_DIR="/data" \
+    PORT="8080" \
+    BANDITDB_CHECKPOINT_INTERVAL="" \
+    BANDITDB_MAX_WAL_SIZE_MB="" \
+    LOG_FORMAT="" \
+    BANDITDB_TENANT_MODE="false"
+
+VOLUME ["/data"]
 EXPOSE 8080
 
-# Run the database!
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -sf http://localhost:8080/health | grep -q '"status":"ok"' || exit 1
+
 CMD ["banditdb"]
