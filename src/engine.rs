@@ -1,4 +1,4 @@
-use crate::state::{Algorithm, ArmDiagnostics, ArmReportStats, ArmState, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, InteractionRecord};
+use crate::state::{Algorithm, ArmDiagnostics, ArmReportStats, ArmState, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord};
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
 #[cfg(feature = "neural")]
@@ -131,6 +131,9 @@ pub struct Campaign {
     pub tournament_wins:        std::sync::atomic::AtomicI32,
     /// Soft-deleted: archived campaigns are frozen — no new predictions or rewards.
     pub archived:               AtomicBool,
+    /// f64 bits of the selection entropy computed at the last checkpoint.
+    /// f64::NAN (the initial value) means no checkpoint has been written yet.
+    pub last_checkpoint_entropy: AtomicU64,
 }
 
 impl Campaign {
@@ -193,9 +196,10 @@ impl Campaign {
             metadata,
             #[cfg(feature = "neural")]
             neural,
-            challenger_traffic_bps: AtomicU32::new(initial_traffic),
-            tournament_wins:        std::sync::atomic::AtomicI32::new(0),
-            archived:               AtomicBool::new(false),
+            challenger_traffic_bps:  AtomicU32::new(initial_traffic),
+            tournament_wins:         std::sync::atomic::AtomicI32::new(0),
+            archived:                AtomicBool::new(false),
+            last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
         }
     }
 
@@ -520,6 +524,9 @@ impl BanditDB {
                     campaign.challenger_traffic_bps.store(camp.challenger_traffic_bps, Ordering::Relaxed);
                     campaign.tournament_wins.store(camp.tournament_wins, Ordering::Relaxed);
                     campaign.archived.store(camp.archived, Ordering::Relaxed);
+                    if let Some(e) = camp.entropy_snapshot {
+                        campaign.last_checkpoint_entropy.store(e.to_bits(), Ordering::Relaxed);
+                    }
                     self.campaigns.write().insert(campaign_id, campaign);
                 }
 
@@ -752,6 +759,13 @@ impl BanditDB {
                 let challenger_snapshot = campaign.challenger_arms.as_ref().map(|c| {
                     c.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                 });
+                let entropy_at_checkpoint = selection_entropy(
+                    &arms_snapshot.values()
+                        .map(|s| s.prediction_count.load(Ordering::Relaxed))
+                        .collect::<Vec<_>>(),
+                );
+                campaign.last_checkpoint_entropy.store(entropy_at_checkpoint.to_bits(), Ordering::Relaxed);
+
                 (id.clone(), CampaignCheckpoint {
                     alpha:                  campaign.alpha,
                     algorithm:              campaign.algorithm.clone(),
@@ -761,6 +775,7 @@ impl BanditDB {
                     tournament_wins:        campaign.tournament_wins.load(Ordering::SeqCst),
                     archived:               campaign.archived.load(Ordering::SeqCst),
                     metadata:               campaign.metadata.clone(),
+                    entropy_snapshot:       Some(entropy_at_checkpoint),
                 })
             }).collect()
         };
@@ -1162,6 +1177,57 @@ impl BanditDB {
         #[cfg(not(feature = "neural"))]
         let neural_buffer_size: Option<usize> = None;
 
+        // --- Entropy alerting ---
+
+        // Guard 2: compare current entropy against the snapshot written at last checkpoint.
+        let pred_counts: Vec<u64> = arm_stats.values().map(|s| s.predictions).collect();
+        let entropy = selection_entropy(&pred_counts);
+
+        let prior_raw = campaign.last_checkpoint_entropy.load(Ordering::Relaxed);
+        let prior     = f64::from_bits(prior_raw);
+        let entropy_trend = if prior.is_nan() {
+            EntropyTrend::Unknown
+        } else if entropy < prior - 0.1 {
+            EntropyTrend::Falling
+        } else if entropy > prior + 0.1 {
+            EntropyTrend::Recovering
+        } else {
+            EntropyTrend::Stable
+        };
+
+        // Guard 1: suppress alert when the campaign has statistically converged.
+        let converged = convergence_signal(&*arms_guard);
+
+        let entropy_status = classify_entropy_status(entropy, total_predictions, converged);
+
+        let (likely_cause, suggested_action) = if matches!(entropy_status, EntropyStatus::Ok) {
+            (None, None)
+        } else {
+            let min_arm_preds = arm_stats.values().map(|s| s.predictions).min().unwrap_or(0);
+            let (cause, action): (&str, &str) = if matches!(entropy_trend, EntropyTrend::Falling) {
+                ("recent_collapse",
+                 "Entropy dropped since last checkpoint. Check reward pipeline for bugs or recent config changes.")
+            } else if min_arm_preds < 50 {
+                ("early_lock_in",
+                 "One or more arms have very few observations. Consider increasing alpha or resetting the campaign.")
+            } else {
+                ("sustained_collapse",
+                 "Sustained low entropy without a convergence signal. Investigate context distribution shift or add new arms.")
+            };
+            (Some(cause.to_string()), Some(action.to_string()))
+        };
+
+        if !matches!(entropy_status, EntropyStatus::Ok) {
+            tracing::warn!(
+                campaign      = %campaign_id,
+                entropy       = %format!("{entropy:.3}"),
+                trend         = ?entropy_trend,
+                status        = ?entropy_status,
+                likely_cause  = likely_cause.as_deref().unwrap_or("unknown"),
+                "entropy: low selection entropy detected"
+            );
+        }
+
         Ok(CampaignDiagnosticsData {
             campaign_id:          campaign_id.to_string(),
             archived:             campaign.archived.load(Ordering::Relaxed),
@@ -1174,6 +1240,12 @@ impl BanditDB {
             challenger_traffic_pct,
             tournament_win_streak,
             neural_buffer_size,
+            selection_entropy:    entropy,
+            entropy_status,
+            entropy_trend,
+            converged,
+            likely_cause,
+            suggested_action,
         })
     }
 
@@ -1291,6 +1363,29 @@ impl BanditDB {
 
     pub fn neural_dir(&self) -> String { format!("{}/neural", self.data_dir) }
     pub fn export_dir(&self) -> String { format!("{}/exports", self.data_dir) }
+
+    /// Lightweight per-campaign entropy status for the /health endpoint.
+    /// Computes live entropy from arm prediction counts (one read lock per campaign).
+    pub fn entropy_status_all(&self) -> Vec<(String, f64, EntropyStatus)> {
+        let campaigns = self.campaigns.read();
+        let mut result = Vec::with_capacity(campaigns.len());
+        for (id, campaign) in campaigns.iter() {
+            if campaign.archived.load(Ordering::Relaxed) { continue; }
+            let arms_guard = campaign.arms.read();
+            let total_preds: u64 = arms_guard.values()
+                .map(|s| s.prediction_count.load(Ordering::Relaxed))
+                .sum();
+            let pred_counts: Vec<u64> = arms_guard.values()
+                .map(|s| s.prediction_count.load(Ordering::Relaxed))
+                .collect();
+            let converged = convergence_signal(&*arms_guard);
+            drop(arms_guard);
+            let entropy = selection_entropy(&pred_counts);
+            let status  = classify_entropy_status(entropy, total_preds, converged);
+            result.push((id.clone(), entropy, status));
+        }
+        result
+    }
 }
 
 /// Self-Normalised Importance-Weighted Policy Evaluation (SNIPS).
@@ -1508,6 +1603,48 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
+}
+
+/// Normalised Shannon entropy of an arm selection distribution (0 = collapsed, 1 = uniform).
+/// Returns 1.0 when there are fewer than two arms or no predictions yet.
+fn selection_entropy(counts: &[u64]) -> f64 {
+    let total: u64 = counts.iter().sum();
+    if total == 0 || counts.len() < 2 { return 1.0; }
+    let log_n = (counts.len() as f64).ln();
+    counts.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| { let p = c as f64 / total as f64; -p * p.ln() })
+        .sum::<f64>() / log_n
+}
+
+/// Wilson-score convergence signal: true if the leading arm's 95% CI lower bound
+/// exceeds the second arm's upper bound (requires ≥ 30 rewards on both arms).
+fn convergence_signal(arms: &HashMap<String, ArmState>) -> Option<bool> {
+    let mut ranked: Vec<(f64, f64, f64, u64)> = arms.values()
+        .filter_map(|s| {
+            let r = s.reward_count.load(Ordering::Relaxed);
+            if r < 10 { return None; }
+            let tr   = f64::from_bits(s.total_reward.load(Ordering::Relaxed));
+            let mean = (tr / r as f64).clamp(0.0, 1.0);
+            let se   = ((mean * (1.0 - mean)) / r as f64).max(0.0).sqrt();
+            Some((mean - 1.96 * se, mean + 1.96 * se, mean, r))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    match ranked.as_slice() {
+        [top, second, ..] if top.3 >= 30 && second.3 >= 30 => Some(top.0 > second.1),
+        _ => None,
+    }
+}
+
+/// Map entropy + guards to a status level.
+/// Guard 1: suppress if statistically converged.
+/// Guard 2: suppress if fewer than 500 total predictions (insufficient data).
+fn classify_entropy_status(entropy: f64, total_preds: u64, converged: Option<bool>) -> EntropyStatus {
+    if converged == Some(true) || total_preds < 500 { return EntropyStatus::Ok; }
+    if entropy >= 0.4 { EntropyStatus::Ok }
+    else if entropy >= 0.2 { EntropyStatus::Warning }
+    else { EntropyStatus::Critical }
 }
 
 /// Compute softmax-normalised propensities over arm UCB scores.

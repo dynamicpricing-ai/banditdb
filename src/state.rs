@@ -269,6 +269,9 @@ pub struct CampaignCheckpoint {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Entropy snapshot written at checkpoint time; used to compute EntropyTrend on next diagnostics call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entropy_snapshot: Option<f64>,
 }
 
 // --- Campaign report (business-level convergence signal) ---
@@ -321,6 +324,14 @@ pub struct CampaignReport {
 
 // --- Per-arm and campaign diagnostics ---
 
+#[derive(Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyStatus { Ok, Warning, Critical }
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyTrend { Stable, Falling, Recovering, Unknown }
+
 /// Per-arm diagnostics: reward stats and A_inv condition proxy.
 #[derive(Serialize, Debug)]
 pub struct ArmDiagnostics {
@@ -355,6 +366,17 @@ pub struct CampaignDiagnosticsData {
     /// Neural / Progressive-with-neural-challenger only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub neural_buffer_size:   Option<usize>,
+    /// Normalised selection entropy (0 = fully collapsed, 1 = uniform across arms).
+    pub selection_entropy:    f64,
+    pub entropy_status:       EntropyStatus,
+    pub entropy_trend:        EntropyTrend,
+    /// Statistical convergence signal (Guard 1): suppresses false-positive alerts
+    /// when one arm has genuinely won. None = insufficient reward data.
+    pub converged:            Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub likely_cause:         Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_action:     Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -7,7 +7,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use banditdb::state::{Algorithm, CampaignReport, EngineError, DEFAULT_ALPHA};
+use banditdb::state::{Algorithm, CampaignReport, EngineError, EntropyStatus, DEFAULT_ALPHA};
 use banditdb::BanditDB;
 use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
 use serde::{Deserialize, Serialize};
@@ -356,7 +356,16 @@ async fn handle_interact(
 }
 
 #[derive(Serialize)]
-struct HealthResponse { status: &'static str }
+struct CampaignEntropyHealth {
+    entropy: f64,
+    status:  EntropyStatus,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status:    &'static str,
+    campaigns: HashMap<String, CampaignEntropyHealth>,
+}
 
 #[derive(Serialize)]
 struct CampaignSummary {
@@ -427,11 +436,21 @@ async fn require_role(min: Role, Extension(auth): Extension<AuthContext>, req: R
 // ---------------------------------------------------------------------------
 
 async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
-    if state.db.wal_healthy.load(Ordering::Relaxed) {
-        (StatusCode::OK, Json(HealthResponse { status: "ok" }))
+    let wal_ok   = state.db.wal_healthy.load(Ordering::Relaxed);
+    let statuses = state.db.entropy_status_all();
+    let degraded = statuses.iter().any(|(_, _, s)| !matches!(s, EntropyStatus::Ok));
+    let campaigns = statuses.into_iter()
+        .map(|(id, entropy, status)| (id, CampaignEntropyHealth { entropy, status }))
+        .collect();
+
+    let (http_status, overall) = if !wal_ok {
+        (StatusCode::SERVICE_UNAVAILABLE, "degraded: wal unavailable")
+    } else if degraded {
+        (StatusCode::OK, "degraded")
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(HealthResponse { status: "degraded: wal unavailable" }))
-    }
+        (StatusCode::OK, "ok")
+    };
+    (http_status, Json(HealthResponse { status: overall, campaigns }))
 }
 
 async fn handle_create_campaign(

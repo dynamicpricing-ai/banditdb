@@ -179,7 +179,7 @@ db.reward(interaction_id, reward)</code></pre>
           <tbody>
             <tr><td><code>create_campaign</code></td><td>Create a new decision campaign. Accepts <code>algorithm</code>, <code>alpha</code>, and an optional free-form <code>metadata</code> object for attaching context (feature names, owner, version, etc.).</td></tr>
             <tr><td><code>list_campaigns</code></td><td>List all active campaigns with arm count, alpha, and metadata.</td></tr>
-            <tr><td><code>campaign_diagnostics</code></td><td>Per-arm <code>theta_norm</code>, prediction count, reward rate. Use when a campaign isn't learning.</td></tr>
+            <tr><td><code>campaign_diagnostics</code></td><td>Per-arm <code>theta_norm</code>, prediction count, reward rate, plus <code>selection_entropy</code>, <code>entropy_status</code>, <code>entropy_trend</code>, and a <code>suggested_action</code> when collapse is detected. Use when a campaign isn't learning or you suspect exploration has stopped.</td></tr>
             <tr><td><code>get_intuition</code></td><td>Returns the recommended action and an <code>interaction_id</code> to save.</td></tr>
             <tr><td><code>record_outcome</code></td><td>Reports success (1.0) or failure (0.0) and updates the shared model.</td></tr>
           </tbody>

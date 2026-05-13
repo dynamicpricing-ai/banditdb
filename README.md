@@ -159,7 +159,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 
 | Method | Endpoint | Min Role | Description |
 |--------|----------|----------|-------------|
-| `GET` | `/health` | — | Returns `{"status":"ok"}`. Always public — safe for load balancer probes. |
+| `GET` | `/health` | — | Returns `{"status":"ok"\|"degraded", "campaigns":{...}}`. Always public — safe for load balancer probes. Entropy collapse raises overall status to `"degraded"`. |
 | `GET` | `/metrics` | — | Prometheus text-format metrics. Public unless `BANDITDB_METRICS_PUBLIC=false`. |
 | `GET` | `/openapi.yaml` | — | OpenAPI 3.1 specification (this API). |
 | `GET` | `/campaigns` | reader | List all campaigns with algorithm, arm count, and metadata. |
@@ -169,7 +169,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 | `POST` | `/campaign/:id/archive` | admin | Soft-delete. Frozen campaign preserves all data; recoverable via `/restore`. |
 | `POST` | `/campaign/:id/restore` | admin | Restore an archived campaign to active status. |
 | `GET` | `/campaign/:id/report` | reader | Convergence report: mean reward per arm with 95% CI, leading arm, `converged` flag. |
-| `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size. |
+| `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size, **selection entropy with collapse detection**. |
 | `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. |
 | `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
 | `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
@@ -203,6 +203,50 @@ Error responses are always `{"error": "<message>"}` with an appropriate HTTP sta
 | `null` | Fewer than 30 rewards per arm — insufficient data. |
 
 Cross-validate with `causal_analysis()` (Python SDK): if `arm.traffic_share` matches the causal assignment percentages, the bandit has converged to the correct causal structure.
+
+---
+
+### Entropy Alerting
+
+`GET /campaign/:id/diagnostics` includes a live selection entropy signal that detects when a campaign has stopped exploring — silently behaving like a static policy.
+
+```json
+{
+  "selection_entropy": 0.09,
+  "entropy_status": "critical",
+  "entropy_trend": "falling",
+  "converged": false,
+  "likely_cause": "recent_collapse",
+  "suggested_action": "Entropy dropped since last checkpoint. Check reward pipeline for bugs or recent config changes."
+}
+```
+
+| `entropy_status` | Meaning |
+|-----------------|---------|
+| `ok` | Entropy is healthy, or the campaign has statistically converged (Guard 1), or fewer than 500 predictions (Guard 2). |
+| `warning` | Entropy < 0.4 — one arm is absorbing most traffic without a convergence signal. |
+| `critical` | Entropy < 0.2 — near-total collapse. Likely cause and suggested action are always included. |
+
+| `entropy_trend` | Meaning |
+|----------------|---------|
+| `stable` | No significant change since last checkpoint. |
+| `falling` | Dropped > 0.1 since last checkpoint — recent event (bug, deploy, cohort shift). |
+| `recovering` | Recovered > 0.1 since last checkpoint. |
+| `unknown` | No checkpoint has been written yet. |
+
+`GET /health` aggregates entropy across all active campaigns:
+
+```json
+{
+  "status": "degraded",
+  "campaigns": {
+    "prices":  { "entropy": 0.09, "status": "critical" },
+    "banners": { "entropy": 0.71, "status": "ok" }
+  }
+}
+```
+
+HTTP status is `200` for entropy issues (data quality, not service availability) and `503` only when the WAL writer is unavailable.
 
 ---
 

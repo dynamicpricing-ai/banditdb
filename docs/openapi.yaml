@@ -1,0 +1,456 @@
+openapi: "3.1.0"
+info:
+  title: BanditDB
+  version: "0.1.3"
+  description: |
+    Ultra-fast Contextual Bandit Database with LinUCB, Thompson Sampling, NeuralLinUCB,
+    and an Autonomous Algorithm Tournament (Progressive). WAL-backed durability with
+    checkpoint + rotation. Parquet export for offline analysis.
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Required when BANDITDB_API_KEY or BANDITDB_API_KEYS is set.
+        Roles: admin (all operations), writer (predict/reward), reader (GET only).
+
+  schemas:
+    Algorithm:
+      oneOf:
+        - type: string
+          enum: [linucb, thompson_sampling]
+        - type: object
+          required: [neural_lin_ucb]
+          properties:
+            neural_lin_ucb:
+              $ref: "#/components/schemas/NeuralLinUCBConfig"
+        - type: object
+          required: [progressive]
+          properties:
+            progressive:
+              $ref: "#/components/schemas/ProgressiveConfig"
+
+    NeuralLinUCBConfig:
+      type: object
+      required: [context_dim, embed_dim, hidden_dim, hidden_layers, retrain_every, retrain_steps, learning_rate, lambda]
+      properties:
+        context_dim:   { type: integer, example: 32 }
+        embed_dim:     { type: integer, example: 32 }
+        hidden_dim:    { type: integer, example: 128 }
+        hidden_layers: { type: integer, example: 2 }
+        retrain_every: { type: integer, example: 200 }
+        retrain_steps: { type: integer, example: 100 }
+        learning_rate: { type: number,  example: 0.001 }
+        lambda:        { type: number,  example: 1.0 }
+
+    ProgressiveConfig:
+      type: object
+      required: [base, challenger]
+      properties:
+        base:          { $ref: "#/components/schemas/Algorithm" }
+        challenger:    { $ref: "#/components/schemas/Algorithm" }
+        min_obs:       { type: integer, default: 100,  description: "Minimum buffer entries per arm before any traffic shift." }
+        required_wins: { type: integer, default: 3,    description: "Consecutive checkpoint wins to earn one traffic step." }
+        step_bps:      { type: integer, default: 1000, description: "Traffic delta per confirmed win run, in basis points." }
+
+    ArmInfo:
+      type: object
+      properties:
+        theta:            { type: array, items: { type: number } }
+        theta_norm:       { type: number }
+        prediction_count: { type: integer }
+        reward_count:     { type: integer }
+        avg_reward:       { type: number, nullable: true }
+
+    ArmDiagnostics:
+      type: object
+      properties:
+        predictions:    { type: integer }
+        rewards:        { type: integer }
+        avg_reward:     { type: number, nullable: true }
+        theta_norm:     { type: number }
+        a_inv_diag_min: { type: number }
+        a_inv_diag_max: { type: number }
+
+    CampaignSummary:
+      type: object
+      properties:
+        campaign_id: { type: string }
+        alpha:       { type: number }
+        algorithm:   { $ref: "#/components/schemas/Algorithm" }
+        arm_count:   { type: integer }
+        archived:    { type: boolean }
+        metadata:    { type: object, nullable: true }
+
+    CampaignInfo:
+      type: object
+      properties:
+        campaign_id:       { type: string }
+        alpha:             { type: number }
+        algorithm:         { $ref: "#/components/schemas/Algorithm" }
+        archived:          { type: boolean }
+        total_predictions: { type: integer }
+        total_rewards:     { type: integer }
+        arms:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ArmInfo" }
+        metadata: { type: object, nullable: true }
+
+    CampaignDiagnosticsData:
+      type: object
+      properties:
+        campaign_id:          { type: string }
+        archived:             { type: boolean }
+        algorithm:            { $ref: "#/components/schemas/Algorithm" }
+        arm_count:            { type: integer }
+        total_predictions:    { type: integer }
+        total_rewards:        { type: integer }
+        overall_avg_reward:   { type: number, nullable: true }
+        arm_stats:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/ArmDiagnostics" }
+        challenger_traffic_pct: { type: number, nullable: true, description: "Progressive only. Challenger share in percent (0–90)." }
+        tournament_win_streak:  { type: integer, nullable: true, description: "Progressive only. +N = N challenger wins, −N = base wins." }
+        neural_buffer_size:     { type: integer, nullable: true, description: "NeuralLinUCB only. Replay buffer entries." }
+        selection_entropy:      { type: number, description: "Normalised Shannon entropy of arm selection (0 = collapsed, 1 = uniform)." }
+        entropy_status:         { type: string, enum: [ok, warning, critical], description: "ok if healthy or converged. warning < 0.4. critical < 0.2." }
+        entropy_trend:          { type: string, enum: [stable, falling, recovering, unknown], description: "Change since last checkpoint. unknown until first checkpoint." }
+        converged:              { type: boolean, nullable: true, description: "Guard 1: true suppresses entropy alerts when one arm has statistically won." }
+        likely_cause:           { type: string, nullable: true, description: "Present when entropy_status is warning or critical." }
+        suggested_action:       { type: string, nullable: true, description: "Remediation hint. Present when entropy_status is warning or critical." }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: |
+        Returns overall service and per-campaign entropy status. Always public.
+        `status` is `"degraded"` (HTTP 200) when any active campaign has low entropy without
+        a convergence signal. `status` is `"degraded: wal unavailable"` (HTTP 503) when the
+        WAL writer has failed. Safe for load balancer probes and k8s readiness checks.
+      security: []
+      responses:
+        "200":
+          description: Healthy or entropy-degraded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  campaigns:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        entropy: { type: number }
+                        status:  { type: string, enum: [ok, warning, critical] }
+        "503":
+          description: WAL writer unavailable
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      description: Returns Prometheus text-format metrics (no authentication required).
+      security: []
+      responses:
+        "200":
+          description: Prometheus text
+          content:
+            text/plain: {}
+
+  /openapi.yaml:
+    get:
+      summary: OpenAPI specification
+      security: []
+      responses:
+        "200":
+          description: This document
+
+  /campaigns:
+    get:
+      summary: List all campaigns
+      responses:
+        "200":
+          description: List of campaigns
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CampaignSummary" }
+
+  /campaign:
+    post:
+      summary: Create a campaign
+      description: Requires admin role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaign_id, arms, feature_dim]
+              properties:
+                campaign_id: { type: string, example: my-campaign }
+                arms:
+                  type: array
+                  items: { type: string }
+                  example: [A, B, C]
+                feature_dim: { type: integer, example: 10 }
+                alpha:       { type: number, default: 1.0 }
+                algorithm:   { $ref: "#/components/schemas/Algorithm" }
+                metadata:    { type: object }
+      responses:
+        "200": { description: Campaign created }
+        "400": { description: Validation error,   content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Already exists,     content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /campaign/{id}:
+    get:
+      summary: Get campaign info
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Campaign info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignInfo" }
+        "404": { description: Not found }
+
+    delete:
+      summary: Permanently delete a campaign
+      description: Requires admin role. Irreversible — use /archive for soft-delete.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Deleted }
+        "404": { description: Not found }
+
+  /campaign/{id}/archive:
+    post:
+      summary: Soft-delete a campaign
+      description: |
+        Archived campaigns are frozen: predict and reward calls return 404.
+        The campaign data (arms, matrices, history) is preserved and can be
+        recovered with /restore. Requires admin role.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Archived }
+        "404": { description: Not found }
+
+  /campaign/{id}/restore:
+    post:
+      summary: Restore an archived campaign
+      description: Requires admin role.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Restored }
+        "404": { description: Not found }
+
+  /campaign/{id}/report:
+    get:
+      summary: Business-level convergence report
+      description: |
+        Returns mean reward per arm with 95% confidence intervals, overall reward rate,
+        leading arm, and a `converged` flag indicating whether the leading arm has a
+        statistically significant advantage.
+
+        Use `converged` to answer "is this campaign done?":
+        - `true`  → leading arm's 95% CI lower bound exceeds second arm's upper bound
+        - `false` → leading arm leads but CIs still overlap
+        - `null`  → not enough data (< 30 rewards per arm)
+
+        Validate with `causal_analysis()` (Python SDK): if `arm.traffic_share` matches
+        the causal assignment percentages, the bandit has converged to the correct structure.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Campaign convergence report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  campaign_id:          { type: string }
+                  archived:             { type: boolean }
+                  algorithm:            { $ref: "#/components/schemas/Algorithm" }
+                  total_predictions:    { type: integer }
+                  total_rewards:        { type: integer }
+                  overall_reward_rate:  { type: number, nullable: true }
+                  arms:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        traffic_share:   { type: number, description: "Fraction of predictions served to this arm (0–1)" }
+                        predictions:     { type: integer }
+                        rewards:         { type: integer }
+                        mean_reward:     { type: number, nullable: true }
+                        reward_lower_ci: { type: number, nullable: true, description: "95% CI lower bound" }
+                        reward_upper_ci: { type: number, nullable: true, description: "95% CI upper bound" }
+                  leading_arm:     { type: string, nullable: true }
+                  converged:       { type: boolean, nullable: true, description: "true=done, false=keep going, null=insufficient data" }
+                  challenger_traffic_pct: { type: number, nullable: true }
+                  tournament_win_streak:  { type: integer, nullable: true }
+        "404": { description: Not found }
+
+  /campaign/{id}/diagnostics:
+    get:
+      summary: Detailed per-arm diagnostics
+      description: |
+        Returns per-arm theta norms, A_inv diagonal bounds, reward stats, and
+        tournament/neural state where applicable. Useful for monitoring model
+        health without exposing raw matrices.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Diagnostics snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignDiagnosticsData" }
+        "404": { description: Not found }
+
+  /predict:
+    post:
+      summary: Predict the best arm
+      description: Requires writer role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaign_id, context]
+              properties:
+                campaign_id: { type: string }
+                context:
+                  type: array
+                  items: { type: number }
+                  description: Feature vector. Length must match the campaign's feature_dim.
+      responses:
+        "200":
+          description: Selected arm
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arm_id:         { type: string }
+                  interaction_id: { type: string, description: "Pass to /reward to close the loop." }
+        "400": { description: Context dimension mismatch or validation error }
+        "404": { description: Campaign not found }
+        "503": { description: WAL unavailable }
+
+  /batch_predict:
+    post:
+      summary: Predict for up to 100 campaign/context pairs in one call
+      description: Requires writer role. Items that fail individually are returned with an error field rather than failing the whole batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [predictions]
+              properties:
+                predictions:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [campaign_id, context]
+                    properties:
+                      campaign_id: { type: string }
+                      context:     { type: array, items: { type: number } }
+      responses:
+        "200":
+          description: Per-item results (partial failures included inline)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    arm_id:         { type: string }
+                    interaction_id: { type: string }
+                    error:          { type: string }
+
+  /reward:
+    post:
+      summary: Record the observed reward for a prediction
+      description: Requires writer role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [interaction_id, reward]
+              properties:
+                interaction_id: { type: string }
+                reward:         { type: number, minimum: 0, maximum: 1 }
+      responses:
+        "200": { description: Reward recorded }
+        "404": { description: interaction_id not found or already rewarded }
+        "503": { description: WAL unavailable }
+
+  /checkpoint:
+    post:
+      summary: Flush WAL and write a checkpoint snapshot
+      description: |
+        Atomically: flushes the WAL, exports Parquet shards, runs neural retrain +
+        tournament evaluation (if applicable), writes checkpoint.json, and rotates the WAL.
+        Requires admin role.
+      responses:
+        "200":
+          description: Checkpoint complete
+          content:
+            application/json:
+              schema: { type: string }
+        "500": { description: Checkpoint failed }
+
+  /export:
+    get:
+      summary: List Parquet export shards
+      description: Returns shard filenames grouped by campaign, sorted chronologically.
+      responses:
+        "200":
+          description: Export index
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  export_dir: { type: string }
+                  shards:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { type: string }
+        "404": { description: No exports yet }
