@@ -95,6 +95,7 @@
         <a href="#neural-linucb" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">NeuralLinUCB</a>
         <a href="#data-science"  class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Data Science Escape Hatch</a>
         <a href="#recovery"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">How Recovery Works</a>
+        <a href="#observability" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Observability & Monitoring</a>
         <a href="#use-cases"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Use Cases</a>
       </nav>
     </aside>
@@ -466,6 +467,290 @@ cp /data/checkpoint.json  /backup/checkpoint-$(date +%s).json
 cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl</code></pre>
 
         <p>To move BanditDB to a new host: copy <code>checkpoint.json</code> and <code>bandit_wal.jsonl</code> to the same <code>DATA_DIR</code> on the new machine and start. Recovery is automatic.</p>
+      </section>
+
+      <!-- Observability -->
+      <section id="observability" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Observability &amp; Production Monitoring</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Know when the system is working, not just when it's running.</p>
+
+        <h3>The Silent Failure Problem</h3>
+        <p>A contextual bandit has a failure mode that produces no errors, no latency spikes, and no obvious operational signal: <strong>exploration collapse</strong>. The engine is healthy. Every prediction succeeds. Every reward matches. The WAL is flushing. But the model stopped learning days ago — one arm has absorbed all traffic and the system is silently serving a static policy.</p>
+
+        <p>For enterprise deployments this is a contractual and audit risk. You are paying for an adaptive system. Without explicit observability, you have no way to distinguish "the bandit has correctly converged to a winning arm" from "the bandit collapsed to a wrong arm two weeks ago and nobody noticed."</p>
+
+        <p>BanditDB surfaces this through three layered signals: live selection entropy per campaign, an aggregated health endpoint, and a causal validation pipeline.</p>
+
+        <h3>Selection Entropy</h3>
+        <p>Every call to <code>GET /campaign/:id/diagnostics</code> computes the <strong>normalised Shannon entropy</strong> of the arm selection distribution:</p>
+
+        <div class="ascii">H = − Σ p_i · log(p_i) / log(n_arms)
+
+  n_arms = 3,  uniform exploration:    p = [0.33, 0.33, 0.33]  →  H = 1.00
+  n_arms = 3,  healthy convergence:    p = [0.70, 0.16, 0.14]  →  H = 0.78
+  n_arms = 3,  warning territory:      p = [0.88, 0.07, 0.05]  →  H = 0.36
+  n_arms = 3,  critical — collapsed:   p = [0.97, 0.02, 0.01]  →  H = 0.09</div>
+
+        <p>H = 1.0 means perfectly uniform selection across all arms. H = 0.0 means one arm receives all traffic. The normalisation by <code>log(n_arms)</code> makes the scale consistent regardless of how many arms a campaign has.</p>
+
+        <h3>Entropy Status and Guards</h3>
+        <p>Raw entropy is not sufficient for alerting. A campaign with H = 0.12 could be healthy (one arm has genuinely won) or broken (the model collapsed before accumulating enough data). Two guard conditions prevent false positives before a status is computed:</p>
+
+        <table>
+          <thead><tr><th>Guard</th><th>Condition</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Guard 1 — Convergence</strong></td>
+              <td>Leading arm's 95% Wilson-score CI lower bound exceeds the second arm's upper bound (requires ≥ 30 rewards on both arms)</td>
+              <td>Status is forced to <code>ok</code>. Low entropy is the correct outcome when one arm has statistically won.</td>
+            </tr>
+            <tr>
+              <td><strong>Guard 2 — Minimum observations</strong></td>
+              <td>Total predictions &lt; 500</td>
+              <td>Status is forced to <code>ok</code>. Early in a campaign, random variance naturally concentrates traffic; alerting here would be noise.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>When neither guard fires, the status is set by thresholds on H:</p>
+
+        <table>
+          <thead><tr><th><code>entropy_status</code></th><th>Threshold</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>ok</code></td><td>H ≥ 0.4, or either guard is active</td><td>Healthy exploration or confirmed convergence.</td></tr>
+            <tr><td><code>warning</code></td><td>0.2 ≤ H &lt; 0.4</td><td>One arm is absorbing most traffic without a convergence signal. Investigate.</td></tr>
+            <tr><td><code>critical</code></td><td>H &lt; 0.2</td><td>Near-total collapse. <code>likely_cause</code> and <code>suggested_action</code> are always present.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Entropy Trend</h3>
+        <p>BanditDB stores an entropy snapshot at every checkpoint and compares it to the current value. This distinguishes a campaign that has been collapsed for months (data quality issue) from one that collapsed last night (operational incident).</p>
+
+        <table>
+          <thead><tr><th><code>entropy_trend</code></th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>stable</code></td><td>Entropy changed by less than 0.1 since the last checkpoint.</td></tr>
+            <tr><td><code>falling</code></td><td>Dropped by more than 0.1 — recent collapse. Likely cause is a pipeline event, deploy, or new cohort. Correlate with your deployment timeline.</td></tr>
+            <tr><td><code>recovering</code></td><td>Increased by more than 0.1 — entropy is returning after a collapse. Monitor until stable.</td></tr>
+            <tr><td><code>unknown</code></td><td>No checkpoint has been written yet for this campaign. Run <code>POST /checkpoint</code> to establish a baseline.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Full Diagnostics Response</h3>
+        <p>A campaign with critical entropy returns a self-explanatory triage payload alongside all existing diagnostics:</p>
+
+        <pre><code class="language-bash">curl http://localhost:8080/campaign/prices/diagnostics \
+  -H "X-Api-Key: your-key"</code></pre>
+
+        <pre><code class="language-json">{
+  "campaign_id": "prices",
+  "selection_entropy": 0.09,
+  "entropy_status": "critical",
+  "entropy_trend": "falling",
+  "converged": false,
+  "likely_cause": "recent_collapse",
+  "suggested_action": "Entropy dropped since last checkpoint. Check reward pipeline for bugs or recent config changes.",
+  "total_predictions": 4821,
+  "total_rewards": 312,
+  "arm_stats": {
+    "price_10": { "predictions": 4698, "rewards": 301, "avg_reward": 0.61 },
+    "price_15": { "predictions": 89,   "rewards": 8,   "avg_reward": 0.58 },
+    "price_20": { "predictions": 34,   "rewards": 3,   "avg_reward": 0.55 }
+  }
+}</code></pre>
+
+        <div class="callout">
+          <p><code>likely_cause</code> and <code>suggested_action</code> are only present when <code>entropy_status</code> is <code>warning</code> or <code>critical</code> — they are omitted entirely when the campaign is healthy.</p>
+        </div>
+
+        <h3>Operational Recipes</h3>
+        <p>When an alert fires, the first step is always to look at the diagnostics: per-arm <code>predictions</code>, <code>rewards</code>, <code>avg_reward</code>, <code>converged</code>, and <code>entropy_trend</code> together identify which of five scenarios is occurring.</p>
+
+        <table>
+          <thead><tr><th>Scenario</th><th>Signals</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Legitimate convergence</strong></td>
+              <td><code>converged: true</code>, all arms have substantial reward counts, losing arms had a fair chance (predictions &gt; 300 each)</td>
+              <td>No action. Guard 1 should have suppressed the alert. If it fired, verify reward count thresholds are met. Consider archiving the campaign.</td>
+            </tr>
+            <tr>
+              <td><strong>Early lock-in</strong></td>
+              <td>Total predictions &lt; 2000, one or more arms have fewer than 50 predictions, <code>converged: null</code></td>
+              <td>The winning arm got a lucky early lead before others had enough data. Increase <code>alpha</code> to boost the UCB exploration bonus. If the campaign is too young to reset, wait — entropy may recover naturally. Reset and restart if data is cheap to regenerate.</td>
+            </tr>
+            <tr>
+              <td><strong>Reward pipeline event</strong></td>
+              <td><code>entropy_trend: "falling"</code>, collapse is recent, often correlates with a deploy or config change. One arm's reward rate is anomalously high relative to its base rate.</td>
+              <td><strong>Fix the pipeline before touching the campaign.</strong> Resetting while the bug is live just restarts the corruption. Once the pipeline is clean, assess whether the corrupted observations can be discarded or whether a full campaign reset is warranted.</td>
+            </tr>
+            <tr>
+              <td><strong>New cohort after collapse</strong></td>
+              <td>Long-running campaign, entropy was healthy for months then gradually declined, correlates with a new user segment or product change. The collapsed arm may be contextually correct for the original cohort but wrong for the new one.</td>
+              <td>Do not reset — that discards valid learning for the original cohort. Create a separate campaign for the new segment, or add new arms representing the new segment's hypotheses.</td>
+            </tr>
+            <tr>
+              <td><strong>Alpha misconfiguration</strong></td>
+              <td>Collapse occurs within the first 200–500 predictions, <code>entropy_trend: "falling"</code> from the very beginning, all arms except one have near-zero observations. Diagnosed by reviewing campaign creation parameters.</td>
+              <td>The UCB exploration bonus was too small from the start. Recreate the campaign with a higher <code>alpha</code>. The cost is low — the campaign has few observations.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Health Endpoint Integration</h3>
+        <p><code>GET /health</code> aggregates entropy status across all active campaigns and is designed for integration with load balancers, uptime monitors, and Kubernetes probes. It requires no authentication.</p>
+
+        <pre><code class="language-bash">curl http://localhost:8080/health</code></pre>
+
+        <pre><code class="language-json">{
+  "status": "degraded",
+  "campaigns": {
+    "prices":        { "entropy": 0.09, "status": "critical" },
+    "recommendations": { "entropy": 0.71, "status": "ok" },
+    "onboarding":    { "entropy": 0.34, "status": "warning" }
+  }
+}</code></pre>
+
+        <table>
+          <thead><tr><th>HTTP status</th><th>Overall <code>status</code></th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>200</code></td><td><code>ok</code></td><td>All active campaigns have healthy entropy (or are statistically converged).</td></tr>
+            <tr><td><code>200</code></td><td><code>degraded</code></td><td>One or more campaigns have <code>warning</code> or <code>critical</code> entropy. The service is still serving correctly — this is a data quality signal, not a service failure. Do not remove from load balancer rotation.</td></tr>
+            <tr><td><code>503</code></td><td><code>degraded: wal unavailable</code></td><td>The WAL writer has encountered an unrecoverable I/O error. Predictions will continue to be served from memory but no new events are being persisted. Treat as a service failure.</td></tr>
+          </tbody>
+        </table>
+
+        <p>The deliberate choice of HTTP 200 for entropy degradation — rather than 503 — means a k8s readiness probe or load balancer health check will not remove the instance from rotation just because a campaign's model quality has degraded. Service availability and model quality are separate failure modes and should be monitored separately.</p>
+
+        <h4>Kubernetes</h4>
+        <pre><code class="language-yaml">livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10</code></pre>
+
+        <p>The k8s probe will mark the pod not-ready only when the WAL writer fails (503). Campaign-level entropy degradation returns 200 and does not affect routing — which is the correct behaviour: a degraded model is still serving predictions, and removing the pod from rotation does not fix the underlying cause.</p>
+
+        <h4>Structured logging</h4>
+        <p>When <code>entropy_status</code> is <code>warning</code> or <code>critical</code>, BanditDB emits a structured <code>WARN</code> log line at diagnostics time. Set <code>LOG_FORMAT=json</code> to receive machine-parseable output compatible with CloudWatch, Datadog, Splunk, and most log aggregation pipelines:</p>
+
+        <pre><code class="language-json">{
+  "level": "WARN",
+  "campaign": "prices",
+  "entropy": "0.091",
+  "trend": "Falling",
+  "status": "Critical",
+  "likely_cause": "recent_collapse",
+  "message": "entropy: low selection entropy detected"
+}</code></pre>
+
+        <p>An alert rule on <code>message = "entropy: low selection entropy detected"</code> and <code>level = WARN</code> is sufficient to wire this into any log-based alerting system without code changes.</p>
+
+        <h3>Causal Validation</h3>
+        <p>Entropy alerting tells you <em>whether</em> the bandit is still exploring. Causal analysis tells you <em>whether the exploration it did was causally correct</em> — whether the arm receiving the most traffic is actually causing better outcomes, or whether it is merely correlated with outcomes that were already good for that user segment.</p>
+
+        <p>Standard OPE estimators (IPS, SNIPS, Doubly Robust) answer the question: "what reward would policy π achieve?" Causal analysis answers a different question: "what is the causal effect of each arm, controlling for the fact that the bandit was selecting them non-randomly based on context?"</p>
+
+        <p>The distinction matters in production. A bandit can correctly route high-converting users to arm A — not because arm A causes conversions, but because arm A was selected for users who already convert well. IPS estimators will confirm arm A is performing well. Causal analysis will correctly identify that the arm's observed advantage is partially or fully explained by user selection bias.</p>
+
+        <h4>Running the analysis</h4>
+
+        <pre><code class="language-bash"># Checkpoint first to flush the latest data to Parquet
+curl -X POST http://localhost:8080/checkpoint -H "X-Api-Key: your-key"
+
+# Run causal analysis
+pip install econml scikit-learn polars pandas numpy
+python scripts/causal_analysis.py \
+  --parquet /data/exports/prices.parquet \
+  --features price_sensitivity recency_days cart_value_norm segment_score</code></pre>
+
+        <p>The script works with LinUCB, Thompson Sampling, and Progressive campaigns. Thompson Sampling campaigns do not log per-prediction propensities — the estimator (CausalForestDML) learns the selection propensity internally from observed <code>(arm, context)</code> pairs using Double Machine Learning, which is more appropriate for aggregated bandit data than using time-varying logged propensities from a non-stationary policy.</p>
+
+        <h4>Section 0 — Positivity &amp; Confounding Diagnostics</h4>
+        <p>This section runs before the expensive causal forests and checks whether the DML validity assumptions hold. It is the causal analysis equivalent of the entropy alert: a positivity violation means the bandit never selected a given arm for some region of the feature space, making causal effect estimates for that arm in that region extrapolation rather than inference.</p>
+
+        <pre><code class="language-bash">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. POSITIVITY & CONFOUNDING DIAGNOSTICS
+   (pre-flight check — run before fitting causal forests)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Arm                               AUC    P<0.05   P>0.95
+  ────────────────────────────────  ─────  ───────  ───────
+  price_10                          0.812    2.1%     1.8%
+  price_15                          0.831    1.4%     0.9%
+  price_20                          0.744   34.2%     0.3%   ⚠ positivity violation
+
+  ⚠  Positivity violations often indicate exploration collapse.
+     Check GET /campaign/:id/diagnostics for entropy_status.</code></pre>
+
+        <p>The <strong>AUC</strong> of the internal propensity model (<code>model_t</code>) quantifies how strongly context predicts arm selection. AUC ≈ 0.5 means near-random selection — the bandit was exploring freely and causal estimates are highly reliable. AUC &gt; 0.8 means strong confounding — the DML is doing important correction work but estimates carry more uncertainty because few users in the "wrong" arm condition exist.</p>
+
+        <p><strong>P&lt;0.05</strong> is the fraction of observations where the model predicts near-zero probability of this arm being selected. When this exceeds 20%, the arm was almost never chosen in that feature region and the CATE estimate there is unreliable.</p>
+
+        <h4>Section 2 — Causal Assignment vs Bandit Selection</h4>
+        <p>The most operationally important output. The causal forest identifies, for each user in the dataset, which arm would causally produce the best outcome. This is compared to what the bandit actually selected.</p>
+
+        <pre><code class="language-bash">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. CAUSAL ASSIGNMENT vs BANDIT SELECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Arm                              Causal   Bandit     Gap
+  ────────────────────────────────  ───────  ───────  ───────
+  price_10                          42.1%    14.2%   +27.9%  ████████████████████
+  price_15                          51.3%    79.4%   -28.1%  █████████████████████████
+  price_20                           6.6%     6.4%    +0.2%  ███</code></pre>
+
+        <table>
+          <thead><tr><th>Gap</th><th>Interpretation</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td>Gap ≈ 0</td><td>The bandit's traffic distribution matches the causal structure. The model has converged to the correct policy.</td><td>No action. If entropy is also healthy, the campaign is operating correctly.</td></tr>
+            <tr><td>Gap &gt; 0 (arm underserved)</td><td>A user group that would causally benefit from this arm is not being routed to it. The bandit is leaving value on the table for that segment.</td><td>Check whether the arm had enough early observations. Consider raising <code>alpha</code> or adding context features that distinguish this group.</td></tr>
+            <tr><td>Gap &lt; 0 (arm overserved)</td><td>The bandit has over-converged to this arm. It is receiving more traffic than the causal structure warrants — often driven by user selection bias rather than genuine causal advantage.</td><td>The arm's observed reward rate is inflated by non-random selection. Do not interpret high reward rate as causal effectiveness without this analysis.</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Section 5 — Selection Stability Over Time</h4>
+        <p>Splits the campaign timeline into five equal-sized buckets (by prediction timestamp) and shows per-arm selection rate across the full campaign history. This surfaces convergence, collapse, and pipeline events directly from the Parquet export without requiring access to the live diagnostics endpoint.</p>
+
+        <pre><code class="language-bash">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. SELECTION STABILITY OVER TIME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  t1(961)  t2(961)  t3(961)  t4(961)  t5(961)
+
+  price_10   ░░▒▒▒  [ 18.2%  22.1%  28.4%  31.7%  35.9%]
+  price_15   ████▓  [ 64.1%  59.3%  55.2%  52.8%  47.3%]
+  price_20   ▒░░░·  [ 17.7%  18.6%  16.4%  15.5%  16.8%]
+
+  Stable across buckets  → IID assumption holds, DML estimates reliable
+  Monotonic increase     → bandit converging or collapsing to this arm
+  Sudden jump in t4/t5   → possible reward pipeline event or config change</code></pre>
+
+        <p>The example above shows healthy convergence in progress: <code>price_15</code> is steadily losing traffic to <code>price_10</code> as the model learns. The DML IID assumption is not perfectly satisfied (the policy is non-stationary) but the gradual shift means causal estimates over the full history are a reasonable approximation of the average policy. A sudden jump in t4 or t5 — rather than a gradual drift — would indicate a pipeline or configuration event and should prompt investigation before trusting the causal estimates.</p>
+
+        <h4>Interpreting the full output</h4>
+
+        <table>
+          <thead><tr><th>Signal</th><th>What it means</th><th>What to do</th></tr></thead>
+          <tbody>
+            <tr><td>ATE significant &amp; positive</td><td>The arm causally increases reward above baseline.</td><td>This arm is genuinely effective. Its observed advantage is not explained by selection bias.</td></tr>
+            <tr><td>ATE near zero or inconclusive</td><td>The arm's observed reward advantage is not causally real — it is explained by the context features it tends to be selected for.</td><td>Audit whether context features are capturing the relevant signal. The arm may be receiving credit for conversions that would have happened anyway.</td></tr>
+            <tr><td>ATE significant &amp; negative</td><td>The arm is causally hurting outcomes.</td><td>Remove or replace the arm. Its selection is suppressing reward relative to what users would have achieved under a different policy.</td></tr>
+            <tr><td>CATE p25–p75 wide</td><td>The treatment effect is heterogeneous — some users respond strongly, others do not. Personalisation is the mechanism driving value.</td><td>The bandit's context-aware routing is doing important work. Inspect the winning segments output for which feature dimensions drive the heterogeneity.</td></tr>
+            <tr><td>CATE p25–p75 narrow</td><td>The effect is homogeneous — the arm is roughly equally good or bad for all users.</td><td>The bandit is correct to converge uniformly. A simpler rule-based policy would achieve similar results.</td></tr>
+            <tr><td>Positivity violation &gt; 20%</td><td>The bandit collapsed exploration for this arm. CATE estimates are not trustworthy for the affected feature region.</td><td>Check <code>entropy_status</code> in <code>/diagnostics</code>. Determine which operational recipe applies and address the root cause before re-running causal analysis.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>Causal analysis requires at least 200–300 reward observations per arm for reliable CATE estimates. Run <code>POST /checkpoint</code> to export the latest data before each analysis run. The causal forest fits one model per arm, so runtime scales linearly with the number of arms — allow 2–5 minutes for campaigns with 5+ arms and 10,000+ observations.</p>
+        </div>
+
       </section>
 
       <!-- Use Cases -->
