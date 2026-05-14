@@ -1001,7 +1001,27 @@ impl BanditDB {
             }
 
             let arm_propensities = match active_algo {
-                Algorithm::ThompsonSampling => None,
+                Algorithm::ThompsonSampling => {
+                    // Adaptive Monte Carlo: draw N trials and count wins per arm.
+                    // N scales with posterior spread (A_inv diagonal) — large near cold-start
+                    // where many samples are needed; small once the posterior concentrates.
+                    // The first trial's winner is already known (best_arm from initial scores draw).
+                    let n = ts_propensity_samples(&*arms_guard);
+                    let mut counts: HashMap<String, u32> = arms_guard.keys()
+                        .map(|id| (id.clone(), 0u32))
+                        .collect();
+                    *counts.entry(best_arm.clone()).or_insert(0) += 1;
+                    for _ in 1..n {
+                        if let Some((winner, _)) = arms_guard.iter()
+                            .map(|(id, state)| (id.clone(), state.score_ts(&features, campaign.alpha)))
+                            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        {
+                            *counts.entry(winner).or_insert(0) += 1;
+                        }
+                    }
+                    let n_f = n as f64;
+                    Some(counts.into_iter().map(|(id, c)| (id, c as f64 / n_f)).collect())
+                }
                 _ => Some(softmax_propensities(&scores)),
             };
 
@@ -1645,6 +1665,30 @@ fn classify_entropy_status(entropy: f64, total_preds: u64, converged: Option<boo
     if entropy >= 0.4 { EntropyStatus::Ok }
     else if entropy >= 0.2 { EntropyStatus::Warning }
     else { EntropyStatus::Critical }
+}
+
+/// Adaptive Monte Carlo sample count for Thompson Sampling propensity estimation.
+///
+/// Uses the maximum A_inv diagonal across all arms as a proxy for posterior spread.
+/// A_inv starts as the identity matrix (diagonal = 1.0) and shrinks as rewards accumulate.
+///
+/// | max_diag  | Stage               | N  |
+/// |-----------|---------------------|----|
+/// | > 0.7     | Cold start          | 64 |
+/// | 0.3–0.7   | Active learning     | 32 |
+/// | 0.1–0.3   | Converging          | 16 |
+/// | ≤ 0.1     | Concentrated        |  8 |
+///
+/// This gives the ideal cost profile for production: high N when traffic is low (cold start),
+/// low N when traffic is high (converged) — the sample budget scales inversely with load.
+fn ts_propensity_samples(arms: &HashMap<String, ArmState>) -> usize {
+    let max_diag = arms.values()
+        .map(|s| s.a_inv.diag().iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+        .fold(0.0f64, f64::max);
+    if max_diag > 0.7 { 64 }
+    else if max_diag > 0.3 { 32 }
+    else if max_diag > 0.1 { 16 }
+    else { 8 }
 }
 
 /// Compute softmax-normalised propensities over arm UCB scores.

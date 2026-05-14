@@ -354,7 +354,11 @@ db.reward(interaction_id, reward)</code></pre>
 
         <p>Every prediction will eventually appear in the Parquet file even if its reward arrives hours later. BanditDB re-emits in-flight interactions at each checkpoint so delayed rewards are always captured in a future cycle.</p>
 
-        <p>Each row includes a <strong>propensity</strong> column — the softmax-normalised probability that the logging policy selected the chosen arm given the context (LinUCB only; <code>null</code> for Thompson Sampling). This is the <code>P(a | x)</code> term required by Inverse Propensity Scoring estimators.</p>
+        <p>Each row includes a <strong>propensity</strong> column — the probability that the logging policy selected the chosen arm given the context. This is the <code>P(a | x)</code> term required by Inverse Propensity Scoring estimators. The method differs by algorithm:</p>
+        <ul>
+          <li><strong>LinUCB / NeuralLinUCB:</strong> softmax-normalised UCB scores across all arms at prediction time.</li>
+          <li><strong>Thompson Sampling:</strong> adaptive Monte Carlo frequency estimate. N posterior samples are drawn per arm; propensity is the fraction of draws in which the arm produced the highest score. N adapts from 64 (cold start, diffuse posterior) down to 8 (converged, concentrated posterior) based on the maximum A⁻¹ diagonal across arms — so accuracy is highest when it is most needed and cost is lowest when traffic is highest.</li>
+        </ul>
 
         <pre><code class="language-python">import polars as pl
 import requests
@@ -672,7 +676,7 @@ python scripts/causal_analysis.py \
   --parquet /data/exports/prices.parquet \
   --features price_sensitivity recency_days cart_value_norm segment_score</code></pre>
 
-        <p>The script works with LinUCB, Thompson Sampling, and Progressive campaigns. Thompson Sampling campaigns do not log per-prediction propensities — the estimator (CausalForestDML) learns the selection propensity internally from observed <code>(arm, context)</code> pairs using Double Machine Learning, which is more appropriate for aggregated bandit data than using time-varying logged propensities from a non-stationary policy.</p>
+        <p>The script works with LinUCB, Thompson Sampling, and Progressive campaigns. Thompson Sampling campaigns now log per-prediction propensities via adaptive Monte Carlo sampling (N=8–64 draws per arm, driven by posterior spread). The causal estimator (CausalForestDML) does not use these logged propensities — it learns the selection propensity internally from observed <code>(arm, context)</code> pairs using Double Machine Learning, which is more appropriate for aggregated bandit data than using time-varying logged propensities from a non-stationary policy. The logged TS propensities are used by the IPS/SNIPS offline evaluator in <code>banditdb.eval</code>.</p>
 
         <h4>Section 0 — Positivity &amp; Confounding Diagnostics</h4>
         <p>This section runs before the expensive causal forests and checks whether the DML validity assumptions hold. It is the causal analysis equivalent of the entropy alert: a positivity violation means the bandit never selected a given arm for some region of the feature space, making causal effect estimates for that arm in that region extrapolation rather than inference.</p>

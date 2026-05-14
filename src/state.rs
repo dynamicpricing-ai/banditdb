@@ -240,8 +240,9 @@ pub struct CompletedInteraction {
     pub reward:         f64,
     pub predicted_at:   u64,
     pub rewarded_at:    u64,
-    /// Softmax-normalised UCB propensity of the chosen arm (LinUCB only).
-    /// None for Thompson Sampling campaigns (propensity logging added in a future iteration).
+    /// Propensity of the chosen arm under the logging policy.
+    /// LinUCB: softmax-normalised UCB score.
+    /// Thompson Sampling: adaptive Monte Carlo frequency (N=8–64, driven by A_inv diagonal).
     pub propensity:     Option<f64>,
 }
 
@@ -409,9 +410,10 @@ pub enum DbEvent {
         context:        Vec<f64>,
         #[serde(default)]
         timestamp_secs: u64,
-        /// Softmax-normalised UCB propensity for every arm (LinUCB only).
-        /// Absent in WAL records written before propensity logging was added — deserialises to None.
-        /// None for Thompson Sampling campaigns.
+        /// Per-arm propensity under the logging policy.
+        /// LinUCB/NeuralLinUCB: softmax-normalised UCB scores.
+        /// Thompson Sampling: adaptive Monte Carlo frequency estimate (N=8–64).
+        /// Absent in WAL records written before propensity logging — deserialises to None.
         #[serde(default = "default_none_map")]
         arm_propensities: Option<HashMap<String, f64>>,
     },

@@ -7,14 +7,19 @@ Answers four questions that standard OPE estimators cannot:
   3. Which context features drive the heterogeneity?
   4. Is the bandit's selection policy stable over time?
 
-Works with both LinUCB and Thompson Sampling campaigns. The estimator is
-CausalForestDML (Double Machine Learning), which residualises both the outcome
-and the treatment against the feature distribution before estimating causal
-effects. The selection propensity is learned internally by model_t from
-observed (arm, context) pairs — logged propensities from the Parquet file are
-not used. This makes TS and LinUCB equivalent: both have their selection
-mechanism recovered from data, which is more robust than using time-varying
-logged propensities from a non-stationary bandit policy.
+Works with LinUCB, Thompson Sampling, and Progressive campaigns. The estimator
+is CausalForestDML (Double Machine Learning), which residualises both the
+outcome and the treatment against the feature distribution before estimating
+causal effects. model_t (GradientBoostingClassifier) learns the selection
+propensity internally from observed (arm, context) pairs — the logged
+propensity column is not used here. This makes all algorithm types equivalent
+for causal analysis.
+
+Thompson Sampling campaigns now log per-prediction propensities via adaptive
+Monte Carlo sampling (N=8–64 draws per arm, driven by A_inv diagonal spread).
+Those values are used by the IPS/SNIPS evaluator in banditdb.eval but not by
+this script. Old TS exports (before adaptive Monte Carlo was added) will have
+null propensity — the DML handles these identically.
 
 Requirements:
     pip install econml scikit-learn polars numpy pandas
@@ -42,11 +47,12 @@ def load_parquet(path: str):
     df = pl.read_parquet(path).to_pandas()
     null_pct = df["propensity"].isna().mean() * 100
     if null_pct == 100:
-        print("  [info] Thompson Sampling campaign — propensity column is null. "
-              "Selection probability will be estimated internally by model_t (DML).\n")
+        print("  [info] All propensity values are null — this is an old Thompson Sampling "
+              "export from before adaptive Monte Carlo propensity logging was added. "
+              "model_t will estimate selection probability from data.\n")
     elif null_pct > 0:
-        print(f"  [info] {null_pct:.0f}% of rows have null propensity (mixed TS/LinUCB or "
-              f"Progressive campaign). All rows are used — model_t estimates selection "
+        print(f"  [info] {null_pct:.0f}% of rows have null propensity (legacy TS records "
+              f"mixed with newer data). All rows are kept — model_t estimates selection "
               f"probability from data.\n")
     return df
 
