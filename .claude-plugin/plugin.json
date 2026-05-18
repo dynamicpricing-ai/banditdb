@@ -1,0 +1,21 @@
+{
+  "name": "banditdb",
+  "description": "The Intuition Database — an in-memory decision database for agents and applications that need to learn which decisions work and get better with every outcome.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Simeon Lukov",
+    "email": "s.lukov@dynamicpricing.ai"
+  },
+  "homepage": "https://github.com/dynamicpricing-ai/banditdb",
+  "repository": "https://github.com/dynamicpricing-ai/banditdb",
+  "license": "Apache-2.0",
+  "keywords": ["bandit", "reinforcement-learning", "contextual-bandit", "linucb", "thompson-sampling", "mcp"],
+  "mcpServers": {
+    "banditdb": {
+      "command": "banditdb-mcp",
+      "env": {
+        "BANDITDB_URL": "http://localhost:8080"
+      }
+    }
+  }
+}
