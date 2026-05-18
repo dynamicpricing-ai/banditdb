@@ -104,10 +104,10 @@ for candidate in pip3 pip python3 python; do
 done
 [ -z "$PIP" ] && die "Python pip not found. Install Python ≥3.9: https://python.org"
 
-info "Installing banditdb-mcp..."
-$PIP install --quiet --upgrade banditdb-mcp 2>/dev/null || \
-$PIP install --quiet --upgrade --user banditdb-mcp || \
-die "pip install banditdb-mcp failed. Try manually: pip install banditdb-mcp"
+info "Installing banditdb-python..."
+$PIP install --quiet --upgrade banditdb-python 2>/dev/null || \
+$PIP install --quiet --upgrade --user banditdb-python || \
+die "pip install banditdb-python failed. Try manually: pip install banditdb-python"
 ok "banditdb-mcp installed"
 
 # ── 3. Claude Code plugin ─────────────────────────────────────────────────────
