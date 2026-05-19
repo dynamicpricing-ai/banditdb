@@ -5,7 +5,7 @@ set -e
 
 REPO="dynamicpricing-ai/banditdb"
 BIN_NAME="banditdb"
-INSTALL_DIR="${BANDITDB_INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${BANDITDB_INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── Detect OS and architecture ────────────────────────────────────────────────
 os="$(uname -s)"
@@ -34,8 +34,12 @@ case "$os" in
 esac
 
 # ── Resolve latest version ────────────────────────────────────────────────────
-version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/')"
+if command -v jq > /dev/null 2>&1; then
+  version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.tag_name')"
+else
+  version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+fi
 
 if [ -z "$version" ]; then
   echo "Could not determine latest BanditDB version." >&2
@@ -52,21 +56,41 @@ trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$url" -o "$tmp/banditdb.tar.gz"
 tar -xzf "$tmp/banditdb.tar.gz" -C "$tmp"
 
+bin_path="$(find "$tmp" -name "$BIN_NAME" -type f | head -1)"
+if [ -z "$bin_path" ]; then
+  echo "Could not find '$BIN_NAME' binary after extraction." >&2
+  exit 1
+fi
+
+
+
 # ── Install ───────────────────────────────────────────────────────────────────
+mkdir -p "$INSTALL_DIR"
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  mv "$bin_path" "$INSTALL_DIR/$BIN_NAME"
   chmod +x "$INSTALL_DIR/$BIN_NAME"
 else
   echo "Installing to $INSTALL_DIR (sudo required)..."
-  sudo mv "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  echo "Tip: set BANDITDB_INSTALL_DIR to a writable path to skip sudo."
+  sudo mv "$bin_path" "$INSTALL_DIR/$BIN_NAME"
   sudo chmod +x "$INSTALL_DIR/$BIN_NAME"
 fi
 
-echo ""
-echo "BanditDB $version installed to $INSTALL_DIR/$BIN_NAME"
-echo ""
-echo "Start the server:"
-echo "  banditdb"
-echo ""
-echo "Health check:"
-echo "  curl http://localhost:8080/health"
+if ! echo ":$PATH:" | grep -qF ":$INSTALL_DIR:"; then
+  echo ""
+  echo "  $INSTALL_DIR is not on your PATH."
+  echo "  Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+  echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
+fi
+
+cat <<EOF
+
+BanditDB $version installed to $INSTALL_DIR/$BIN_NAME
+
+Start the server (run this first!):
+  banditdb
+
+Then verify it's up:
+  curl http://localhost:8080/health
+
+EOF
