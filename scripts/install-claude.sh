@@ -115,8 +115,9 @@ step "Claude Code plugin"
 
 if command -v claude &>/dev/null; then
   info "Installing banditdb plugin via Claude Code..."
-  claude plugin install dynamicpricing-ai/banditdb 2>/dev/null && \
-    ok "Plugin installed: dynamicpricing-ai/banditdb" || {
+  claude plugin marketplace add dynamicpricing-ai/banditdb 2>/dev/null && \
+  claude plugin install banditdb@banditdb 2>/dev/null && \
+    ok "Plugin installed: banditdb@banditdb" || {
     warn "claude plugin install failed — falling back to manual configuration"
     _MANUAL_INSTALL=1
   }
