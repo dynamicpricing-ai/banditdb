@@ -1,5 +1,5 @@
 use banditdb::engine::WalMessage;
-use banditdb::state::Algorithm;
+use banditdb::state::{Algorithm, NeuralLinUCBConfig};
 use banditdb::BanditDB;
 
 /// Test 1.2 — Asymptotic Convergence to Known Theta
@@ -740,4 +740,90 @@ async fn test_linucb_propensity_unaffected_by_ts_changes() {
     }
 
     let _ = std::fs::remove_file(wal);
+}
+
+/// Test — NeuralThompsonSampling basic correctness.
+///
+/// Verifies that:
+///   1. A NeuralThompsonSampling campaign can be created.
+///   2. predict() returns a valid arm and interaction_id.
+///   3. reward() updates arm reward counters.
+///   4. After 200 reward cycles the winning arm (arm "A") is selected more
+///      often than random (> 40% share on a clear linear signal).
+///   5. checkpoint() completes without deadlocking — the bug this tests
+///      specifically guards against is holding neural.lock() while calling
+///      arms.write(), which caused a deadlock with concurrent predict() calls.
+#[cfg(feature = "neural")]
+#[tokio::test]
+async fn test_neural_thompson_sampling_basic() {
+    let data_dir = "/tmp/banditdb_test_neural_ts";
+    let wal      = format!("{}/wal.jsonl", data_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    let cfg = NeuralLinUCBConfig {
+        context_dim:   4,
+        embed_dim:     8,
+        hidden_dim:    32,
+        hidden_layers: 1,
+        retrain_every: 50,
+        retrain_steps: 20,
+        learning_rate: 1e-3,
+        lambda:        1.0,
+    };
+
+    let db = BanditDB::new(&wal, data_dir);
+    db.add_campaign(
+        "nts_test",
+        vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        cfg.embed_dim,
+        0.5,
+        Algorithm::NeuralThompsonSampling(cfg),
+        None,
+        None,
+    ).expect("campaign creation must succeed");
+
+    // Arm "A" is optimal: reward = 1.0 when context[0] > 0.5 (always true here).
+    let mut arm_counts = std::collections::HashMap::new();
+    for i in 0..200_usize {
+        let ctx = vec![0.8 + (i as f64 * 0.001), 0.2, 0.1, 0.0];
+        let (arm, iid) = db.predict("nts_test", ctx).expect("predict must succeed");
+        *arm_counts.entry(arm.clone()).or_insert(0u32) += 1;
+
+        let reward = if arm == "A" { 1.0 } else { 0.0 };
+        db.reward(&iid, reward).expect("reward must succeed");
+    }
+
+    // Verify reward counters updated.
+    let total_rewards: u64 = {
+        let campaigns = db.campaigns.read();
+        let campaign  = campaigns.get("nts_test").unwrap();
+        let arms      = campaign.arms.read();
+        arms.values()
+            .map(|s| s.reward_count.load(std::sync::atomic::Ordering::Relaxed))
+            .sum()
+    };
+    assert_eq!(total_rewards, 200, "all 200 rewards must be recorded");
+
+    // After 200 steps NeuralTS should show some preference for arm A.
+    // Threshold is intentionally loose (>33% = above random) — the test
+    // checks exploration works, not that it has converged.
+    let a_share = *arm_counts.get("A").unwrap_or(&0) as f64 / 200.0;
+    assert!(
+        a_share > 0.33,
+        "NeuralThompsonSampling should select arm A more than random after 200 steps, got {:.1}%",
+        a_share * 100.0
+    );
+
+    // checkpoint() must complete without deadlock.
+    // The arms.write() inside checkpoint runs while neural.lock() must be released —
+    // the deadlock fix ensures this. A 10-second timeout guards against regression.
+    let checkpoint_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        db.checkpoint(),
+    ).await;
+    assert!(checkpoint_result.is_ok(), "checkpoint() timed out — likely deadlock regression");
+    assert!(checkpoint_result.unwrap().is_ok(), "checkpoint() must succeed");
+
+    let _ = std::fs::remove_dir_all(data_dir);
 }

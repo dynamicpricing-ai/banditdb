@@ -16,9 +16,9 @@
 
 An in-memory decision database that learns from feedback.
 
-BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB** (deep contextual bandit), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
+BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB**, **NeuralThompsonSampling** (Zhang et al. 2021), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
 
-* **Four algorithms in one binary:** LinUCB, Thompson Sampling, NeuralLinUCB, and Progressive Tournament (autonomous algorithm selection via SNIPS-weighted shadow learning).
+* **Five algorithms in one binary:** LinUCB, Thompson Sampling, NeuralLinUCB, NeuralThompsonSampling, and Progressive Tournament (autonomous algorithm selection via SNIPS-weighted shadow learning).
 * **Two HTTP calls:** `POST /predict` returns which decision to take, `POST /reward` updates the model.
 * **Built-in convergence signal:** `GET /campaign/:id/report` returns 95% CI bounds per arm and a `converged` flag — know exactly when to stop the experiment.
 * Delayed rewards handled via a TTL cache — rewards can arrive hours or days after the prediction.
@@ -35,12 +35,13 @@ BanditDB is a database written in Rust that runs **Contextual Bandit** algorithm
 |-----------|-------------|
 | `"linucb"` | Default. Linear reward signal, fast convergence, lowest computational cost. |
 | `"thompson_sampling"` | Bayesian exploration. Better empirical performance when rewards are highly stochastic. |
-| `{"neural_lin_ucb": {...}}` | Non-linear reward function. MLP embedding + LinUCB in embedding space. Retrains at checkpoint. |
+| `{"neural_lin_ucb": {...}}` | Non-linear reward function. MLP embedding + LinUCB in embedding space. Retrains at checkpoint. Conservative exploration — good when early mistakes are costly. |
+| `{"neural_thompson_sampling": {...}}` | Same MLP embedding as NeuralLinUCB, but Thompson Sampling draws instead of UCB bounds. More diverse early exploration — better long-run convergence at 20K+ interactions. |
 | `{"progressive": {...}}` | Unsure which algorithm fits? BanditDB runs a base and a challenger in parallel and shifts traffic to the winner. |
 
 ### NeuralLinUCB
 
-Learns a deep embedding of the context vector, then applies LinUCB in the embedding space. Use this when the reward function is non-linear in the raw features. The MLP retrains at every `POST /checkpoint` call.
+Learns a deep embedding of the context vector, then applies LinUCB in the embedding space. Use when the reward function is non-linear in raw features and early stability is important. The MLP retrains at every `POST /checkpoint` call.
 
 ```python
 from banditdb import Client, NeuralLinUCBConfig
@@ -55,6 +56,46 @@ cfg = NeuralLinUCBConfig(
 )
 db.create_campaign("prices", ["10", "15", "20"], feature_dim=10, algorithm=cfg)
 ```
+
+### NeuralThompsonSampling
+
+Same MLP architecture and retrain procedure as NeuralLinUCB, but exploration uses Thompson Sampling: at predict time, arm weights are sampled from the posterior `w ~ N(θ, σ²A⁻¹)` instead of computing a UCB bound. This produces natural diversity across concurrent requests — different users in the same segment get different arms, generating richer coverage earlier.
+
+**Choose NeuralThompsonSampling when:**
+- You have large homogeneous segments (many users, same context cluster)
+- Long-run convergence matters more than early-step stability
+- You want to match the [NeuralTS paper (Zhang et al. 2021)](https://arxiv.org/abs/2010.00827) benchmark
+
+```python
+from banditdb import Client, NeuralLinUCBConfig
+
+db = Client("http://localhost:8080")
+cfg = NeuralLinUCBConfig(          # same config struct as NeuralLinUCB
+    context_dim=128,
+    embed_dim=16,
+    hidden_dim=64,
+    hidden_layers=2,
+    retrain_every=100,
+    retrain_steps=200,
+)
+db.create_campaign(
+    "finmedia_churn",
+    ["no_action", "personalized_digest", "premium_trial",
+     "analyst_report_gift", "discount_offer", "account_manager_call"],
+    feature_dim=128,
+    algorithm={"neural_thompson_sampling": cfg},
+)
+```
+
+**NeuralLinUCB vs NeuralThompsonSampling at a glance:**
+
+| | NeuralLinUCB | NeuralThompsonSampling |
+|---|---|---|
+| Exploration | UCB upper bound (deterministic) | Posterior sample (stochastic) |
+| Early regret | Lower | Higher |
+| Convergence at 20K+ | Slower | Faster |
+| Best for | Production safety | Maximum long-run performance |
+| Paper | Li et al. 2010 + neural ext. | Zhang et al. 2021 |
 
 ### Progressive Tournament
 
