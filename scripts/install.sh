@@ -87,11 +87,30 @@ read -r cfg_port </dev/tty
 cfg_port="${cfg_port:-8080}"
 
 echo ""
-echo "API keys — format: key=role;key2=role2"
-echo "  Roles: admin (full access)  writer (predict/reward)  reader (GET only)"
-echo "  Leave empty to run in open mode (no authentication)."
-printf "API keys []: "
-read -r cfg_api_keys </dev/tty
+echo "API keys — you will be prompted per role."
+echo "  admin  = full access (predict, reward, manage campaigns)"
+echo "  writer = predict + reward only"
+echo "  reader = GET requests only"
+echo "  Leave a key blank to skip that role."
+echo ""
+
+printf "Admin key (required for management access): "
+read -r key_admin </dev/tty
+
+printf "Writer key (optional, for app/service accounts): "
+read -r key_writer </dev/tty
+
+printf "Reader key (optional, for dashboards): "
+read -r key_reader </dev/tty
+
+cfg_api_keys=""
+[ -n "$key_admin" ]  && cfg_api_keys="${key_admin}=admin"
+[ -n "$key_writer" ] && cfg_api_keys="${cfg_api_keys:+$cfg_api_keys;}${key_writer}=writer"
+[ -n "$key_reader" ] && cfg_api_keys="${cfg_api_keys:+$cfg_api_keys;}${key_reader}=reader"
+
+if [ -z "$cfg_api_keys" ]; then
+  echo "  Warning: no API keys set — BanditDB will run in open mode (no authentication)."
+fi
 
 printf "Auto-checkpoint after N rewarded events (leave empty to disable) [5000]: "
 read -r cfg_checkpoint_interval </dev/tty
