@@ -101,6 +101,12 @@ pub enum Algorithm {
     ThompsonSampling,
     #[serde(rename = "neural_lin_ucb")]
     NeuralLinUCB(NeuralLinUCBConfig),
+    /// Neural Thompson Sampling (Zhang et al. 2021).
+    /// Same MLP embedding and retrain procedure as NeuralLinUCB, but exploration
+    /// uses Thompson Sampling draws (w ~ N(θ, σ²A⁻¹)) instead of UCB bounds.
+    /// Better long-run convergence; higher early regret than NeuralLinUCB.
+    #[serde(rename = "neural_thompson_sampling")]
+    NeuralThompsonSampling(NeuralLinUCBConfig),
     Progressive(ProgressiveConfig),
 }
 

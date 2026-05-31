@@ -173,14 +173,18 @@ impl Campaign {
         });
         #[cfg(feature = "neural")]
         let neural = match &algorithm {
-            Algorithm::NeuralLinUCB(cfg) => {
+            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => {
                 match NeuralLinUCBState::new(cfg) {
                     Ok(state) => Some(parking_lot::Mutex::new(state)),
                     Err(e) => { tracing::error!(error = %e, "neural: failed to init network"); None }
                 }
             }
             Algorithm::Progressive(cfg) => {
-                if let Algorithm::NeuralLinUCB(neural_cfg) = cfg.challenger.as_ref() {
+                let neural_cfg = match cfg.challenger.as_ref() {
+                    Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => Some(c),
+                    _ => None,
+                };
+                if let Some(neural_cfg) = neural_cfg {
                     match NeuralLinUCBState::new(neural_cfg) {
                         Ok(state) => Some(parking_lot::Mutex::new(state)),
                         Err(e) => { tracing::error!(error = %e, "neural: failed to init challenger network"); None }
@@ -894,7 +898,8 @@ impl BanditDB {
                         // Shadow learning: every reward updates both base and challenger.
                         let base_features = match &campaign.algorithm {
                             Algorithm::Progressive(cfg) => embed_for(cfg.base.as_ref()),
-                            _ => campaign.embed(&record.context),
+                            Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => campaign.embed(&record.context),
+                            _ => record.context.clone(),
                         };
                         if let Some(arm_state) = campaign.arms.write().get_mut(record.arm_id.as_str()) {
                             arm_state.update(&base_features, *reward);
@@ -1009,7 +1014,7 @@ impl BanditDB {
             };
 
             let expected_context_dim = match active_algo {
-                Algorithm::NeuralLinUCB(cfg) => cfg.context_dim,
+                Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.context_dim,
                 _ => arms_guard.iter().next().map(|(_, a)| a.theta.len()).unwrap_or(0),
             };
             if context_arr.len() != expected_context_dim {
@@ -1019,13 +1024,13 @@ impl BanditDB {
             }
 
             let features = match active_algo {
-                Algorithm::NeuralLinUCB(_) => campaign.embed(&context_arr),
+                Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => campaign.embed(&context_arr),
                 _ => context_arr,
             };
 
             let scores: Vec<(String, f64)> = arms_guard.iter().map(|(arm_id, state)| {
                 let score = match active_algo {
-                    Algorithm::ThompsonSampling => state.score_ts(&features, campaign.alpha),
+                    Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => state.score_ts(&features, campaign.alpha),
                     _ => state.score(&features, campaign.alpha),
                 };
                 (arm_id.clone(), score)
@@ -1042,7 +1047,7 @@ impl BanditDB {
             }
 
             let arm_propensities = match active_algo {
-                Algorithm::ThompsonSampling => {
+                Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
                     // Adaptive Monte Carlo: draw N trials and count wins per arm.
                     // N scales with posterior spread (A_inv diagonal) — large near cold-start
                     // where many samples are needed; small once the posterior concentrates.

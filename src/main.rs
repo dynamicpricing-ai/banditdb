@@ -480,7 +480,7 @@ async fn handle_create_campaign(
     }
 
     let arm_dim = match &payload.algorithm {
-        Algorithm::NeuralLinUCB(cfg) => cfg.embed_dim,
+        Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.embed_dim,
         Algorithm::Progressive(_) | _ => {
             if payload.feature_dim == 0 {
                 return Err(AppError(StatusCode::BAD_REQUEST, "feature_dim must be > 0".into()));
