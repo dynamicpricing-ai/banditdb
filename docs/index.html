@@ -37,6 +37,17 @@
     }
     .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 2rem !important; font-size: 1rem !important; line-height: 1.7 !important; }
     .section-divider { border-top: 2px solid #3f3f46; }
+    @keyframes tl-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .tl-line   { animation: tl-in 0.2s ease; }
+    .tl-ts     { color: #52525b; }
+    .tl-pred   { color: #f97316; font-weight: 600; }
+    .tl-rew    { color: #4ade80; font-weight: 600; }
+    .tl-camp   { color: #fb923c; }
+    .tl-arm    { color: #f4f4f5; font-weight: 600; }
+    .tl-conf   { color: #f97316; }
+    .tl-green  { color: #4ade80; }
+    .tl-dim    { color: #3f3f46; }
+    .tl-indent { display:block; padding-left:5rem; }
   </style>
 </head>
 
@@ -46,7 +57,7 @@
   <nav class="border-b border-zinc-800 px-6 py-4 sticky top-0 bg-zinc-950/95 backdrop-blur z-10">
     <div class="max-w-5xl mx-auto flex items-center justify-between">
       <div class="flex items-center gap-2 font-semibold text-xl">
-        <span>🎰</span>
+        <img src="banditdb_logo.png" alt="BanditDB" class="h-7 w-auto">
         <span>BanditDB</span>
       </div>
       <div class="flex items-center gap-6 text-base text-zinc-400">
@@ -64,72 +75,102 @@
   </nav>
 
   <!-- Hero -->
-  <section class="px-6 pt-12 pb-10 sm:pt-28 sm:pb-24 text-center">
-    <div class="max-w-3xl mx-auto">
+  <section class="px-6 pt-14 pb-12 sm:pt-24 sm:pb-20 overflow-hidden">
+    <div class="max-w-5xl mx-auto">
+      <div class="grid md:grid-cols-[1fr_460px] gap-20 items-center">
 
-      <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-xs sm:text-sm text-zinc-300 mb-6 sm:mb-12">
-        <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse shrink-0"></span>
-        <span>Rust · ~11MB binary · ~10K pred/s · 4 algorithms · WAL durability · RBAC</span>
-      </div>
-
-      <h1 class="text-4xl sm:text-5xl md:text-6xl font-extrabold mb-5 leading-tight tracking-tight">
-        The <span class="gradient-text">Intuition</span> Database
-      </h1>
-
-      <p class="text-lg sm:text-2xl text-zinc-300 mb-8 sm:mb-14 leading-relaxed">
-        An in-memory decision database for agents and applications that need to learn which decisions work — and get better with every outcome.
-      </p>
-
-      <!-- Install commands -->
-      <div class="flex flex-col gap-3 max-w-xl mx-auto mb-8 sm:mb-12">
-        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
-            <span class="text-zinc-500 shrink-0">$</span>
-            <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
+        <!-- Left: text -->
+        <div>
+          <div class="inline-flex items-center gap-2 bg-zinc-900 border border-zinc-700 rounded-full px-4 py-1.5 text-xs text-zinc-300 mb-8">
+            <span class="w-2 h-2 bg-orange-500 rounded-full animate-pulse shrink-0"></span>
+            <span>AI/ML Infrastructure</span>
           </div>
-          <button onclick="copy(this, 'docker run -d -p 8080:8080 simeonlukov/banditdb:latest')"
-                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
+
+          <h1 class="text-4xl sm:text-5xl font-extrabold mb-5 leading-tight tracking-tight whitespace-nowrap">
+            The <span class="gradient-text">Intuition</span> Database
+          </h1>
+
+          <p class="text-lg text-zinc-300 mb-6 leading-relaxed whitespace-nowrap">
+            Adaptive decision memory for AI agents and applications
+          </p>
+
+          <div class="flex items-center gap-x-3 text-xs text-zinc-500 mb-8 font-mono">
+            <span>Rust</span>
+            <span class="text-zinc-700">·</span>
+            <span>~11MB</span>
+            <span class="text-zinc-700">·</span>
+            <span>~10K pred/s</span>
+            <span class="text-zinc-700">·</span>
+            <span>4 algorithms</span>
+            <span class="text-zinc-700">·</span>
+            <span>WAL</span>
+            <span class="text-zinc-700">·</span>
+            <span>RBAC</span>
+          </div>
+
+          <!-- Install commands -->
+          <div class="flex flex-col gap-3 mb-8">
+            <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
+                <span class="text-zinc-500 shrink-0">$</span>
+                <span class="text-zinc-100 truncate">docker run -d -p 8080:8080 simeonlukov/banditdb:latest</span>
+              </div>
+              <button onclick="copy(this, 'docker run -d -p 8080:8080 simeonlukov/banditdb:latest')"
+                      class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
+                <span class="text-zinc-500 shrink-0">$</span>
+                <span class="text-zinc-100">pip install banditdb-python</span>
+              </div>
+              <button onclick="copy(this, 'pip install banditdb-python')"
+                      class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-x-3 text-sm text-zinc-500 flex-nowrap overflow-x-auto">
+            <a href="https://github.com/simeonlukov/banditdb"       class="hover:text-white transition-colors whitespace-nowrap">★ GitHub</a>
+            <span class="text-zinc-700 shrink-0">·</span>
+            <a href="https://hub.docker.com/r/simeonlukov/banditdb" class="hover:text-white transition-colors whitespace-nowrap">Docker Hub</a>
+            <span class="text-zinc-700 shrink-0">·</span>
+            <a href="https://pypi.org/project/banditdb-python/"     class="hover:text-white transition-colors whitespace-nowrap">PyPI</a>
+            <span class="text-zinc-700 shrink-0">·</span>
+            <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener" class="hover:text-white transition-colors whitespace-nowrap">🟢 Live Sandbox</a>
+            <span class="text-zinc-700 shrink-0">·</span>
+            <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-white transition-colors whitespace-nowrap">Apache-2.0</a>
+          </div>
         </div>
-        <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
-            <span class="text-zinc-500 shrink-0">$</span>
-            <span class="text-zinc-100">pip install banditdb-python</span>
+
+        <!-- Right: live decision terminal -->
+        <div class="w-full sm:w-[460px] -mr-6 sm:-mr-24 shrink-0">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs text-zinc-500 font-mono uppercase tracking-widest">Live decision stream</span>
+            <span class="flex items-center gap-1.5 font-mono text-xs text-green-400">
+              <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block"></span>running
+            </span>
           </div>
-          <button onclick="copy(this, 'pip install banditdb-python')"
-                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
+          <div class="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+            <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2 flex items-center gap-2">
+              <div class="flex gap-1.5">
+                <div class="w-2.5 h-2.5 rounded-full bg-red-500/50"></div>
+                <div class="w-2.5 h-2.5 rounded-full bg-yellow-500/50"></div>
+                <div class="w-2.5 h-2.5 rounded-full bg-green-500/50"></div>
+              </div>
+              <span class="font-mono text-xs text-zinc-500 ml-1">banditdb · ~10K req/s</span>
+            </div>
+            <div id="terminal-log" style="padding:0.875rem 0.5rem 0.875rem 1rem;font-family:'JetBrains Mono',monospace;font-size:0.6875rem;line-height:1.9;color:#71717a;height:320px;overflow:hidden;"></div>
+          </div>
         </div>
-        <!-- <div class="bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2 font-mono text-xs sm:text-sm min-w-0">
-            <span class="text-zinc-500 shrink-0">$</span>
-            <span class="text-zinc-100">npm install banditdb-js</span>
-          </div>
-          <button onclick="copy(this, 'npm install banditdb-js')"
-                  class="text-zinc-500 hover:text-orange-400 transition-colors shrink-0" title="Copy">⎘</button>
-        </div> -->
-      </div>
 
-      <div class="flex items-center justify-center flex-wrap gap-x-5 gap-y-2 text-sm text-zinc-500">
-        <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-white transition-colors">★ GitHub</a>
-        <span class="text-zinc-700">·</span>
-        <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-white transition-colors">Docker Hub</a>
-        <span class="text-zinc-700">·</span>
-        <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-white transition-colors">PyPI</a>
-        <span class="text-zinc-700">·</span>
-        <a href="https://www.npmjs.com/package/banditdb-js"       class="hover:text-white transition-colors">npm</a>
-        <span class="text-zinc-700">·</span>
-        <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener" class="hover:text-white transition-colors">🟢 Live Sandbox</a>
-        <span class="text-zinc-700">·</span>
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-white transition-colors">Apache-2.0</a>
       </div>
-
     </div>
   </section>
 
   <!-- Problem -->
   <section class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-2xl sm:text-4xl font-bold text-center mb-3">
-        Building a self-learning system today is a plumbing nightmare
+      <h2 class="text-2xl sm:text-3xl font-bold text-center mb-3 whitespace-nowrap">
+        Every agent in your fleet makes the same mistake. Twice.
       </h2>
       <p class="text-zinc-400 text-center mb-14 text-lg">Four moving parts. Four failure modes. Weeks to build. Months to maintain.</p>
 
@@ -162,7 +203,7 @@
             <span>✓</span> The BanditDB way
           </div>
           <div class="flex items-center gap-3 bg-zinc-800 rounded-lg px-4 py-3 text-base text-zinc-100 mb-6">
-            <span>🎰</span> BanditDB — everything, in one binary
+            <img src="banditdb_logo.png" alt="BanditDB" class="h-5 w-auto shrink-0"> BanditDB — everything, in one binary
           </div>
           <ul class="space-y-2.5 text-base text-zinc-400">
             <li class="flex items-center gap-2.5"><span class="text-orange-500">✓</span> In-memory matrix updates (microseconds)</li>
@@ -383,23 +424,23 @@ db.reward(iid, reward)</code></pre>
             <div class="w-3 h-3 rounded-full bg-yellow-500/50"></div>
             <div class="w-3 h-3 rounded-full bg-green-500/50"></div>
           </div>
-          <span class="text-xs text-zinc-500 font-mono ml-2">banditdb-swarm</span>
+          <span class="text-xs text-zinc-500 font-mono ml-2">banditdb-swarm · NeuralLinUCB</span>
         </div>
         <!-- ASCII art -->
-        <pre class="p-5 sm:p-8 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto select-none" style="color:#52525b"><span style="color:#3f3f46">$</span> <span style="color:#71717a">banditdb-swarm --agents 3 --campaign prompt_strategy</span>
+        <pre class="p-8 sm:p-12 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto select-none" style="color:#52525b; line-height:1.8"><span style="color:#3f3f46">$</span> <span style="color:#71717a">banditdb-swarm --agents 3 --campaign prompt_strategy --algo neural</span>
 
-  <span style="color:#3f3f46">┌─────────────────────┐</span>  <span style="color:#f97316">get_intuition(context)</span>    <span style="color:#f97316">┌──────────────────────┐</span>
-  <span style="color:#3f3f46">│                     │</span> <span style="color:#f97316">─────────────────────────►</span> <span style="color:#f97316">│                      │</span>
-  <span style="color:#3f3f46">│</span>   agent swarm       <span style="color:#3f3f46">│</span>                            <span style="color:#f97316">│</span>   <span style="color:#fb923c">BanditDB</span>           <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>   N agents · one    <span style="color:#3f3f46">│◄──</span> <span style="color:#e4e4e7">"chain_of_thought"</span> <span style="color:#3f3f46">─────</span><span style="color:#f97316">│</span>                      <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>   shared model      <span style="color:#3f3f46">│</span>                            <span style="color:#f97316">│</span>   <span style="color:#fb923c">prompt_strategy</span>    <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">└──────────┬──────────┘</span>                            <span style="color:#f97316">│</span>   <span style="color:#3f3f46">LinUCB · 4 arms</span>    <span style="color:#f97316">│</span>
-             <span style="color:#3f3f46">│</span>                                       <span style="color:#f97316">└──────────────────────┘</span>
-             <span style="color:#3f3f46">│</span>  execute · score · <span style="color:#4ade80">reward: 0.84  ✓</span>                <span style="color:#3f3f46">▲</span>
-             <span style="color:#3f3f46">│</span>                                                   <span style="color:#3f3f46">│</span>
-             <span style="color:#3f3f46">└</span><span style="color:#3b82f6">────────────  record_outcome(iid, 0.84)  ──────────</span><span style="color:#3f3f46">┘</span>
+  <span style="color:#3f3f46">┌──────────────────────┐</span>  <span style="color:#71717a">embed(msg)→[0.82,0.14,..,0.61]</span>  <span style="color:#f97316">┌──────────────────────┐</span>
+  <span style="color:#3f3f46">│</span>                      <span style="color:#3f3f46">│</span>  <span style="color:#f97316">──── get_intuition(emb) ────────►</span> <span style="color:#f97316">│</span>                      <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>   agent swarm        <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   <span style="color:#fb923c">BanditDB</span>            <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>   N agents           <span style="color:#3f3f46">│</span>  <span style="color:#e4e4e7">◄─── "chain_of_thought" ─────────</span> <span style="color:#f97316">│</span>   prompt_strategy    <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>   one shared model   <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   NeuralLinUCB       <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">│</span>                      <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   MLP 128→64→32→arm  <span style="color:#f97316">│</span>
+  <span style="color:#3f3f46">└──────────┬───────────┘</span>                                  <span style="color:#f97316">└──────────────────────┘</span>
+             <span style="color:#3f3f46">│</span>  execute  ·  score  ·  <span style="color:#4ade80">reward: 0.84  ✓</span>               <span style="color:#3f3f46">▲</span>
+             <span style="color:#3f3f46">│</span>                                                      <span style="color:#3f3f46">│</span>
+             <span style="color:#3f3f46">└──────────────  record_outcome(iid, 0.84)  ────────────┘</span>
 
-  <span style="color:#27272a">every reward updates the shared model for the entire swarm</span></pre>
+  <span style="color:#27272a">every reward retrains the MLP  ·  better embeddings → sharper decisions</span></pre>
       </div>
 
       <!-- MCP install + tools -->
@@ -786,22 +827,106 @@ Fitting causal forests (one per arm) ...
     </div>
   </section>
 
+  <!-- Community -->
+  <section class="px-6 py-16 section-divider">
+    <div class="max-w-5xl mx-auto">
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+
+        <!-- Header -->
+        <div class="px-8 pt-10 pb-8 border-b border-zinc-800">
+          <h2 class="text-2xl font-bold mb-2">Join the community</h2>
+          <p class="text-zinc-400 text-base leading-relaxed max-w-xl">
+            Ask questions, share what you're building, get early updates. The BanditDB Discord is where the conversation happens.
+          </p>
+        </div>
+
+        <!-- Cards row -->
+        <div class="grid sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-zinc-800">
+
+          <!-- Discord -->
+          <div class="px-8 py-7 flex flex-col gap-4">
+            <div class="flex items-center gap-2 text-sm font-semibold text-zinc-300">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="text-indigo-400"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+              Discord community
+            </div>
+            <p class="text-zinc-500 text-sm leading-relaxed">Get help, share projects, talk to the team. Free and open to everyone.</p>
+            <a href="https://discord.gg/s5ge8xrym" target="_blank" rel="noopener"
+               class="inline-flex items-center gap-2.5 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-semibold text-sm transition-colors self-start whitespace-nowrap">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+              Join Discord
+            </a>
+          </div>
+
+          <!-- Talk to founder -->
+          <div class="px-8 py-7 flex flex-col gap-4">
+            <div class="flex items-center gap-2 text-sm font-semibold text-zinc-300">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-orange-400"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+              Talk to the founder
+            </div>
+            <p class="text-zinc-500 text-sm leading-relaxed">Questions about enterprise use, integrations, or just want to say hi — book a 30-min call.</p>
+            <div class="flex flex-col gap-2 self-start">
+              <a href="https://calendar.app.google/WSgRFozpHH4S9ffV9" target="_blank" rel="noopener"
+                 class="inline-flex items-center gap-2.5 bg-orange-500 hover:bg-orange-400 text-white px-5 py-2.5 rounded-lg font-semibold text-sm transition-colors whitespace-nowrap">
+                Book a meeting
+              </a>
+              <a href="mailto:s.lukov@dynamicpricing.ai" class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">s.lukov@dynamicpricing.ai</a>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- Footer -->
-  <footer class="px-6 py-10 border-t border-zinc-800">
-    <div class="max-w-5xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-base text-zinc-500">
-      <div class="flex items-center gap-2">
-        <span>🎰</span>
-        <span class="font-medium text-zinc-400">BanditDB</span>
-        <span>— The Intuition Database</span>
+  <footer class="px-6 pt-12 pb-8 border-t border-zinc-800">
+    <div class="max-w-5xl mx-auto">
+
+      <!-- Top row: 3 columns -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-10 mb-10">
+
+        <!-- Brand -->
+        <div>
+          <div class="flex items-center gap-2 mb-3">
+            <img src="banditdb_logo.png" alt="BanditDB" class="h-6 w-auto">
+            <span class="font-semibold text-zinc-100">BanditDB</span>
+          </div>
+          <p class="text-sm text-zinc-500 leading-relaxed">The Intuition Database.<br>Adaptive decision memory for AI agents and applications.</p>
+        </div>
+
+        <!-- Resources -->
+        <div>
+          <div class="text-xs font-semibold text-zinc-400 uppercase tracking-widest mb-4">Resources</div>
+          <div class="flex flex-col gap-2.5 text-sm text-zinc-500">
+            <a href="docs.html"                                                            class="hover:text-white transition-colors">Documentation</a>
+            <a href="https://github.com/simeonlukov/banditdb"                             class="hover:text-white transition-colors">GitHub</a>
+            <a href="https://hub.docker.com/r/simeonlukov/banditdb"                       class="hover:text-white transition-colors">Docker Hub</a>
+            <a href="https://pypi.org/project/banditdb-python/"                           class="hover:text-white transition-colors">PyPI</a>
+            <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE"           class="hover:text-white transition-colors">Apache-2.0 License</a>
+          </div>
+        </div>
+
+        <!-- Community -->
+        <div>
+          <div class="text-xs font-semibold text-zinc-400 uppercase tracking-widest mb-4">Community</div>
+          <div class="flex flex-col gap-2.5 text-sm text-zinc-500">
+            <a href="https://discord.gg/s5ge8xrym" target="_blank" rel="noopener" class="hover:text-white transition-colors flex items-center gap-2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+              Discord
+            </a>
+            <a href="mailto:s.lukov@dynamicpricing.ai" class="hover:text-white transition-colors">s.lukov@dynamicpricing.ai</a>
+            <a href="https://calendar.app.google/WSgRFozpHH4S9ffV9" target="_blank" rel="noopener" class="hover:text-white transition-colors text-zinc-300" style="text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;">Book a meeting</a>
+          </div>
+        </div>
+
       </div>
-      <div class="flex items-center gap-5">
-        <a href="https://github.com/simeonlukov/banditdb"        class="hover:text-zinc-300 transition-colors">GitHub</a>
-        <a href="https://hub.docker.com/r/simeonlukov/banditdb"  class="hover:text-zinc-300 transition-colors">Docker Hub</a>
-        <a href="https://pypi.org/project/banditdb-python/"      class="hover:text-zinc-300 transition-colors">PyPI</a>
-        <a href="https://www.npmjs.com/package/banditdb-js"       class="hover:text-zinc-300 transition-colors">npm</a>
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/LICENSE" class="hover:text-zinc-300 transition-colors">Apache-2.0</a>
+
+      <!-- Bottom row -->
+      <div class="border-t border-zinc-800 pt-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-zinc-600">
+        <span>Built with Rust in New York City.</span>
+        <span>© 2026 Simeon Lukov · Apache-2.0</span>
       </div>
-      <div class="text-xs">Built with Rust in New York City. © 2026 Simeon Lukov.</div>
+
     </div>
   </footer>
 
@@ -820,6 +945,57 @@ Fitting causal forests (one per arm) ...
         p.classList.toggle('hidden', p.dataset.tab !== tab);
       });
     }
+    // Live decision terminal
+    (function() {
+      var entries = [
+        { t:'p', ts:'12:47:53', campaign:'pricing',   ctx:'[0.82,0.34,0.91]', arm:'price_149',   conf:'0.94', ms:'23' },
+        { t:'r', ts:'12:47:53', reward:'0.27', ms:'11' },
+        { t:'p', ts:'12:47:54', campaign:'routing',   ctx:'[0.62,0.19,0.77]', arm:'claude_opus', conf:'0.87', ms:'19' },
+        { t:'p', ts:'12:47:54', campaign:'sleep',     ctx:'[1.00,0.35,0.50]', arm:'dec_temp',    conf:'0.91', ms:'18' },
+        { t:'r', ts:'12:47:54', reward:'0.84', ms:'9'  },
+        { t:'p', ts:'12:47:55', campaign:'fraud',     ctx:'[0.95,0.01,0.88]', arm:'block',       conf:'0.97', ms:'21' },
+        { t:'p', ts:'12:47:55', campaign:'pricing',   ctx:'[0.15,0.88,0.43]', arm:'price_99',    conf:'0.65', ms:'24' },
+        { t:'r', ts:'12:47:55', reward:'0.12', ms:'14' },
+        { t:'p', ts:'12:47:56', campaign:'routing',   ctx:'[0.30,0.91,0.62]', arm:'haiku',       conf:'0.78', ms:'20' },
+        { t:'p', ts:'12:47:56', campaign:'edtech',    ctx:'[0.72,0.55,0.33]', arm:'harder',      conf:'0.83', ms:'17' },
+        { t:'r', ts:'12:47:57', reward:'0.67', ms:'10' },
+        { t:'p', ts:'12:47:57', campaign:'fraud',     ctx:'[0.41,0.77,0.02]', arm:'otp',         conf:'0.72', ms:'22' },
+        { t:'p', ts:'12:47:58', campaign:'pricing',   ctx:'[0.93,0.21,0.66]', arm:'bundle',      conf:'0.88', ms:'21' },
+        { t:'r', ts:'12:47:58', reward:'0.91', ms:'8'  },
+        { t:'p', ts:'12:47:59', campaign:'clinical',  ctx:'[0.58,0.43,0.77]', arm:'protocol_B',  conf:'0.82', ms:'20' },
+        { t:'r', ts:'12:48:00', reward:'0.76', ms:'9'  },
+      ];
+      var el = document.getElementById('terminal-log');
+      if (!el) return;
+      var idx = 0;
+      function render(e, anim) {
+        var d = document.createElement('div');
+        if (anim) d.className = 'tl-line';
+        if (e.t === 'p') {
+          d.innerHTML =
+            '<span class="tl-ts">[' + e.ts + ']</span> ' +
+            '<span class="tl-pred">predict </span>' +
+            '<span class="tl-camp">' + e.campaign + '</span>' +
+            '<span class="tl-indent">' +
+              'ctx <span class="tl-dim">' + e.ctx + '</span>' +
+              '  →  <span class="tl-arm">' + e.arm + '</span>' +
+              '  <span class="tl-dim">conf=</span><span class="tl-conf">' + e.conf + '</span>' +
+              '  <span class="tl-dim">' + e.ms + 'μs</span>' +
+            '</span>';
+        } else {
+          d.innerHTML =
+            '<span class="tl-ts">[' + e.ts + ']</span> ' +
+            '<span class="tl-rew">reward  </span>' +
+            '<span class="tl-green">' + e.reward + '</span>' +
+            '  <span class="tl-dim">→ updated in ' + e.ms + 'μs ✓</span>';
+        }
+        el.appendChild(d);
+        while (el.children.length > 11) el.removeChild(el.firstChild);
+      }
+      for (var i = 0; i < 5; i++) { render(entries[i], false); idx = i + 1; }
+      setInterval(function() { render(entries[idx % entries.length], true); idx++; }, 1100);
+    })();
+
     function copy(btn, text) {
       navigator.clipboard.writeText(text).then(() => {
         const original = btn.textContent;

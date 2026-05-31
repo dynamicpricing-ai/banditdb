@@ -100,7 +100,7 @@ impl KeyRegistry {
         for (key_bytes, role, tid) in &self.keys {
             let matched = provided.ct_eq(key_bytes.as_slice()).unwrap_u8();
             let update  = matched & (!found & 1);
-            role_val   |= update & (*role as u8);
+            role_val   |= update.wrapping_neg() & (*role as u8);
             if matched == 1 && found == 0 {
                 tenant_id = tid.clone();
             }
@@ -295,7 +295,8 @@ struct CreateCampaignRequest {
     alpha:       f64,
     #[serde(default)]
     algorithm:   Algorithm,
-    metadata:    Option<serde_json::Value>,
+    metadata:             Option<serde_json::Value>,
+    decay_half_life_hours: Option<f64>,
 }
 
 fn default_alpha() -> f64 { DEFAULT_ALPHA }
@@ -472,6 +473,11 @@ async fn handle_create_campaign(
             return Err(AppError(StatusCode::BAD_REQUEST, "metadata exceeds 64 KB limit".into()));
         }
     }
+    if let Some(hl) = payload.decay_half_life_hours {
+        if hl <= 0.0 {
+            return Err(AppError(StatusCode::BAD_REQUEST, "decay_half_life_hours must be > 0".into()));
+        }
+    }
 
     let arm_dim = match &payload.algorithm {
         Algorithm::NeuralLinUCB(cfg) => cfg.embed_dim,
@@ -490,6 +496,7 @@ async fn handle_create_campaign(
     state.db.add_campaign(
         &ns(&auth, &payload.campaign_id),
         payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata,
+        payload.decay_half_life_hours,
     )
     .map(|_| Json("Campaign Created"))
     .map_err(map_engine_err)
@@ -699,7 +706,7 @@ async fn handle_export(State(state): State<Arc<AppState>>) -> Result<Json<Export
         let cid  = stem.rfind('_')
             .filter(|&pos| stem[pos + 1..].chars().all(|c| c.is_ascii_digit()))
             .map(|pos| stem[..pos].to_string())
-            .unwrap_or_else(|| "_unparsed".to_string());
+            .unwrap_or_else(|| stem.to_string());
         shards.entry(cid).or_default().push(name);
     }
     for v in shards.values_mut() { v.sort(); }

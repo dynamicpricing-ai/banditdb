@@ -134,6 +134,9 @@ pub struct Campaign {
     /// f64 bits of the selection entropy computed at the last checkpoint.
     /// f64::NAN (the initial value) means no checkpoint has been written yet.
     pub last_checkpoint_entropy: AtomicU64,
+    /// If set, A_inv and b are rescaled at each checkpoint to implement exponential
+    /// forgetting over wall-clock time. None = no forgetting.
+    pub decay_half_life_hours: Option<f64>,
 }
 
 impl Campaign {
@@ -143,8 +146,9 @@ impl Campaign {
         arms:      RwLock<HashMap<String, ArmState>>,
         // None = derive challenger_arms from algorithm (new campaign).
         // Some(loaded) = restore checkpointed matrices (recovery path).
-        challenger_arms: Option<RwLock<HashMap<String, ArmState>>>,
-        metadata:  Option<serde_json::Value>,
+        challenger_arms:       Option<RwLock<HashMap<String, ArmState>>>,
+        metadata:              Option<serde_json::Value>,
+        decay_half_life_hours: Option<f64>,
     ) -> Self {
         // When challenger_arms is not explicitly provided (new campaign path), derive them
         // from the algorithm config so the caller doesn't have to duplicate the logic.
@@ -200,6 +204,7 @@ impl Campaign {
             tournament_wins:         std::sync::atomic::AtomicI32::new(0),
             archived:                AtomicBool::new(false),
             last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
+            decay_half_life_hours,
         }
     }
 
@@ -261,7 +266,11 @@ pub struct BanditDB {
     pub wal_format:       WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
     /// summary line to a dedicated audit file (separate from application logs).
-    pub audit_tx:         Option<tokio::sync::mpsc::Sender<String>>,
+    pub audit_tx:             Option<tokio::sync::mpsc::Sender<String>>,
+    /// Unix timestamp (seconds) of the last successful checkpoint. Used to compute
+    /// elapsed time for time-aware campaign decay. Initialised to startup time so
+    /// a restart followed immediately by checkpoint does not over-decay.
+    pub last_checkpoint_secs: AtomicU64,
 }
 
 impl BanditDB {
@@ -476,17 +485,18 @@ impl BanditDB {
             };
 
         let db = Self {
-            campaigns:       RwLock::new(HashMap::new()),
-            interactions:    Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
-            event_tx:        tx,
-            rewarded_count:  AtomicU64::new(0),
-            wal_path:        wal_path.to_string(),
-            data_dir:        data_dir.to_string(),
+            campaigns:            RwLock::new(HashMap::new()),
+            interactions:         Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
+            event_tx:             tx,
+            rewarded_count:       AtomicU64::new(0),
+            wal_path:             wal_path.to_string(),
+            data_dir:             data_dir.to_string(),
             max_feature_dim,
             max_arms,
             wal_healthy,
             wal_format,
             audit_tx,
+            last_checkpoint_secs: AtomicU64::new(now_secs()),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -504,6 +514,7 @@ impl BanditDB {
         {
             Some(checkpoint) => {
                 wal_start_offset = checkpoint.wal_offset;
+                self.last_checkpoint_secs.store(checkpoint.timestamp_secs, Ordering::Relaxed);
 
                 tracing::info!(
                     campaigns  = checkpoint.campaigns.len(),
@@ -520,7 +531,7 @@ impl BanditDB {
 
                 for (campaign_id, camp) in checkpoint.campaigns {
                     let challenger_arms = camp.challenger_arms.map(RwLock::new);
-                    let campaign = Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), challenger_arms, camp.metadata);
+                    let campaign = Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), challenger_arms, camp.metadata, camp.decay_half_life_hours);
                     campaign.challenger_traffic_bps.store(camp.challenger_traffic_bps, Ordering::Relaxed);
                     campaign.tournament_wins.store(camp.tournament_wins, Ordering::Relaxed);
                     campaign.archived.store(camp.archived, Ordering::Relaxed);
@@ -748,6 +759,37 @@ impl BanditDB {
             }
         }
 
+        // 4b. Time-aware decay: apply exponential forgetting to campaigns that have
+        //     decay_half_life_hours set. Done after neural retrain so fresh matrices
+        //     are decayed, and before snapshot so checkpoint.json reflects the decayed state.
+        {
+            let now  = now_secs();
+            let last = self.last_checkpoint_secs.load(Ordering::Relaxed);
+            let elapsed_hours = now.saturating_sub(last) as f64 / 3600.0;
+
+            for (campaign_id, campaign) in self.campaigns.read().iter() {
+                let Some(half_life) = campaign.decay_half_life_hours else { continue };
+                if half_life <= 0.0 || elapsed_hours <= 0.0 { continue }
+
+                let lambda     = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
+                let inv_lambda = 1.0 / lambda;
+
+                let apply_decay = |arms: &RwLock<HashMap<String, ArmState>>| {
+                    for arm in arms.write().values_mut() {
+                        arm.a_inv *= inv_lambda;
+                        arm.b     *= lambda;
+                        arm.theta  = arm.a_inv.dot(&arm.b);
+                        *arm.chol_cache.lock() = None;
+                    }
+                };
+                apply_decay(&campaign.arms);
+                if let Some(c_arms) = &campaign.challenger_arms {
+                    apply_decay(c_arms);
+                }
+                tracing::debug!(campaign = %campaign_id, lambda, elapsed_hours, "checkpoint: decay applied");
+            }
+        }
+
         // 5. Snapshot all campaign matrices under read lock — done AFTER neural retrain
         //    and tournament evaluation so checkpoint.json captures post-retrain arm matrices
         //    and post-tournament challenger_traffic_bps / tournament_wins.
@@ -776,11 +818,13 @@ impl BanditDB {
                     archived:               campaign.archived.load(Ordering::SeqCst),
                     metadata:               campaign.metadata.clone(),
                     entropy_snapshot:       Some(entropy_at_checkpoint),
+                    decay_half_life_hours:  campaign.decay_half_life_hours,
                 })
             }).collect()
         };
 
         let timestamp_secs = now_secs();
+        self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
         let data = CheckpointData { wal_offset, timestamp_secs, campaigns: campaigns_snapshot };
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
 
@@ -815,14 +859,14 @@ impl BanditDB {
     /// and from WAL replay during recovery. Takes a reference — callers own the Arc.
     fn apply_event_to_memory(&self, event: &DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata } => {
+            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours } => {
                 let arms_map: HashMap<String, ArmState> = arms.iter()
                     .map(|arm| (arm.clone(), ArmState::new(*feature_dim)))
                     .collect();
                 // challenger_arms derived by Campaign::new from algorithm (None = derive).
                 self.campaigns.write().insert(
                     campaign_id.clone(),
-                    Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone()),
+                    Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone(), *decay_half_life_hours),
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
@@ -919,18 +963,19 @@ impl BanditDB {
 
     pub fn add_campaign(
         &self,
-        campaign_id: &str,
-        arms:        Vec<String>,
-        feature_dim: usize,
-        alpha:       f64,
-        algorithm:   Algorithm,
-        metadata:    Option<serde_json::Value>,
+        campaign_id:          &str,
+        arms:                 Vec<String>,
+        feature_dim:          usize,
+        alpha:                f64,
+        algorithm:            Algorithm,
+        metadata:             Option<serde_json::Value>,
+        decay_half_life_hours: Option<f64>,
     ) -> Result<(), EngineError> {
         if self.campaigns.read().contains_key(campaign_id) {
             return Err(EngineError::AlreadyExists(format!("Campaign '{campaign_id}' already exists")));
         }
         let event = Arc::new(DbEvent::CampaignCreated {
-            campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata,
+            campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
         self.wal_try_send(Arc::clone(&event))?;

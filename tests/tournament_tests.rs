@@ -71,6 +71,7 @@ async fn test_no_spurious_promotion_on_linear() {
         0.1,
         progressive_algo(10, 3, 1000, 20),
         None,
+        None,
     ).unwrap();
 
     // Balanced contexts that span the decision boundary clearly
@@ -135,6 +136,7 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
             2,
             0.1,
             progressive_algo(5, 1, 1000, 20), // required_wins=1 for fast progress
+            None,
             None,
         ).unwrap();
 
@@ -204,6 +206,7 @@ async fn test_gradual_traffic_ramp() {
         2,
         0.1,
         progressive_algo(5, 1, STEP, 20), // required_wins=1 for fastest possible ramp
+        None,
         None,
     ).unwrap();
 
@@ -276,6 +279,7 @@ async fn test_reward_continuity_across_transition() {
         2,
         0.1,
         progressive_algo(5, 1, 1000, 20),
+        None,
         None,
     ).unwrap();
 
@@ -367,6 +371,7 @@ async fn test_rollback_on_challenger_degradation() {
             required_wins: 1,   
             step_bps:      1000,
         }),
+        None,
         None,
     ).unwrap();
 

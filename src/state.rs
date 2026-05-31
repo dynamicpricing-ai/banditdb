@@ -273,6 +273,9 @@ pub struct CampaignCheckpoint {
     /// Entropy snapshot written at checkpoint time; used to compute EntropyTrend on next diagnostics call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entropy_snapshot: Option<f64>,
+    /// Half-life for time-aware checkpoint decay. None = no forgetting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_half_life_hours: Option<f64>,
 }
 
 // --- Campaign report (business-level convergence signal) ---
@@ -402,6 +405,8 @@ pub enum DbEvent {
         algorithm: Algorithm,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decay_half_life_hours: Option<f64>,
     },
     Predicted {
         interaction_id: String,

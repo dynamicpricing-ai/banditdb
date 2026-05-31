@@ -11,9 +11,8 @@ services:
   banditdb:
     build:
       context: .
-      args:
-        # Uncomment to compile with NeuralLinUCB (requires candle build deps):
-        # FEATURES: neural
+      # args:
+      #   FEATURES: neural  # Uncomment to compile with NeuralLinUCB
     image: banditdb:latest
     container_name: banditdb
     ports:

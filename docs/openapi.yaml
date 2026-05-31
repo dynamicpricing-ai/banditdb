@@ -220,6 +220,16 @@ paths:
                 alpha:       { type: number, default: 1.0 }
                 algorithm:   { $ref: "#/components/schemas/Algorithm" }
                 metadata:    { type: object }
+                decay_half_life_hours:
+                  type: number
+                  nullable: true
+                  description: >
+                    Exponential forgetting via time-aware checkpoint decay.
+                    Confidence in all arms halves every N hours of real time,
+                    measured at each checkpoint. Theta (best estimate) is preserved —
+                    only certainty erodes, forcing re-exploration as evidence ages.
+                    Null = no forgetting (default). Examples: 24.0 (daily drift),
+                    168.0 (weekly), 720.0 (monthly).
       responses:
         "200": { description: Campaign created }
         "400": { description: Validation error,   content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

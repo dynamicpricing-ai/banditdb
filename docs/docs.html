@@ -35,8 +35,8 @@
     .nav-link.active { color: #f97316; border-left-color: #f97316; }
     /* Smooth scroll */
     html { scroll-behavior: smooth; }
-    /* Section offset for sticky nav */
-    .section-anchor { scroll-margin-top: 80px; }
+    /* Section offset for fixed sidebar */
+    .section-anchor { scroll-margin-top: 24px; }
     /* Prose headings */
     .prose h3 { font-size: 1.125rem; font-weight: 600; color: #f4f4f5; margin-top: 2rem; margin-bottom: 0.75rem; }
     .prose h4 { font-size: 0.9375rem; font-weight: 600; color: #d4d4d8; margin-top: 1.5rem; margin-bottom: 0.5rem; }
@@ -58,50 +58,223 @@
   </style>
 </head>
 
-<body class="bg-zinc-950 text-zinc-100 antialiased">
+<body class="bg-zinc-950 text-zinc-100 antialiased flex min-h-screen">
 
-  <!-- Nav -->
-  <nav class="border-b border-zinc-800 px-6 py-4 sticky top-0 bg-zinc-950/95 backdrop-blur z-10">
-    <div class="max-w-6xl mx-auto flex items-center justify-between">
-      <div class="flex items-center gap-2 font-semibold text-xl">
-        <a href="index.html" class="flex items-center gap-2 hover:opacity-80 transition-opacity">
-          <span>🎰</span>
-          <span>BanditDB</span>
-        </a>
-        <span class="text-zinc-700 font-normal ml-1">/</span>
-        <span class="text-zinc-400 font-normal text-base ml-1">Docs</span>
-      </div>
-      <div class="flex items-center gap-6 text-sm text-zinc-400">
-        <a href="index.html"                                    class="hover:text-white transition-colors hidden sm:block">Home</a>
-        <a href="https://github.com/dynamicpricing-ai/banditdb" class="hover:text-white transition-colors hidden sm:block">GitHub</a>
-        <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener"
-           class="bg-orange-500 hover:bg-orange-400 text-white px-4 py-1.5 rounded-full font-medium transition-colors text-sm">
-          Live Sandbox
-        </a>
-      </div>
+  <!-- Left Sidebar: fixed, full height -->
+  <aside class="fixed inset-y-0 left-0 w-64 flex flex-col bg-zinc-950 border-r border-zinc-800 overflow-y-auto z-20">
+
+    <!-- Logo -->
+    <div class="px-5 pt-6 pb-5 border-b border-zinc-800 shrink-0">
+      <a href="index.html" class="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
+        <img src="banditdb_logo.png" alt="BanditDB" class="h-7 w-auto">
+        <span class="font-semibold text-lg text-white">BanditDB</span>
+      </a>
+      <div class="text-xs text-zinc-500 mt-1.5 font-medium tracking-wide">Documentation</div>
     </div>
-  </nav>
 
-  <div class="max-w-6xl mx-auto px-6 py-10 flex gap-10">
+    <!-- External links -->
+    <div class="px-3 pt-3 pb-3 border-b border-zinc-800 shrink-0 space-y-0.5">
+      <a href="index.html" class="flex items-center gap-2 text-sm text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors py-1.5 px-3 rounded-md">
+        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+        Home
+      </a>
+      <a href="https://github.com/dynamicpricing-ai/banditdb" class="flex items-center gap-2 text-sm text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors py-1.5 px-3 rounded-md">
+        <svg class="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+        GitHub
+      </a>
+      <a href="https://sandbox.banditdb.com/ui" target="_blank" rel="noopener" class="flex items-center gap-2 text-sm text-orange-400 hover:text-orange-300 hover:bg-zinc-900 transition-colors py-1.5 px-3 rounded-md">
+        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+        Live Sandbox
+      </a>
+    </div>
 
-    <!-- Sidebar -->
-    <aside class="w-52 shrink-0 hidden lg:block">
-      <nav class="sticky top-24 space-y-0.5 text-sm">
-        <div class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">Documentation</div>
-        <a href="#quick-start"   class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Quick Start</a>
-        <a href="#mcp"           class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Native Agent Use (MCP)</a>
-        <a href="#algorithms"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Choosing an Algorithm</a>
-        <a href="#model-architecture" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Model Architecture</a>
-        <a href="#neural-linucb" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">NeuralLinUCB</a>
-        <a href="#data-science"  class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Data Science Escape Hatch</a>
-        <a href="#recovery"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">How Recovery Works</a>
-        <a href="#observability" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Observability & Monitoring</a>
-        <a href="#use-cases"    class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white transition-colors">Use Cases</a>
-      </nav>
-    </aside>
+    <!-- Doc nav -->
+    <nav class="px-3 py-4 flex-1 space-y-0.5 text-sm">
+      <div class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2 px-3">On this page</div>
+      <a href="#installation"       class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Installation</a>
+      <a href="#run"                class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Run</a>
+      <a href="#quick-start"        class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Quick Start</a>
+      <a href="#mcp"                class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Native Agent Use (MCP)</a>
+      <a href="#algorithms"         class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Choosing an Algorithm</a>
+      <a href="#model-architecture" class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Model Architecture</a>
+      <a href="#neural-linucb"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">NeuralLinUCB</a>
+      <a href="#data-science"       class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Data Science Escape Hatch</a>
+      <a href="#recovery"           class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">How Recovery Works</a>
+      <a href="#observability"      class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Observability &amp; Monitoring</a>
+      <a href="#use-cases"          class="nav-link block border-l-2 border-transparent pl-3 py-1.5 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-r transition-colors">Use Cases</a>
+    </nav>
+  </aside>
 
-    <!-- Content -->
-    <main class="flex-1 min-w-0 prose max-w-3xl">
+  <!-- Main content: offset by sidebar width, takes all remaining space -->
+  <div class="ml-64 flex-1 min-w-0">
+    <main class="prose max-w-6xl px-12 py-10">
+
+      <!-- Installation -->
+      <section id="installation" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Installation</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">BanditDB has three components: the Rust engine, the Python SDK, and the TypeScript SDK. Start the engine first, then install whichever SDK fits your stack.</p>
+
+        <h3>1. Start the Engine</h3>
+
+        <h4>Binary (fastest, no Docker required)</h4>
+        <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh
+banditdb
+curl http://localhost:8080/health   # {"status":"ok"}</code></pre>
+
+        <h4>Docker</h4>
+        <pre><code class="language-bash">docker run -d -p 8080:8080 \
+  -e BANDITDB_API_KEY=your-secret-key \
+  -v banditdb_data:/data \
+  simeonlukov/banditdb:latest</code></pre>
+
+        <h4>Docker Compose (recommended for production)</h4>
+        <p>Includes persistence, RBAC, and auto-checkpointing:</p>
+        <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/docker-compose.yml -o docker-compose.yml
+# Set BANDITDB_API_KEYS=admin-key=admin,app-key=writer in .env
+docker compose up -d</code></pre>
+
+        <p>Key environment variables:</p>
+        <table>
+          <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>BANDITDB_API_KEYS</code></td><td>—</td><td>Multi-key RBAC: <code>key1=admin;key2=writer;key3=reader</code></td></tr>
+            <tr><td><code>BANDITDB_API_KEY</code></td><td>—</td><td>Legacy single admin key (dev only)</td></tr>
+            <tr><td><code>BANDITDB_CHECKPOINT_INTERVAL</code></td><td>5000</td><td>Auto-checkpoint after N rewarded events</td></tr>
+            <tr><td><code>BANDITDB_MAX_WAL_SIZE_MB</code></td><td>100</td><td>Also checkpoint when WAL exceeds N MB</td></tr>
+            <tr><td><code>DATA_DIR</code></td><td><code>/data</code></td><td>WAL, checkpoint, and Parquet export directory</td></tr>
+            <tr><td><code>PORT</code></td><td>8080</td><td>HTTP listen port</td></tr>
+            <tr><td><code>LOG_FORMAT</code></td><td>—</td><td>Set to <code>json</code> for structured production logs</td></tr>
+            <tr><td><code>BANDITDB_RATE_LIMIT_PER_SEC</code></td><td>1000</td><td>Per-key request rate limit</td></tr>
+          </tbody>
+        </table>
+
+        <h4>Kubernetes (Helm)</h4>
+        <pre><code class="language-bash">helm install banditdb ./helm/banditdb \
+  --set auth.apiKeys="admin-key=admin,app-key=writer" \
+  --set persistence.size=10Gi \
+  --set ingress.enabled=true \
+  --set ingress.host=banditdb.example.com</code></pre>
+
+        <div class="callout">
+          <p>The Helm chart includes a PersistentVolumeClaim, Secret for API keys, liveness/readiness probes, and a <code>Recreate</code> deployment strategy — required for single-writer WAL safety.</p>
+        </div>
+
+        <h4>Build from source</h4>
+        <pre><code class="language-bash">git clone https://github.com/dynamicpricing-ai/banditdb
+cd banditdb
+cargo build --release                        # standard build
+# cargo build --release --features neural   # with NeuralLinUCB
+./target/release/banditdb</code></pre>
+
+        <h3>2. Install the SDK</h3>
+
+        <h4>Python</h4>
+        <pre><code class="language-bash">pip install banditdb-python</code></pre>
+
+        <pre><code class="language-python">from banditdb import Client
+db = Client("http://localhost:8080", api_key="your-secret-key")</code></pre>
+
+        <h4>JavaScript / TypeScript</h4>
+        <pre><code class="language-bash">npm install banditdb-js</code></pre>
+
+        <pre><code class="language-javascript">import { BanditDB } from "banditdb-js";
+const db = new BanditDB("http://localhost:8080", { apiKey: "your-secret-key" });</code></pre>
+
+        <h4>HTTP (no SDK)</h4>
+        <p>Every SDK call is a plain JSON HTTP request. Use <code>X-Api-Key</code> header when auth is enabled:</p>
+        <pre><code class="language-bash">curl -s http://localhost:8080/health
+# {"status":"ok",...}
+
+curl -s -X POST http://localhost:8080/predict \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your-secret-key" \
+  -d '{"campaign_id":"my-campaign","context":[1.0,0.5,0.3]}'</code></pre>
+      </section>
+
+      <!-- Run -->
+      <section id="run" class="section-anchor mb-16">
+        <h2 class="text-2xl font-bold text-white mb-2">Run</h2>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">Start the engine, verify it's alive, create your first campaign.</p>
+
+        <h3>Start</h3>
+
+        <h4>Binary</h4>
+        <pre><code class="language-bash"># Minimal — no auth, in-memory only (dev)
+banditdb
+
+# With persistence and a single admin key
+DATA_DIR=/var/lib/banditdb BANDITDB_API_KEY=secret banditdb
+
+# Full production flags
+DATA_DIR=/var/lib/banditdb \
+BANDITDB_API_KEYS="admin-key=admin;app-key=writer;dash-key=reader" \
+BANDITDB_CHECKPOINT_INTERVAL=5000 \
+BANDITDB_MAX_WAL_SIZE_MB=100 \
+LOG_FORMAT=json \
+PORT=8080 \
+banditdb</code></pre>
+
+        <h4>Docker Compose</h4>
+        <pre><code class="language-bash">docker compose up -d          # start in background
+docker compose logs -f        # follow logs
+docker compose down           # stop</code></pre>
+
+        <h3>Verify</h3>
+        <pre><code class="language-bash">curl http://localhost:8080/health
+# {"status":"ok","campaigns":{}}</code></pre>
+
+        <p>Status values:</p>
+        <table>
+          <thead><tr><th>Status</th><th>HTTP</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>ok</code></td><td>200</td><td>All campaigns healthy, WAL writing normally.</td></tr>
+            <tr><td><code>degraded</code></td><td>200</td><td>One or more campaigns have entropy collapse. Service still running — data quality issue only.</td></tr>
+            <tr><td><code>degraded: wal unavailable</code></td><td>503</td><td>WAL writer failed. Predictions still served from memory but nothing is persisted. Treat as a service failure.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Logs</h3>
+        <pre><code class="language-bash"># Human-readable (default)
+banditdb
+
+# Structured JSON for log aggregators (CloudWatch, Datadog, Splunk)
+LOG_FORMAT=json banditdb</code></pre>
+
+        <p>Key log lines to watch on startup:</p>
+        <pre><code class="language-bash">INFO banditdb: recovered 3 campaigns from checkpoint (offset=48291)
+INFO banditdb: replayed 142 WAL events
+INFO banditdb: listening on 0.0.0.0:8080</code></pre>
+
+        <p>If checkpoint recovery fails the engine exits with a clear error rather than starting in a broken state. Check <code>DATA_DIR</code> permissions and that <code>checkpoint.json</code> is not corrupt.</p>
+
+        <h3>First Campaign</h3>
+        <pre><code class="language-bash"># Create a campaign
+curl -s -X POST http://localhost:8080/campaign \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your-secret-key" \
+  -d '{
+    "campaign_id": "homepage-hero",
+    "arms": ["variant_a", "variant_b", "variant_c"],
+    "feature_dim": 4,
+    "alpha": 1.0
+  }'
+
+# Confirm it exists
+curl -s http://localhost:8080/campaigns \
+  -H "X-Api-Key: your-secret-key"</code></pre>
+
+        <h3>Checkpoint and Stop</h3>
+        <pre><code class="language-bash"># Flush WAL, export Parquet, rotate — do this before stopping
+curl -s -X POST http://localhost:8080/checkpoint \
+  -H "X-Api-Key: your-secret-key"
+
+# Then stop
+docker compose down   # or kill the process</code></pre>
+
+        <div class="callout">
+          <p>Always checkpoint before a planned shutdown. The WAL preserves everything since the last checkpoint, but checkpointing first keeps the WAL short and makes the next startup faster.</p>
+        </div>
+      </section>
 
       <!-- Quick Start -->
       <section id="quick-start" class="section-anchor mb-16">
