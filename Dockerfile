@@ -10,8 +10,8 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY docs ./docs
 
-# Release build. Add --features neural for NeuralLinUCB support.
-ARG FEATURES=""
+# Release build. Override FEATURES to add cuda or metal acceleration.
+ARG FEATURES="neural"
 RUN if [ -z "$FEATURES" ]; then \
         cargo build --release; \
     else \
