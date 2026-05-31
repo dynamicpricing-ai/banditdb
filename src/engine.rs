@@ -706,54 +706,50 @@ impl BanditDB {
                 if !needs_retrain && !is_progressive { continue }
 
                 // 7a. Algorithm 2: retrain the MLP and warm-start arm matrices.
+                //
+                // Lock order fix: predict() holds arms.read() then acquires neural.lock()
+                // via embed(). Holding neural.lock() while calling arms.write() inverts
+                // that order → deadlock. Fix: retrain + save under neural lock, drop it,
+                // then apply new arm states, then re-acquire neural lock for tournament.
                 if needs_retrain {
                     let arms_snapshot: HashMap<String, ArmState> = {
                         let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
                         target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                     };
 
-                    match neural.retrain(&arms_snapshot) {
-                        Err(e) => { tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: neural retrain failed"); }
-                        Ok(_)  => {
-                            let new_arm_states = neural.reaccumulate(&arms_snapshot);
-                            let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
-                            let mut arms_write = target_arms.write();
-                            for (arm_id, new_state) in new_arm_states {
-                                arms_write.insert(arm_id, new_state);
-                            }
-                        }
-                    }
+                    let new_arm_states = match neural.retrain(&arms_snapshot) {
+                        Err(e) => { tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: neural retrain failed"); None }
+                        Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
+                    };
 
                     let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
                     if let Err(e) = neural.save(&weights_path) {
                         tracing::warn!(campaign = %campaign_id, error = %e, "checkpoint: failed to save neural weights");
                     }
                     tracing::info!(campaign = %campaign_id, "checkpoint: neural retrain complete");
-                }
 
-                // 7b. Tournament evaluation (Progressive only).
-                if let Algorithm::Progressive(cfg) = &campaign.algorithm {
-                    match evaluate_tournament(campaign_id, campaign, &neural, cfg) {
-                        TournamentOutcome::Hold => {}
-                        TournamentOutcome::ChallengerStep(new_bps) => {
-                            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
-                            campaign.tournament_wins.store(0, Ordering::SeqCst);
-                            tracing::info!(campaign = %campaign_id,
-                                from_pct = old / 100, to_pct = new_bps / 100,
-                                "tournament: challenger traffic increased");
+                    // Drop neural lock before arms.write() to preserve lock order.
+                    drop(neural);
+
+                    if let Some(new_arm_states) = new_arm_states {
+                        let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+                        let mut arms_write = target_arms.write();
+                        for (arm_id, new_state) in new_arm_states {
+                            arms_write.insert(arm_id, new_state);
                         }
-                        TournamentOutcome::BaseStep(new_bps) => {
-                            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
-                            campaign.tournament_wins.store(0, Ordering::SeqCst);
-                            tracing::info!(campaign = %campaign_id,
-                                from_pct = old / 100, to_pct = new_bps / 100,
-                                "tournament: base traffic restored");
+                    }
+
+                    // 7b. Tournament — re-acquire neural lock (no arms lock held).
+                    if is_progressive {
+                        let neural = neural_mutex.lock();
+                        if let Algorithm::Progressive(cfg) = &campaign.algorithm {
+                            run_tournament(campaign_id, campaign, &neural, cfg);
                         }
-                        TournamentOutcome::Inconclusive => {
-                            tracing::debug!(campaign = %campaign_id,
-                                streak = campaign.tournament_wins.load(Ordering::SeqCst),
-                                "tournament: inconclusive — streak decayed");
-                        }
+                    }
+                } else {
+                    // 7b. No retrain due — tournament evaluation only (neural lock still held).
+                    if let Algorithm::Progressive(cfg) = &campaign.algorithm {
+                        run_tournament(campaign_id, campaign, &neural, cfg);
                     }
                 }
             }
@@ -1497,6 +1493,38 @@ fn snips_score(
 
     let estimate = if denominator > 1e-10 { numerator / denominator } else { 0.0 };
     (estimate, coverage)
+}
+
+/// Apply a tournament outcome to a campaign's traffic split and log the result.
+#[cfg(feature = "neural")]
+fn run_tournament(
+    campaign_id: &str,
+    campaign:    &Campaign,
+    neural:      &crate::neural::NeuralLinUCBState,
+    cfg:         &ProgressiveConfig,
+) {
+    match evaluate_tournament(campaign_id, campaign, neural, cfg) {
+        TournamentOutcome::Hold => {}
+        TournamentOutcome::ChallengerStep(new_bps) => {
+            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
+            campaign.tournament_wins.store(0, Ordering::SeqCst);
+            tracing::info!(campaign = %campaign_id,
+                from_pct = old / 100, to_pct = new_bps / 100,
+                "tournament: challenger traffic increased");
+        }
+        TournamentOutcome::BaseStep(new_bps) => {
+            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
+            campaign.tournament_wins.store(0, Ordering::SeqCst);
+            tracing::info!(campaign = %campaign_id,
+                from_pct = old / 100, to_pct = new_bps / 100,
+                "tournament: base traffic restored");
+        }
+        TournamentOutcome::Inconclusive => {
+            tracing::debug!(campaign = %campaign_id,
+                streak = campaign.tournament_wins.load(Ordering::SeqCst),
+                "tournament: inconclusive — streak decayed");
+        }
+    }
 }
 
 /// Evaluate one tournament round for a Progressive campaign, returning a `TournamentOutcome`
