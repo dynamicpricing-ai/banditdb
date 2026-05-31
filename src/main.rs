@@ -1,12 +1,13 @@
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, State, Json},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Method},
     middleware::{self, Next},
     extract::Request,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
+use tower_http::cors::{CorsLayer, Any};
 use banditdb::state::{Algorithm, CampaignReport, EngineError, EntropyStatus, DEFAULT_ALPHA};
 use banditdb::BanditDB;
 use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
@@ -968,11 +969,17 @@ async fn main() {
             .layer(middleware::from_fn_with_state(Arc::clone(&metrics_state), auth_middleware))
     };
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/health",       get(handle_health))
         .route("/openapi.yaml", get(handle_openapi))
         .merge(metrics_route)
         .merge(protected)
+        .layer(cors)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(Arc::clone(&app_state), metrics_middleware))
         .with_state(app_state);
