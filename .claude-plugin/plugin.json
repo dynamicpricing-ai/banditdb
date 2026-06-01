@@ -15,7 +15,7 @@
       "command": "banditdb-mcp",
       "env": {
         "BANDITDB_URL": "http://localhost:8080",
-        "BANDITDB_API_KEY": "d18cb8cbab687b0a94ab390798f9d12f920c59df8a39d3e1fef3b2224e0c7f31"
+        "BANDITDB_API_KEY": "REPLACE_WITH_YOUR_BANDITDB_API_KEY"
       }
     }
   }

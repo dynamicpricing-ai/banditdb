@@ -4,4 +4,9 @@
 # BanditDB runtime files — generated at runtime, not part of the source
 *.jsonl
 *.parquet
+checkpoint*.json
+*.safetensors
+/neural/
+/exports/
+__pycache__/
 examples/convergence_chart.png
