@@ -375,7 +375,10 @@ pub struct CampaignDiagnosticsData {
     pub tournament_win_streak:  Option<i32>,
     /// Neural / Progressive-with-neural-challenger only.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub neural_buffer_size:   Option<usize>,
+    pub neural_buffer_size:         Option<usize>,
+    /// Loss at each gradient step of the most recent neural retrain. Absent until first retrain fires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub neural_last_retrain_losses: Option<Vec<f32>>,
     /// Normalised selection entropy (0 = fully collapsed, 1 = uniform across arms).
     pub selection_entropy:    f64,
     pub entropy_status:       EntropyStatus,

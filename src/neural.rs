@@ -71,6 +71,7 @@ pub struct NeuralLinUCBState {
     lambda:        f64,
     pub reward_count:  usize,
     pub buffer:    VecDeque<(Vec<f64>, String, f64, f64)>, // context, arm_id, reward, propensity
+    pub last_retrain_losses: Vec<f32>,
 }
 
 impl NeuralLinUCBState {
@@ -105,8 +106,9 @@ impl NeuralLinUCBState {
             retrain_steps: cfg.retrain_steps,
             learning_rate: cfg.learning_rate,
             lambda:        cfg.lambda,
-            reward_count:  0,
-            buffer:        VecDeque::with_capacity(BUFFER_CAP),
+            reward_count:        0,
+            buffer:              VecDeque::with_capacity(BUFFER_CAP),
+            last_retrain_losses: Vec::new(),
         })
     }
 
@@ -189,6 +191,8 @@ impl NeuralLinUCBState {
             ParamsAdamW { lr: self.learning_rate, ..Default::default() },
         )?;
 
+        let mut losses: Vec<f32> = Vec::with_capacity(self.retrain_steps);
+
         for _ in 0..self.retrain_steps {
             // One forward pass on the whole batch → (n, embed_dim)
             let batch_h = self.forward_normalized(&batch_x)?;
@@ -201,9 +205,11 @@ impl NeuralLinUCBState {
                 .affine(0.5, 0.0)?
                 .add(&self.w0_reg(n_params)?)?;
 
+            losses.push(loss.to_scalar::<f32>()?);
             opt.backward_step(&loss)?;
         }
 
+        self.last_retrain_losses = losses;
         self.reward_count = 0;
         Ok(())
     }

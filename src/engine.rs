@@ -730,7 +730,20 @@ impl BanditDB {
                     if let Err(e) = neural.save(&weights_path) {
                         tracing::warn!(campaign = %campaign_id, error = %e, "checkpoint: failed to save neural weights");
                     }
-                    tracing::info!(campaign = %campaign_id, "checkpoint: neural retrain complete");
+                    {
+                        let losses = &neural.last_retrain_losses;
+                        let initial = losses.first().copied().unwrap_or(0.0);
+                        let final_l = losses.last().copied().unwrap_or(0.0);
+                        let improv  = if initial > 0.0 { (initial - final_l) / initial * 100.0 } else { 0.0 };
+                        tracing::info!(
+                            campaign        = %campaign_id,
+                            steps           = losses.len(),
+                            initial_loss    = format!("{initial:.4}"),
+                            final_loss      = format!("{final_l:.4}"),
+                            improvement_pct = format!("{improv:.1}"),
+                            "checkpoint: neural retrain complete"
+                        );
+                    }
 
                     // Drop neural lock before arms.write() to preserve lock order.
                     drop(neural);
@@ -1243,6 +1256,14 @@ impl BanditDB {
         #[cfg(not(feature = "neural"))]
         let neural_buffer_size: Option<usize> = None;
 
+        #[cfg(feature = "neural")]
+        let neural_last_retrain_losses = campaign.neural.as_ref().and_then(|n| {
+            let v = n.lock().last_retrain_losses.clone();
+            if v.is_empty() { None } else { Some(v) }
+        });
+        #[cfg(not(feature = "neural"))]
+        let neural_last_retrain_losses: Option<Vec<f32>> = None;
+
         // --- Entropy alerting ---
 
         // Guard 2: compare current entropy against the snapshot written at last checkpoint.
@@ -1306,6 +1327,7 @@ impl BanditDB {
             challenger_traffic_pct,
             tournament_win_streak,
             neural_buffer_size,
+            neural_last_retrain_losses,
             selection_entropy:    entropy,
             entropy_status,
             entropy_trend,
