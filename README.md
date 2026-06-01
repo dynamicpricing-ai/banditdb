@@ -3,6 +3,7 @@
 
   <h1>🎰 BanditDB</h1>
 
+  [![CI](https://github.com/dynamicpricing-ai/banditdb/actions/workflows/ci.yml/badge.svg)](https://github.com/dynamicpricing-ai/banditdb/actions/workflows/ci.yml)
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
   [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
