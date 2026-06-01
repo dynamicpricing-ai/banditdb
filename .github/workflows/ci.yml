@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Correctness gates — these block the merge.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --features neural --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --features neural
+
+      # Format drift is reported but not blocking yet: the existing tree is not
+      # fully rustfmt-clean. Run `cargo fmt --all` once, commit, then drop
+      # `continue-on-error` to make formatting a hard gate.
+      - name: Format check (non-blocking)
+        run: cargo fmt --all --check
+        continue-on-error: true

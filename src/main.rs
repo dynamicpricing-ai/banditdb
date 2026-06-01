@@ -482,7 +482,7 @@ async fn handle_create_campaign(
 
     let arm_dim = match &payload.algorithm {
         Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.embed_dim,
-        Algorithm::Progressive(_) | _ => {
+        _ => {
             if payload.feature_dim == 0 {
                 return Err(AppError(StatusCode::BAD_REQUEST, "feature_dim must be > 0".into()));
             }
@@ -655,7 +655,7 @@ async fn handle_campaign_info(
     }
 
     Ok(Json(CampaignInfo {
-        campaign_id: campaign_id, // return caller-supplied name, not namespaced
+        campaign_id, // return caller-supplied name, not namespaced
         alpha:       campaign.alpha,
         algorithm:   campaign.algorithm.clone(),
         archived:    campaign.archived.load(Ordering::Relaxed),
@@ -908,8 +908,8 @@ async fn main() {
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
                     _ = cancel.changed() => { break; }
                 }
-                let count_exceeded = checkpoint_interval.map_or(false, |n| db_bg.rewarded_count.load(Ordering::Relaxed) >= n);
-                let size_exceeded  = max_wal_bytes.map_or(false, |max| {
+                let count_exceeded = checkpoint_interval.is_some_and(|n| db_bg.rewarded_count.load(Ordering::Relaxed) >= n);
+                let size_exceeded  = max_wal_bytes.is_some_and(|max| {
                     std::fs::metadata(&db_bg.wal_path).map(|m| m.len() > max).unwrap_or(false)
                 });
                 if count_exceeded || size_exceeded {
@@ -957,7 +957,7 @@ async fn main() {
         .merge(reader_routes)
         .merge(writer_routes)
         .merge(admin_routes)
-        .layer(DefaultBodyLimit::max(1 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn_with_state(Arc::clone(&state), auth_middleware));
 
     let metrics_state = Arc::clone(&app_state);

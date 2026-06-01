@@ -19,6 +19,7 @@ async fn test_3_1_torn_write_recovery() {
     {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(wal)
             .unwrap();

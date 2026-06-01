@@ -233,7 +233,7 @@ async fn test_gradual_traffic_ramp() {
 
             // Traffic may increase by at most one step or decrease by at most one step
             // per checkpoint (required_wins=1 means one win = one step_bps change).
-            let delta = if bps > prev_bps { bps - prev_bps } else { prev_bps - bps };
+            let delta = bps.abs_diff(prev_bps);
             assert!(
                 delta <= STEP,
                 "Traffic changed by more than step_bps in one checkpoint: {} → {} (Δ={}, step={})",

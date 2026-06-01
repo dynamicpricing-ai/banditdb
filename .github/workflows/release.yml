@@ -5,10 +5,25 @@ on:
     tags:
       - 'v*'
 
-# ── Job 1: Docker image (linux/amd64 + linux/arm64) ──────────────────────────
+# ── Job 0: Test gate ─────────────────────────────────────────────────────────
+# A tag must not publish untested code. docker + binaries depend on this.
 jobs:
+  test:
+    name: Test + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --features neural --all-targets -- -D warnings
+      - run: cargo test --features neural
+
+# ── Job 1: Docker image (linux/amd64 + linux/arm64) ──────────────────────────
   docker:
     name: Publish Docker image
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +63,7 @@ jobs:
 # ── Job 2: Native binaries ────────────────────────────────────────────────────
   binaries:
     name: Build binary (${{ matrix.target }})
+    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

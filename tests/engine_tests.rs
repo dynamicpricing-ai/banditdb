@@ -1,5 +1,7 @@
 use banditdb::engine::WalMessage;
-use banditdb::state::{Algorithm, NeuralLinUCBConfig};
+use banditdb::state::Algorithm;
+#[cfg(feature = "neural")]
+use banditdb::state::NeuralLinUCBConfig;
 use banditdb::BanditDB;
 
 /// Test 1.2 — Asymptotic Convergence to Known Theta
@@ -441,6 +443,7 @@ async fn test_linucb_ts_coexist() {
 
 /// Campaign metadata is stored, survives checkpoint+recovery, and is absent when not set.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // read guard is explicitly dropped before the .await below
 async fn test_campaign_metadata_roundtrip() {
     let data_dir = "/tmp/banditdb_metadata_test_data";
     let wal = format!("{}/bandit_wal.jsonl", data_dir);

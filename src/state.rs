@@ -96,7 +96,9 @@ fn default_progressive_step_bps()      -> u32   { 1000 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Algorithm {
+    #[default]
     Linucb,
     ThompsonSampling,
     #[serde(rename = "neural_lin_ucb")]
@@ -110,9 +112,6 @@ pub enum Algorithm {
     Progressive(ProgressiveConfig),
 }
 
-impl Default for Algorithm {
-    fn default() -> Self { Algorithm::Linucb }
-}
 
 /// Outcome of a single tournament SNIPS evaluation round, returned by the extracted
 /// evaluate_tournament helper so the checkpoint loop can act on it without 7-level nesting.

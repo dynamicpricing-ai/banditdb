@@ -88,7 +88,7 @@ fn read_wal_slice(
             } else {
                 Box::new(file)
             };
-            for line in BufReader::new(reader).lines().flatten() {
+            for line in BufReader::new(reader).lines().map_while(Result::ok) {
                 if let Ok(e) = serde_json::from_str::<DbEvent>(&line) {
                     events.push(e);
                 }
@@ -624,6 +624,7 @@ impl BanditDB {
 
         let (matched, parquet_rows) = tokio::task::spawn_blocking(move || {
             // Scan the WAL for matched Predicted+Rewarded pairs.
+            #[allow(clippy::type_complexity)] // matched-pair accumulator; a named type alias would not aid clarity here
             let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
             let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
 
@@ -669,7 +670,6 @@ impl BanditDB {
 
             (matched, rows)
         }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
-        let parquet_rows = parquet_rows; // shadowed for clarity below
 
         // 6. Re-emit in-flight (unmatched) Predicted events into the WAL tail so that
         //    their reward — however delayed — lands in the same future WAL segment and
@@ -975,6 +975,7 @@ impl BanditDB {
         EngineError::NotFound(format!("Campaign '{id}' not found"))
     }
 
+    #[allow(clippy::too_many_arguments)] // campaign construction params; grouping into a struct would only move the noise
     pub fn add_campaign(
         &self,
         campaign_id:          &str,
@@ -1065,7 +1066,7 @@ impl BanditDB {
                     // N scales with posterior spread (A_inv diagonal) — large near cold-start
                     // where many samples are needed; small once the posterior concentrates.
                     // The first trial's winner is already known (best_arm from initial scores draw).
-                    let n = ts_propensity_samples(&*arms_guard);
+                    let n = ts_propensity_samples(&arms_guard);
                     let mut counts: HashMap<String, u32> = arms_guard.keys()
                         .map(|id| (id.clone(), 0u32))
                         .collect();
@@ -1283,7 +1284,7 @@ impl BanditDB {
         };
 
         // Guard 1: suppress alert when the campaign has statistically converged.
-        let converged = convergence_signal(&*arms_guard);
+        let converged = convergence_signal(&arms_guard);
 
         let entropy_status = classify_entropy_status(entropy, total_predictions, converged);
 
@@ -1466,7 +1467,7 @@ impl BanditDB {
             let pred_counts: Vec<u64> = arms_guard.values()
                 .map(|s| s.prediction_count.load(Ordering::Relaxed))
                 .collect();
-            let converged = convergence_signal(&*arms_guard);
+            let converged = convergence_signal(&arms_guard);
             drop(arms_guard);
             let entropy = selection_entropy(&pred_counts);
             let status  = classify_entropy_status(entropy, total_preds, converged);
@@ -1708,18 +1709,18 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
     let propensities:    Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
 
     let mut series: Vec<Series> = vec![
-        Series::new("interaction_id".into(), interaction_ids),
-        Series::new("arm_id".into(),         arm_ids),
-        Series::new("reward".into(),         rewards),
-        Series::new("predicted_at".into(),   predicted_ats),
-        Series::new("rewarded_at".into(),    rewarded_ats),
-        Series::new("propensity".into(),     propensities),
+        Series::new("interaction_id", interaction_ids),
+        Series::new("arm_id",         arm_ids),
+        Series::new("reward",         rewards),
+        Series::new("predicted_at",   predicted_ats),
+        Series::new("rewarded_at",    rewarded_ats),
+        Series::new("propensity",     propensities),
     ];
 
     for f in 0..feature_dim {
         let col: Vec<f64> = interactions.iter().map(|r| r.context[f]).collect();
         let name = format!("feature_{}", f);
-        series.push(Series::new(name.as_str().into(), col));
+        series.push(Series::new(name.as_str(), col));
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
