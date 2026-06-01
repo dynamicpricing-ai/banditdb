@@ -5,7 +5,6 @@
 
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
   [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
-  [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org)
   [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
   [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](#)
 
@@ -24,7 +23,7 @@ BanditDB is a database written in Rust that runs **Contextual Bandit** algorithm
 * Delayed rewards handled via a TTL cache — rewards can arrive hours or days after the prediction.
 * Every interaction is appended to a Write-Ahead Log and exportable to Parquet for offline analysis.
 * RBAC with reader / writer / admin roles; optional multi-tenancy with namespace isolation.
-* Python SDK (with MCP server for AI agents) and JavaScript / TypeScript SDK.
+* Python SDK (with MCP server for AI agents).
 * IPS and Doubly Robust estimators for offline policy evaluation.
 
 ---
@@ -125,7 +124,7 @@ curl http://localhost:8080/campaign/prices/diagnostics
 
 ## Installation
 
-BanditDB consists of the **Rust Engine** (~11 MB native binary — also available as a Docker image and Helm chart), the **Python SDK** (pip), and the **JavaScript / TypeScript SDK** (npm, zero runtime dependencies).
+BanditDB consists of the **Rust Engine** (~11 MB native binary — also available as a Docker image and Helm chart) and the **Python SDK** (pip).
 
 ### 1. Start the Database Engine
 
@@ -180,16 +179,11 @@ helm install banditdb ./helm/banditdb \
 
 The Helm chart at `helm/banditdb/` includes a PersistentVolumeClaim, Secret for API keys, liveness/readiness probes, and a `Recreate` deployment strategy (required for single-writer WAL safety).
 
-### 2. Install the SDKs
+### 2. Install the SDK
 
 **Python:**
 ```bash
 pip install banditdb-python
-```
-
-**JavaScript / TypeScript (zero runtime dependencies):**
-```bash
-npm install banditdb-js
 ```
 
 ---

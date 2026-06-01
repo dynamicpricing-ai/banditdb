@@ -112,7 +112,7 @@
       <!-- Installation -->
       <section id="installation" class="section-anchor mb-16">
         <h2 class="text-2xl font-bold text-white mb-2">Installation</h2>
-        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">BanditDB has three components: the Rust engine, the Python SDK, and the TypeScript SDK. Start the engine first, then install whichever SDK fits your stack.</p>
+        <p class="text-zinc-400 text-sm border-b border-zinc-800 pb-6 mb-8">BanditDB has two components: the Rust engine and the Python SDK. Start the engine first, then install the SDK.</p>
 
         <h3>1. Start the Engine</h3>
 
@@ -173,12 +173,6 @@ cargo build --release                        # standard build
 
         <pre><code class="language-python">from banditdb import Client
 db = Client("http://localhost:8080", api_key="your-secret-key")</code></pre>
-
-        <h4>JavaScript / TypeScript</h4>
-        <pre><code class="language-bash">npm install banditdb-js</code></pre>
-
-        <pre><code class="language-javascript">import { BanditDB } from "banditdb-js";
-const db = new BanditDB("http://localhost:8080", { apiKey: "your-secret-key" });</code></pre>
 
         <h4>HTTP (no SDK)</h4>
         <p>Every SDK call is a plain JSON HTTP request. Use <code>X-Api-Key</code> header when auth is enabled:</p>
