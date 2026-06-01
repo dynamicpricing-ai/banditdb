@@ -721,7 +721,7 @@ impl BanditDB {
                         target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                     };
 
-                    let new_arm_states = match neural.retrain(&arms_snapshot) {
+                    let new_arm_states = match tokio::task::block_in_place(|| neural.retrain(&arms_snapshot)) {
                         Err(e) => { tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: neural retrain failed"); None }
                         Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
                     };
