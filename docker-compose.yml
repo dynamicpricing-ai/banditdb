@@ -35,8 +35,8 @@ services:
       BANDITDB_TENANT_MODE: ${BANDITDB_TENANT_MODE:-false}
 
       # ── Checkpointing ─────────────────────────────────────────────────────
-      # Checkpoint after this many rewarded events (recommended: 1000–10000)
-      BANDITDB_CHECKPOINT_INTERVAL: ${BANDITDB_CHECKPOINT_INTERVAL:-5000}
+      # Checkpoint after this many rewarded events (pilot default: 500; raise to 2000–5000 for high traffic)
+      BANDITDB_CHECKPOINT_INTERVAL: ${BANDITDB_CHECKPOINT_INTERVAL:-500}
       # Also checkpoint when WAL exceeds this many MB
       BANDITDB_MAX_WAL_SIZE_MB: ${BANDITDB_MAX_WAL_SIZE_MB:-100}
 

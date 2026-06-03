@@ -112,9 +112,9 @@ if [ -z "$cfg_api_keys" ]; then
   echo "  Warning: no API keys set — BanditDB will run in open mode (no authentication)."
 fi
 
-printf "Auto-checkpoint after N rewarded events (leave empty to disable) [5000]: "
+printf "Auto-checkpoint after N rewarded events (leave empty to disable) [500]: "
 read -r cfg_checkpoint_interval </dev/tty
-cfg_checkpoint_interval="${cfg_checkpoint_interval:-5000}"
+cfg_checkpoint_interval="${cfg_checkpoint_interval:-500}"
 
 printf "Auto-checkpoint when WAL exceeds N MB (leave empty to disable) [100]: "
 read -r cfg_max_wal_mb </dev/tty

@@ -56,7 +56,10 @@ fn try_metal() -> Device {
     Device::Cpu
 }
 
-const BUFFER_CAP: usize = 200_000;
+// Replay buffer cap. Older entries are evicted as new rewards arrive.
+// 5K keeps recent signal while bounding retrain tensor size (5K × context_dim).
+// 200K caused retrain to slow dramatically after 20K+ accumulated rewards.
+const BUFFER_CAP: usize = 5_000;
 
 pub struct NeuralLinUCBState {
     varmap:        VarMap,
