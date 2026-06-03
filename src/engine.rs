@@ -610,7 +610,7 @@ impl BanditDB {
         let wal_offset = reply_rx.await.map_err(|_| "WAL writer closed".to_string())?;
 
         // 2. Parquet export: read WAL [0, wal_offset), join Predicted+Rewarded pairs,
-        //    write Parquet shards. Runs inside block_in_place so the synchronous WAL
+        //    write Parquet shards. Runs inside spawn_blocking so the synchronous WAL
         //    scan and Parquet I/O do not stall the tokio async runtime.
         //
         //    Done BEFORE the neural/tournament block so WAL rotation (step 9) doesn't
@@ -721,7 +721,7 @@ impl BanditDB {
                         target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                     };
 
-                    let new_arm_states = match tokio::task::block_in_place(|| neural.retrain(&arms_snapshot)) {
+                    let new_arm_states = match neural.retrain(&arms_snapshot) {
                         Err(e) => { tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: neural retrain failed"); None }
                         Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
                     };
