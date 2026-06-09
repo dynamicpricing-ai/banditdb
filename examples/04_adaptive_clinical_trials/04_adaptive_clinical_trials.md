@@ -124,5 +124,5 @@ The most critical operational parameter is **TTL configuration**: a 3-week follo
 
 ## Related Examples
 
-- [`01_dynamic_pricing_sell_through.md`](./01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit)
-- [`03_ecommerce_upsell_optimization.md`](./03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward
+- [`01_dynamic_pricing_sell_through.md`](../01_dynamic_pricing_sell_through/01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit)
+- [`03_ecommerce_upsell_optimization.md`](../03_ecommerce_upsell_optimization/03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward

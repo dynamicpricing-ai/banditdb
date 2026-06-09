@@ -16,7 +16,7 @@
 
 An in-memory decision database that learns from feedback.
 
-BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB**, **NeuralThompsonSampling** (Zhang et al. 2021), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
+BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB** (Xu et al. 2022), **NeuralThompsonSampling** (Zhang et al. 2021), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
 
 * **Five algorithms in one binary:** LinUCB, Thompson Sampling, NeuralLinUCB, NeuralThompsonSampling, and Progressive Tournament (autonomous algorithm selection via SNIPS-weighted shadow learning).
 * **Two HTTP calls:** `POST /predict` returns which decision to take, `POST /reward` updates the model.
@@ -434,3 +434,10 @@ python benchmark/throughput/bench.py
 BanditDB is open source. PRs are welcome!
 
 Visit [banditdb.com](https://banditdb.com) to read the full documentation.
+
+## References
+
+- **LinUCB** — Li, Chu, Langford, Schapire. *A Contextual-Bandit Approach to Personalized News Article Recommendation.* WWW 2010. [arXiv:1003.0146](https://arxiv.org/abs/1003.0146)
+- **NeuralLinUCB** — Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
+- **NeuralThompsonSampling** — Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
+- **Offline evaluation (replay method)** — Li, Chu, Langford, Wang. *Unbiased Offline Evaluation of Contextual-bandit-based News Article Recommendation Algorithms.* WSDM 2011. [arXiv:1003.5956](https://arxiv.org/abs/1003.5956)

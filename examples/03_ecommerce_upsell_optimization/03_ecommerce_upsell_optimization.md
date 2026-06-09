@@ -115,5 +115,5 @@ The binary reward (1.0 / 0.0) is the highest-noise signal across these four exam
 
 ## Related Examples
 
-- [`01_dynamic_pricing_sell_through.md`](./01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit) rather than user-state context
-- [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — high-stakes routing with biomarker context vectors
+- [`01_dynamic_pricing_sell_through.md`](../01_dynamic_pricing_sell_through/01_dynamic_pricing_sell_through.md) — market-state context (temporal bandit) rather than user-state context
+- [`04_adaptive_clinical_trials.md`](../04_adaptive_clinical_trials/04_adaptive_clinical_trials.md) — high-stakes routing with biomarker context vectors

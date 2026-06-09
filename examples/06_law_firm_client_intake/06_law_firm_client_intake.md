@@ -126,5 +126,5 @@ The multi-valued reward (`0.0 / 0.2 / 0.4 / 1.0`) provides richer signal than a 
 
 ## Related Examples
 
-- [`03_ecommerce_upsell_optimization.md`](./03_ecommerce_upsell_optimization.md) — binary conversion reward with user-state context
-- [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — delayed rewards and high-stakes routing
+- [`03_ecommerce_upsell_optimization.md`](../03_ecommerce_upsell_optimization/03_ecommerce_upsell_optimization.md) — binary conversion reward with user-state context
+- [`04_adaptive_clinical_trials.md`](../04_adaptive_clinical_trials/04_adaptive_clinical_trials.md) — delayed rewards and high-stakes routing

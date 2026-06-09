@@ -191,5 +191,5 @@ If human feedback is the primary reward signal instead of an automated judge, ex
 
 ## Related Examples
 
-- [`01_dynamic_pricing_sell_through.md`](./01_dynamic_pricing_sell_through.md) — continuous reward with near-100% observability (same convergence profile)
-- [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — delayed rewards held in TTL cache until outcome arrives
+- [`01_dynamic_pricing_sell_through.md`](../01_dynamic_pricing_sell_through/01_dynamic_pricing_sell_through.md) — continuous reward with near-100% observability (same convergence profile)
+- [`04_adaptive_clinical_trials.md`](../04_adaptive_clinical_trials/04_adaptive_clinical_trials.md) — delayed rewards held in TTL cache until outcome arrives

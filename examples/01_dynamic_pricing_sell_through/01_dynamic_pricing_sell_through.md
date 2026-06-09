@@ -168,5 +168,5 @@ The main constraint is not sample size but **rare market states**: a holiday wee
 
 ## Related Examples
 
-- [`03_ecommerce_upsell_optimization.md`](./03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward
-- [`04_adaptive_clinical_trials.md`](./04_adaptive_clinical_trials.md) — high-stakes routing with biomarker context vectors
+- [`03_ecommerce_upsell_optimization.md`](../03_ecommerce_upsell_optimization/03_ecommerce_upsell_optimization.md) — user-state context with binary conversion reward
+- [`04_adaptive_clinical_trials.md`](../04_adaptive_clinical_trials/04_adaptive_clinical_trials.md) — high-stakes routing with biomarker context vectors
