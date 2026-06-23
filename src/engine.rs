@@ -896,6 +896,18 @@ impl BanditDB {
                         timestamp_secs: *timestamp_secs,
                     },
                 );
+                // Restore the prediction counter on replay. Live predict() increments
+                // this inside the scoring lock (see prediction_count.fetch_add in predict);
+                // replay must mirror it so the counter survives restart instead of
+                // resetting to the checkpoint value. fetch_add works under a read lock
+                // since prediction_count is atomic. Base arms only — the WAL Predicted
+                // event does not record whether a Progressive challenger draw was used,
+                // so the base/challenger split is not reconstructable here.
+                if let Some(campaign) = self.campaigns.read().get(campaign_id) {
+                    if let Some(arm_state) = campaign.arms.read().get(arm_id.as_str()) {
+                        arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             DbEvent::Rewarded { interaction_id, reward, .. } => {
                 if let Some(record) = self.interactions.get(interaction_id.as_str()) {

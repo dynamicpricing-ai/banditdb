@@ -34,8 +34,10 @@
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
+      display: inline-block;
     }
-    .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 2rem !important; font-size: 1rem !important; line-height: 1.7 !important; }
+    .hljs { background: #0c0a09 !important; border-radius: 0.5rem; padding: 2rem !important; font-size: 1rem !important; line-height: 1.7 !important; overflow-x: auto !important; }
+    pre { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .section-divider { border-top: 2px solid #3f3f46; }
     @keyframes tl-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
     .tl-line   { animation: tl-in 0.2s ease; }
@@ -48,6 +50,18 @@
     .tl-green  { color: #4ade80; }
     .tl-dim    { color: #3f3f46; }
     .tl-indent { display:block; padding-left:5rem; }
+    @media (max-width: 640px) {
+      body { font-size: 16px; }
+      .hljs { padding: 1rem !important; font-size: 0.7rem !important; overflow-x: auto !important; }
+      .tl-indent { padding-left: 1.25rem; }
+      pre { max-width: 100%; }
+      .gradient-text {
+        background: none !important;
+        -webkit-background-clip: unset !important;
+        -webkit-text-fill-color: #f97316 !important;
+        color: #f97316 !important;
+      }
+    }
   </style>
 </head>
 
@@ -75,9 +89,9 @@
   </nav>
 
   <!-- Hero -->
-  <section class="px-6 pt-14 pb-12 sm:pt-24 sm:pb-20 overflow-hidden">
+  <section class="px-6 pt-10 pb-10 sm:pt-24 sm:pb-20 overflow-hidden">
     <div class="max-w-5xl mx-auto">
-      <div class="grid md:grid-cols-[1fr_460px] gap-20 items-center">
+      <div class="grid md:grid-cols-[1fr_460px] gap-10 md:gap-20 items-center">
 
         <!-- Left: text -->
         <div>
@@ -86,15 +100,15 @@
             <span>AI/ML Infrastructure</span>
           </div>
 
-          <h1 class="text-4xl sm:text-5xl font-extrabold mb-5 leading-tight tracking-tight whitespace-nowrap">
-            The <span class="gradient-text">Intuition</span> Database
+          <h1 class="text-2xl sm:text-4xl md:text-5xl font-extrabold mb-5 leading-tight tracking-tight">
+            The <span class="gradient-text">Intuition</span> <span style="-webkit-text-fill-color:#f4f4f5;color:#f4f4f5;">Database</span>
           </h1>
 
-          <p class="text-lg text-zinc-300 mb-6 leading-relaxed whitespace-nowrap">
-            Adaptive decision memory for AI agents and applications
+          <p class="text-base sm:text-lg text-zinc-300 mb-6 leading-relaxed">
+            Adaptive decision memory<br class="sm:hidden"> for AI agents and applications
           </p>
 
-          <div class="flex items-center gap-x-3 text-xs text-zinc-500 mb-8 font-mono">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500 mb-8 font-mono">
             <span>Rust</span>
             <span class="text-zinc-700">·</span>
             <span>~11MB</span>
@@ -128,7 +142,7 @@
             </div>
           </div>
 
-          <div class="flex items-center gap-x-3 text-sm text-zinc-500 flex-nowrap overflow-x-auto">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-zinc-500">
             <a href="https://github.com/simeonlukov/banditdb"       class="hover:text-white transition-colors whitespace-nowrap">★ GitHub</a>
             <span class="text-zinc-700 shrink-0">·</span>
             <a href="https://hub.docker.com/r/simeonlukov/banditdb" class="hover:text-white transition-colors whitespace-nowrap">Docker Hub</a>
@@ -142,7 +156,7 @@
         </div>
 
         <!-- Right: live decision terminal -->
-        <div class="w-full sm:w-[460px] -mr-6 sm:-mr-24 shrink-0">
+        <div class="hidden sm:block w-full sm:w-[460px] sm:-mr-24 shrink-0">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs text-zinc-500 font-mono uppercase tracking-widest">Live decision stream</span>
             <span class="flex items-center gap-1.5 font-mono text-xs text-green-400">
@@ -169,7 +183,7 @@
   <!-- Problem -->
   <section class="px-6 py-16 md:py-36 section-divider">
     <div class="max-w-5xl mx-auto">
-      <h2 class="text-2xl sm:text-3xl font-bold text-center mb-3 whitespace-nowrap">
+      <h2 class="text-2xl sm:text-3xl font-bold text-center mb-3">
         Every agent in your fleet makes the same mistake. Twice.
       </h2>
       <p class="text-zinc-400 text-center mb-14 text-lg">Four moving parts. Four failure modes. Weeks to build. Months to maintain.</p>
@@ -427,20 +441,20 @@ db.reward(iid, reward)</code></pre>
           <span class="text-xs text-zinc-500 font-mono ml-2">banditdb-swarm · NeuralLinUCB</span>
         </div>
         <!-- ASCII art -->
-        <pre class="p-8 sm:p-12 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto select-none" style="color:#52525b; line-height:1.8"><span style="color:#3f3f46">$</span> <span style="color:#71717a">banditdb-swarm --agents 3 --campaign prompt_strategy --algo neural</span>
+        <pre class="p-8 sm:p-12 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto select-none" style="color:#a1a1aa; line-height:1.8"><span style="color:#71717a">$</span> <span style="color:#d4d4d8">banditdb-swarm --agents 3 --campaign prompt_strategy --algo neural</span>
 
-  <span style="color:#3f3f46">┌──────────────────────┐</span>  <span style="color:#71717a">embed(msg)→[0.82,0.14,..,0.61]</span>  <span style="color:#f97316">┌──────────────────────┐</span>
-  <span style="color:#3f3f46">│</span>                      <span style="color:#3f3f46">│</span>  <span style="color:#f97316">──── get_intuition(emb) ────────►</span> <span style="color:#f97316">│</span>                      <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>   agent swarm        <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   <span style="color:#fb923c">BanditDB</span>            <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>   N agents           <span style="color:#3f3f46">│</span>  <span style="color:#e4e4e7">◄─── "chain_of_thought" ─────────</span> <span style="color:#f97316">│</span>   prompt_strategy    <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>   one shared model   <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   NeuralLinUCB       <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">│</span>                      <span style="color:#3f3f46">│</span>                                  <span style="color:#f97316">│</span>   MLP 128→64→32→arm  <span style="color:#f97316">│</span>
-  <span style="color:#3f3f46">└──────────┬───────────┘</span>                                  <span style="color:#f97316">└──────────────────────┘</span>
-             <span style="color:#3f3f46">│</span>  execute  ·  score  ·  <span style="color:#4ade80">reward: 0.84  ✓</span>               <span style="color:#3f3f46">▲</span>
-             <span style="color:#3f3f46">│</span>                                                      <span style="color:#3f3f46">│</span>
-             <span style="color:#3f3f46">└──────────────  record_outcome(iid, 0.84)  ────────────┘</span>
+  <span style="color:#a1a1aa">┌──────────────────────┐</span>                          <span style="color:#f97316">┌──────────────────────┐</span>
+  <span style="color:#a1a1aa">│</span>                      <span style="color:#a1a1aa">│</span><span style="color:#f97316">──get_intuition(ctx)─────►</span><span style="color:#f97316">│</span>                      <span style="color:#f97316">│</span>
+  <span style="color:#a1a1aa">│</span>   <span style="color:#e4e4e7">agent swarm        </span><span style="color:#a1a1aa">│</span>  <span style="color:#ffffff">[0.82, 0.14, .., 0.61]</span>  <span style="color:#f97316">│</span>   <span style="color:#fb923c">BanditDB           </span><span style="color:#f97316">│</span>
+  <span style="color:#a1a1aa">│</span>   <span style="color:#e4e4e7">N agents           </span><span style="color:#a1a1aa">│</span><span style="color:#ffffff">◄─────"chain_of_thought"──</span><span style="color:#f97316">│</span>   <span style="color:#ffffff">prompt_strategy    </span><span style="color:#f97316">│</span>
+  <span style="color:#a1a1aa">│</span>   <span style="color:#e4e4e7">one shared model   </span><span style="color:#a1a1aa">│</span>                          <span style="color:#f97316">│</span>   <span style="color:#ffffff">NeuralLinUCB       </span><span style="color:#f97316">│</span>
+  <span style="color:#a1a1aa">│</span>                      <span style="color:#a1a1aa">│</span>                          <span style="color:#f97316">│</span>   <span style="color:#ffffff">MLP 128→64→32→arm  </span><span style="color:#f97316">│</span>
+  <span style="color:#a1a1aa">└──────────┬───────────┘</span>                          <span style="color:#f97316">└──────────────────────┘</span>
+             <span style="color:#a1a1aa">│</span>  execute  ·  score  ·  <span style="color:#4ade80">reward: 0.84  ✓</span>                      <span style="color:#f97316">▲</span>
+             <span style="color:#a1a1aa">│</span>                                                             <span style="color:#f97316">│</span>
+             <span style="color:#a1a1aa">└────────────</span> <span style="color:#ffffff">record_outcome(iid, 0.84)</span> <span style="color:#f97316">──────────────────────┘</span>
 
-  <span style="color:#27272a">every reward retrains the MLP  ·  better embeddings → sharper decisions</span></pre>
+  <span style="color:#71717a">every reward retrains the MLP  ·  better embeddings → sharper decisions</span></pre>
       </div>
 
       <!-- MCP install + tools -->
@@ -608,7 +622,7 @@ Fitting causal forests (one per arm) ...
       <div class="grid sm:grid-cols-2 gap-5">
 
         <!-- 1: Sleep — curl only, beginner -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/05_sleep_improvement.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/05_sleep_improvement/05_sleep_improvement.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-orange-500/40 hover:border-orange-500 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">
@@ -633,7 +647,7 @@ Fitting causal forests (one per arm) ...
         </a>
 
         <!-- 2: E-Commerce — Python SDK, 3 features -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/03_ecommerce_upsell_optimization.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/03_ecommerce_upsell_optimization/03_ecommerce_upsell_optimization.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">
@@ -658,7 +672,7 @@ Fitting causal forests (one per arm) ...
         </a>
 
         <!-- 3: Law Firm Client Intake — multi-valued reward, delayed outcome -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/06_law_firm_client_intake.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/06_law_firm_client_intake/06_law_firm_client_intake.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">
@@ -683,7 +697,7 @@ Fitting causal forests (one per arm) ...
         </a>
 
         <!-- 4: Dynamic Pricing — temporal bandit, market context -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/01_dynamic_pricing_sell_through.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/01_dynamic_pricing_sell_through/01_dynamic_pricing_sell_through.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">
@@ -708,7 +722,7 @@ Fitting causal forests (one per arm) ...
         </a>
 
         <!-- 5: Prompt Optimisation — LLM evals in production -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/07_prompt_optimisation_llm_evals.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/07_prompt_optimisation_llm_evals/07_prompt_optimisation_llm_evals.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">
@@ -733,7 +747,7 @@ Fitting causal forests (one per arm) ...
         </a>
 
         <!-- 6: Clinical Trials — advanced domain -->
-        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/04_adaptive_clinical_trials.md"
+        <a href="https://github.com/simeonlukov/banditdb/blob/main/examples/04_adaptive_clinical_trials/04_adaptive_clinical_trials.md"
            target="_blank" rel="noopener"
            class="group bg-zinc-950 border border-zinc-800 hover:border-zinc-600 rounded-xl p-7 flex flex-col gap-5 transition-colors">
           <div class="flex items-start justify-between gap-3">

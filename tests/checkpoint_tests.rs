@@ -1,6 +1,7 @@
 use banditdb::engine::WalMessage;
 use banditdb::state::{Algorithm, CheckpointData};
 use banditdb::BanditDB;
+use std::sync::atomic::Ordering;
 
 /// Test 4.1 — Full Checkpoint / WAL-Rotation / Meta / Recovery Cycle
 ///
@@ -266,6 +267,97 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     assert!(
         pred_post.is_ok(),
         "predict must work on post_ckpt campaign after recovery"
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+/// Test 4.2 — prediction_count survives WAL-tail replay (regression).
+///
+/// Guards against the counter bug where a restart reset prediction_count to the
+/// checkpoint value because apply_event_to_memory's Predicted branch did not
+/// re-increment the counter during replay. With no checkpoint written, every
+/// prediction lives in the WAL tail and is replayed from offset 0 — so the
+/// post-recovery count must equal the number of predictions made, not 0.
+///
+/// Also asserts that UN-rewarded predictions are counted (prediction_count
+/// tracks predictions, not rewards) and that the counter feeds correctly off a
+/// pure-tail replay (the path the live predict() counter never touches).
+#[tokio::test]
+async fn test_4_2_prediction_count_survives_wal_replay() {
+    let data_dir = "/tmp/banditdb_predcount_recovery_test";
+    let wal_path = format!("{}/bandit_wal.jsonl", data_dir);
+
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    // Helper: total prediction_count across all arms of a campaign.
+    fn total_predictions(db: &BanditDB, campaign: &str) -> u64 {
+        let campaigns = db.campaigns.read();
+        let c = campaigns.get(campaign).unwrap();
+        let arms = c.arms.read();
+        arms.values().map(|s| s.prediction_count.load(Ordering::Relaxed)).sum()
+    }
+
+    // ── Phase 1 — predict N times; reward only a subset ───────────────────────
+    let db = BanditDB::new(&wal_path, data_dir);
+    let _ = db.add_campaign(
+        "routing",
+        vec!["fast".to_string(), "cheap".to_string()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    );
+
+    const N: usize = 25;
+    for i in 0..N {
+        let angle = i as f64 * 0.2;
+        let ctx = vec![angle.sin(), angle.cos()];
+        let (_, iid) = db.predict("routing", ctx).expect("predict must succeed");
+        // Reward only every other prediction — the counter must still see all N.
+        if i % 2 == 0 {
+            let _ = db.reward(&iid, 1.0);
+        }
+    }
+
+    // Sanity: the live path counted every prediction before any restart.
+    assert_eq!(
+        total_predictions(&db, "routing"),
+        N as u64,
+        "live predict() path must count all {N} predictions"
+    );
+
+    // Flush WAL to disk via the barrier WITHOUT writing a checkpoint, so every
+    // Predicted event stays in the WAL tail and recovery replays from offset 0.
+    let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
+    db.event_tx.send(WalMessage::Checkpoint { reply: ftx }).await.unwrap();
+    let wal_size = frx.await.unwrap();
+    assert!(wal_size > 0, "WAL must hold the predictions before restart");
+
+    // No checkpoint.json must exist — this forces a pure WAL-tail replay.
+    assert!(
+        !std::path::Path::new(&format!("{}/checkpoint.json", data_dir)).exists(),
+        "test invariant: no checkpoint must be written, so replay starts at offset 0"
+    );
+
+    // ── Phase 2 — restart and replay ─────────────────────────────────────────
+    drop(db);
+    let db2 = BanditDB::new(&wal_path, data_dir);
+
+    assert!(
+        db2.campaigns.read().contains_key("routing"),
+        "routing campaign must be replayed from the WAL"
+    );
+
+    // The regression assertion: before the fix this was 0 (counter not restored
+    // during replay); after the fix it must equal the N predictions made.
+    assert_eq!(
+        total_predictions(&db2, "routing"),
+        N as u64,
+        "prediction_count must survive WAL-tail replay (regression: was reset to 0)"
     );
 
     // Cleanup
