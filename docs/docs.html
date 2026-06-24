@@ -734,6 +734,10 @@ cp /data/bandit_wal.jsonl /backup/wal-$(date +%s).jsonl</code></pre>
           <p><code>likely_cause</code> and <code>suggested_action</code> are only present when <code>entropy_status</code> is <code>warning</code> or <code>critical</code> — they are omitted entirely when the campaign is healthy.</p>
         </div>
 
+        <div class="callout">
+          <p><strong>Reporting thresholds.</strong> In the <code>/campaign/{id}/report</code> response, per-arm <code>mean_reward</code>, <code>reward_lower_ci</code>, and <code>reward_upper_ci</code> are <code>null</code> until that arm has at least <strong>10 rewards</strong> — below that the estimate is too noisy to report. <code>leading_arm</code> needs ≥10 rewards on the top arm, and <code>converged</code> stays <code>null</code> until the top two arms each have <strong>30 rewards</strong>. A <code>null</code> in these fields means "not enough data yet", not an error. (The diagnostics endpoint's <code>avg_reward</code> above is ungated and shows from the first reward.)</p>
+        </div>
+
         <h3>Operational Recipes</h3>
         <p>When an alert fires, the first step is always to look at the diagnostics: per-arm <code>predictions</code>, <code>rewards</code>, <code>avg_reward</code>, <code>converged</code>, and <code>entropy_trend</code> together identify which of five scenarios is occurring.</p>
 

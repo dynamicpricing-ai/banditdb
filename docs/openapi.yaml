@@ -293,6 +293,11 @@ paths:
         - `false` → leading arm leads but CIs still overlap
         - `null`  → not enough data (< 30 rewards per arm)
 
+        Per-arm `mean_reward`, `reward_lower_ci`, and `reward_upper_ci` are `null`
+        until that arm has received **at least 10 rewards** — below the threshold the
+        estimate is too noisy to report. `leading_arm` likewise requires ≥10 rewards
+        on the top arm. A `null` here means "not enough data yet", not an error.
+
         Validate with `causal_analysis()` (Python SDK): if `arm.traffic_share` matches
         the causal assignment percentages, the bandit has converged to the correct structure.
       parameters:
@@ -308,6 +313,7 @@ paths:
                   campaign_id:          { type: string }
                   archived:             { type: boolean }
                   algorithm:            { $ref: "#/components/schemas/Algorithm" }
+                  alpha:                { type: number, description: "Exploration coefficient set at campaign creation" }
                   total_predictions:    { type: integer }
                   total_rewards:        { type: integer }
                   overall_reward_rate:  { type: number, nullable: true }
@@ -319,9 +325,9 @@ paths:
                         traffic_share:   { type: number, description: "Fraction of predictions served to this arm (0–1)" }
                         predictions:     { type: integer }
                         rewards:         { type: integer }
-                        mean_reward:     { type: number, nullable: true }
-                        reward_lower_ci: { type: number, nullable: true, description: "95% CI lower bound" }
-                        reward_upper_ci: { type: number, nullable: true, description: "95% CI upper bound" }
+                        mean_reward:     { type: number, nullable: true, description: "Observed mean reward. null until the arm has ≥10 rewards." }
+                        reward_lower_ci: { type: number, nullable: true, description: "95% CI lower bound. null until ≥10 rewards." }
+                        reward_upper_ci: { type: number, nullable: true, description: "95% CI upper bound. null until ≥10 rewards." }
                   leading_arm:     { type: string, nullable: true }
                   converged:       { type: boolean, nullable: true, description: "true=done, false=keep going, null=insufficient data" }
                   challenger_traffic_pct: { type: number, nullable: true }
