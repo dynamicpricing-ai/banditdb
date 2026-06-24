@@ -363,3 +363,71 @@ async fn test_4_2_prediction_count_survives_wal_replay() {
     // Cleanup
     let _ = std::fs::remove_dir_all(data_dir);
 }
+
+/// Test 4.3 — prediction_count is not double-counted across checkpoint re-emit.
+///
+/// At checkpoint, in-flight (un-rewarded) predictions are re-emitted into the WAL
+/// tail so their delayed reward can still match after rotation. Those predictions
+/// were already counted live and are captured in the checkpoint snapshot. Without
+/// the is_reemit flag, WAL replay would fetch_add them again → the counter ends up
+/// higher than the true number of predictions. This asserts it stays exact.
+#[tokio::test]
+async fn test_4_3_reemit_does_not_double_count() {
+    let data_dir = "/tmp/banditdb_predcount_reemit_test";
+    let wal_path = format!("{}/bandit_wal.jsonl", data_dir);
+
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    fn total_predictions(db: &BanditDB, campaign: &str) -> u64 {
+        let campaigns = db.campaigns.read();
+        let c = campaigns.get(campaign).unwrap();
+        let arms = c.arms.read();
+        arms.values().map(|s| s.prediction_count.load(Ordering::Relaxed)).sum()
+    }
+
+    let db = BanditDB::new(&wal_path, data_dir);
+    let _ = db.add_campaign(
+        "routing",
+        vec!["fast".to_string(), "cheap".to_string()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    );
+
+    // N predictions; reward only the first few so the rest stay IN-FLIGHT and get
+    // re-emitted at checkpoint. Every prediction is counted exactly once (live).
+    const N: usize = 20;
+    const REWARDED: usize = 5;
+    for i in 0..N {
+        let angle = i as f64 * 0.2;
+        let ctx = vec![angle.sin(), angle.cos()];
+        let (_, iid) = db.predict("routing", ctx).expect("predict must succeed");
+        if i < REWARDED {
+            let _ = db.reward(&iid, 1.0);
+        }
+    }
+    assert_eq!(total_predictions(&db, "routing"), N as u64, "live count must be N");
+
+    // Checkpoint: re-emits the N-REWARDED in-flight predictions into the WAL tail,
+    // snapshots prediction_count = N into checkpoint.json, then rotates the WAL.
+    db.checkpoint().await.unwrap();
+
+    // Restart: checkpoint loads N; replaying the re-emitted Predicted events must
+    // be skipped (is_reemit), so the count stays N rather than N + in-flight.
+    drop(db);
+    let db2 = BanditDB::new(&wal_path, data_dir);
+
+    assert_eq!(
+        total_predictions(&db2, "routing"),
+        N as u64,
+        "re-emitted in-flight predictions must not be double-counted on replay \
+         (regression: was N + {} in-flight)",
+        N - REWARDED
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(data_dir);
+}

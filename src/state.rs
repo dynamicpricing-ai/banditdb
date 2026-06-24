@@ -429,6 +429,13 @@ pub enum DbEvent {
         /// Absent in WAL records written before propensity logging — deserialises to None.
         #[serde(default = "default_none_map")]
         arm_propensities: Option<HashMap<String, f64>>,
+        /// True when this record was re-emitted at checkpoint to keep an
+        /// in-flight prediction matchable after WAL rotation. Such predictions
+        /// were already counted live and captured in the checkpoint snapshot, so
+        /// WAL replay must NOT re-increment prediction_count for them. Old WAL
+        /// records (written before this field) deserialise to false.
+        #[serde(default)]
+        is_reemit: bool,
     },
     Rewarded {
         interaction_id: String,

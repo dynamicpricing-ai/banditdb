@@ -630,7 +630,7 @@ impl BanditDB {
 
             for event in read_wal_slice(&wal_path_clone, 0, wal_offset, wal_fmt) {
                 match event {
-                    DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
+                    DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
                         predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
                     }
                     DbEvent::Rewarded { interaction_id, reward, timestamp_secs } => {
@@ -684,6 +684,8 @@ impl BanditDB {
                     context:          record.context.to_vec(),
                     timestamp_secs:   record.timestamp_secs,
                     arm_propensities: record.arm_propensities.clone(),
+                    // Re-emitted for reward matching; already counted + in checkpoint.
+                    is_reemit:        true,
                 };
                 let _ = self.event_tx.send(WalMessage::Event(Arc::new(event))).await;
                 reemit_count += 1;
@@ -882,10 +884,9 @@ impl BanditDB {
                     Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone(), *decay_half_life_hours),
                 );
             }
-            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities } => {
+            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, is_reemit } => {
                 // WAL replay path: insert into the interactions cache so delayed rewards
-                // can match. Prediction counter is NOT incremented here — only the live
-                // predict() path increments it (inside the scoring block, no second lock).
+                // can match.
                 self.interactions.insert(
                     interaction_id.clone(),
                     InteractionRecord {
@@ -896,16 +897,20 @@ impl BanditDB {
                         timestamp_secs: *timestamp_secs,
                     },
                 );
-                // Restore the prediction counter on replay. Live predict() increments
-                // this inside the scoring lock (see prediction_count.fetch_add in predict);
-                // replay must mirror it so the counter survives restart instead of
-                // resetting to the checkpoint value. fetch_add works under a read lock
-                // since prediction_count is atomic. Base arms only — the WAL Predicted
-                // event does not record whether a Progressive challenger draw was used,
-                // so the base/challenger split is not reconstructable here.
-                if let Some(campaign) = self.campaigns.read().get(campaign_id) {
-                    if let Some(arm_state) = campaign.arms.read().get(arm_id.as_str()) {
-                        arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
+                // Restore the prediction counter on replay so it survives restart
+                // instead of resetting to the checkpoint value. fetch_add works under a
+                // read lock since prediction_count is atomic. Base arms only — the WAL
+                // Predicted event does not record whether a Progressive challenger draw
+                // was used, so the base/challenger split is not reconstructable here.
+                //
+                // SKIP re-emitted predictions: they were already counted live and are
+                // captured in the checkpoint snapshot, so counting them here would
+                // double-count after a checkpoint+rotation cycle.
+                if !is_reemit {
+                    if let Some(campaign) = self.campaigns.read().get(campaign_id) {
+                        if let Some(arm_state) = campaign.arms.read().get(arm_id.as_str()) {
+                            arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -1110,6 +1115,7 @@ impl BanditDB {
             context:          context.clone(),
             timestamp_secs:   now,
             arm_propensities: arm_propensities.clone(),
+            is_reemit:        false,
         });
 
         // WAL before memory. See BanditDB consistency-model doc comment.
@@ -1149,6 +1155,7 @@ impl BanditDB {
             context:          context.clone(),
             timestamp_secs:   now,
             arm_propensities: None, // Historical data doesn't usually have propensities
+            is_reemit:        false,
         });
         self.wal_try_send(Arc::clone(&pred_event))?;
         self.apply_event_to_memory(&pred_event);
