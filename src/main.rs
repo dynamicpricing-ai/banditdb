@@ -856,6 +856,13 @@ async fn handle_openapi() -> (HeaderMap, &'static str) {
 
 #[tokio::main]
 async fn main() {
+    // Print version and exit before booting the runtime, so `banditdb --version`
+    // works as an ops check instead of falling through to a full server start.
+    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V" || a == "version") {
+        println!("banditdb {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into());
     let use_json = std::env::var("LOG_FORMAT").map(|v| v == "json").unwrap_or(false);
