@@ -136,6 +136,8 @@ banditdb
 curl http://localhost:8080/health   # {"status":"ok"}
 ```
 
+> **Windows:** the `.exe` excludes the neural algorithms (NeuralLinUCB / NeuralThompsonSampling). Use Linux, macOS, or Docker for neural.
+
 **Docker:**
 ```bash
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
