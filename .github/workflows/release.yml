@@ -72,19 +72,28 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             archive: tar.gz
+            features: neural
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             archive: tar.gz
             use_cross: true
+            features: neural
           - target: x86_64-apple-darwin
             runner: macos-latest
             archive: tar.gz
+            features: neural
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive: tar.gz
+            features: neural
+          # Windows builds without the neural feature: candle-core unconditionally
+          # pulls tokenizers[onig] → onig_sys (a C library) which fails under MSVC.
+          # The Windows binary keeps LinUCB, Thompson, and Progressive (linear
+          # challenger); neural challengers remain on Linux/macOS + Docker.
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             archive: zip
+            features: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -106,11 +115,11 @@ jobs:
 
       - name: Build (native)
         if: matrix.use_cross != true
-        run: cargo build --release --features neural --target ${{ matrix.target }}
+        run: cargo build --release --features "${{ matrix.features }}" --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.use_cross == true
-        run: cross build --release --features neural --target ${{ matrix.target }}
+        run: cross build --release --features "${{ matrix.features }}" --target ${{ matrix.target }}
 
       # ── Package ──────────────────────────────────────────────────────────────
       - name: Package (Unix)
