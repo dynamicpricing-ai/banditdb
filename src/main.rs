@@ -1005,7 +1005,10 @@ async fn main() {
 
     let port     = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let addr     = format!("0.0.0.0:{port}");
-    let listener = TcpListener::bind(&addr).await.unwrap();
+    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        tracing::error!(addr = %addr, error = %e, "failed to bind (is another banditdb running?)");
+        std::process::exit(1);
+    });
     tracing::info!(addr = %addr, "BanditDB listening");
 
     let db_shutdown = Arc::clone(&db);

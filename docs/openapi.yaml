@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: BanditDB
-  version: "0.1.3"
+  version: "1.0.4"
   description: |
     Ultra-fast Contextual Bandit Database with LinUCB, Thompson Sampling, NeuralLinUCB,
     and an Autonomous Algorithm Tournament (Progressive). WAL-backed durability with
@@ -35,6 +35,11 @@ components:
           required: [neural_lin_ucb]
           properties:
             neural_lin_ucb:
+              $ref: "#/components/schemas/NeuralLinUCBConfig"
+        - type: object
+          required: [neural_thompson_sampling]
+          properties:
+            neural_thompson_sampling:
               $ref: "#/components/schemas/NeuralLinUCBConfig"
         - type: object
           required: [progressive]

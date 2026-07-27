@@ -136,11 +136,22 @@ banditdb
 curl http://localhost:8080/health   # {"status":"ok"}
 ```
 
+> **Requires glibc >= 2.39** (Ubuntu 24.04+ or equivalent). On older distros (e.g. Ubuntu 22.04, glibc 2.35) the binary will fail to run — use Docker or Build from Source below instead.
+
 > **Windows:** the `.exe` excludes the neural algorithms (NeuralLinUCB / NeuralThompsonSampling). Use Linux, macOS, or Docker for neural.
 
 **Docker:**
 ```bash
 docker run -d -p 8080:8080 simeonlukov/banditdb:latest
+```
+
+**Build from Source** (bypasses the glibc requirement — builds against your system's own libc):
+```bash
+git clone https://github.com/dynamicpricing-ai/banditdb
+cd banditdb
+cargo build --release                        # standard build
+# cargo build --release --features neural   # with NeuralLinUCB / NeuralThompsonSampling
+./target/release/banditdb
 ```
 
 **Production (with persistence and RBAC):**
