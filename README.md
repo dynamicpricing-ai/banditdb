@@ -175,6 +175,10 @@ services:
       # - BANDITDB_MAX_WAL_SIZE_MB=50          # auto-checkpoint when WAL exceeds N MB
       # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
       # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
+      # --- neural builds only ---
+      # - BANDITDB_RETRAIN_POLL_SECS=2         # background MLP retrain cadence; 0 = checkpoint-only
+      # - BANDITDB_NEURAL_BUFFER_CAP=50000     # replay buffer retention per campaign
+      # - BANDITDB_NEURAL_BATCH_SIZE=4000      # minibatch drawn per retrain call
 volumes:
   banditdb_data:
 ```

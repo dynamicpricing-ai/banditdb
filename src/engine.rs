@@ -756,74 +756,25 @@ impl BanditDB {
             let campaigns = self.campaigns.read();
             for (campaign_id, campaign) in campaigns.iter() {
                 let Some(neural_mutex) = &campaign.neural else { continue };
-                let mut neural = neural_mutex.lock();
 
-                let needs_retrain  = neural.should_retrain();
+                // Scope the probe so no neural lock is held across retrain_campaign_locked,
+                // which acquires it itself.
+                let needs_retrain  = neural_mutex.lock().should_retrain();
                 let is_progressive = matches!(&campaign.algorithm, Algorithm::Progressive(_));
 
                 // Skip the whole block if neither a retrain nor a tournament evaluation is due.
                 if !needs_retrain && !is_progressive { continue }
 
-                // 7a. Algorithm 2: retrain the MLP and warm-start arm matrices.
-                //
-                // Lock order fix: predict() holds arms.read() then acquires neural.lock()
-                // via embed(). Holding neural.lock() while calling arms.write() inverts
-                // that order → deadlock. Fix: retrain + save under neural lock, drop it,
-                // then apply new arm states, then re-acquire neural lock for tournament.
+                // 7a. Algorithm 2. Usually a no-op now that the background retrain
+                //     worker keeps up with arriving rewards; retained so checkpoints
+                //     still train when the worker is disabled.
                 if needs_retrain {
-                    let arms_snapshot: HashMap<String, ArmState> = {
-                        let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
-                        target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                    };
+                    Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "checkpoint");
+                }
 
-                    let new_arm_states = match neural.retrain(&arms_snapshot) {
-                        Err(e) => { tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: neural retrain failed"); None }
-                        Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
-                    };
-
-                    let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
-                    if let Err(e) = neural.save(&weights_path) {
-                        tracing::warn!(campaign = %campaign_id, error = %e, "checkpoint: failed to save neural weights");
-                    }
-                    {
-                        let losses = &neural.last_retrain_losses;
-                        let initial = losses.first().copied().unwrap_or(0.0);
-                        let final_l = losses.last().copied().unwrap_or(0.0);
-                        let improv  = if initial > 0.0 { (initial - final_l) / initial * 100.0 } else { 0.0 };
-                        tracing::info!(
-                            campaign        = %campaign_id,
-                            steps           = losses.len(),
-                            initial_loss    = format!("{initial:.4}"),
-                            final_loss      = format!("{final_l:.4}"),
-                            improvement_pct = format!("{improv:.1}"),
-                            "checkpoint: neural retrain complete"
-                        );
-                    }
-
-                    // Drop neural lock before arms.write() to preserve lock order.
-                    drop(neural);
-
-                    if let Some(new_arm_states) = new_arm_states {
-                        let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
-                        let mut arms_write = target_arms.write();
-                        for (arm_id, new_state) in new_arm_states {
-                            arms_write.insert(arm_id, new_state);
-                        }
-                    }
-
-                    // Publish the retrained weights. Deliberately after the arms
-                    // guard above has dropped — see refresh_neural_weights lock order.
-                    campaign.refresh_neural_weights(campaign_id);
-
-                    // 7b. Tournament — re-acquire neural lock (no arms lock held).
-                    if is_progressive {
-                        let neural = neural_mutex.lock();
-                        if let Algorithm::Progressive(cfg) = &campaign.algorithm {
-                            run_tournament(campaign_id, campaign, &neural, cfg);
-                        }
-                    }
-                } else {
-                    // 7b. No retrain due — tournament evaluation only (neural lock still held).
+                // 7b. Tournament — neural lock re-acquired with no arms lock held.
+                if is_progressive {
+                    let neural = neural_mutex.lock();
                     if let Algorithm::Progressive(cfg) = &campaign.algorithm {
                         run_tournament(campaign_id, campaign, &neural, cfg);
                     }
@@ -1526,6 +1477,90 @@ impl BanditDB {
             challenger_traffic_pct,
             tournament_win_streak,
         })
+    }
+
+    /// Run Algorithm 2 for one campaign: retrain the MLP on its replay buffer, then
+    /// re-accumulate arm matrices in the new embedding space (warm start).
+    ///
+    /// Lock order: the neural lock is taken here and released before `arms.write()`.
+    /// predict() takes arms.read() and then neural.lock() via embed(), so holding the
+    /// neural lock across an arms.write() would invert that order and deadlock.
+    #[cfg(feature = "neural")]
+    fn retrain_campaign_locked(campaign_id: &str, campaign: &Campaign, neural_dir: &str, origin: &str) {
+        let Some(neural_mutex) = &campaign.neural else { return };
+        let mut neural = neural_mutex.lock();
+
+        let arms_snapshot: HashMap<String, ArmState> = {
+            let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+            target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+
+        let new_arm_states = match neural.retrain(&arms_snapshot) {
+            Err(e) => { tracing::error!(campaign = %campaign_id, origin, error = %e, "neural retrain failed"); None }
+            Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
+        };
+
+        let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
+        if let Err(e) = neural.save(&weights_path) {
+            tracing::warn!(campaign = %campaign_id, error = %e, "neural: failed to save weights");
+        }
+        {
+            let losses = &neural.last_retrain_losses;
+            let initial = losses.first().copied().unwrap_or(0.0);
+            let final_l = losses.last().copied().unwrap_or(0.0);
+            let improv  = if initial > 0.0 { (initial - final_l) / initial * 100.0 } else { 0.0 };
+            tracing::info!(
+                campaign        = %campaign_id,
+                origin,
+                steps           = losses.len(),
+                initial_loss    = format!("{initial:.4}"),
+                final_loss      = format!("{final_l:.4}"),
+                improvement_pct = format!("{improv:.1}"),
+                "neural retrain complete"
+            );
+        }
+
+        // Drop neural lock before arms.write() to preserve lock order.
+        drop(neural);
+
+        if let Some(new_arm_states) = new_arm_states {
+            let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+            let mut arms_write = target_arms.write();
+            for (arm_id, new_state) in new_arm_states {
+                arms_write.insert(arm_id, new_state);
+            }
+        }
+
+        // Publish the retrained weights to the prediction path. Both callers — the
+        // background worker and checkpoint() — depend on this: without it the network
+        // would train while predictions kept serving the previous snapshot forever.
+        // Placed after the arms guard above has dropped, per the lock order documented
+        // on refresh_neural_weights.
+        campaign.refresh_neural_weights(campaign_id);
+    }
+
+    /// Campaign IDs whose replay buffer has accumulated `retrain_every` rewards.
+    /// Deliberately a short read lock: the background worker uses this so it never
+    /// holds the campaign map across a multi-second retrain.
+    #[cfg(feature = "neural")]
+    pub fn campaigns_due_for_retrain(&self) -> Vec<String> {
+        self.campaigns.read().iter()
+            .filter(|(_, c)| c.neural.as_ref().is_some_and(|n| n.lock().should_retrain()))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Retrain a single campaign by id. Returns false if it no longer exists or has
+    /// no MLP. Holds the campaign read lock only for the duration of this call.
+    #[cfg(feature = "neural")]
+    pub fn retrain_campaign(&self, campaign_id: &str) -> bool {
+        let neural_dir = self.neural_dir();
+        if fs::create_dir_all(&neural_dir).is_err() { return false }
+        let campaigns = self.campaigns.read();
+        let Some(campaign) = campaigns.get(campaign_id) else { return false };
+        if campaign.neural.is_none() { return false }
+        Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "worker");
+        true
     }
 
     pub fn neural_dir(&self) -> String { format!("{}/neural", self.data_dir) }

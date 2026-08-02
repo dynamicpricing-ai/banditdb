@@ -57,9 +57,25 @@ fn try_metal() -> Device {
 }
 
 // Replay buffer cap. Older entries are evicted as new rewards arrive.
-// 5K keeps recent signal while bounding retrain tensor size (5K × context_dim).
-// 200K caused retrain to slow dramatically after 20K+ accumulated rewards.
-const BUFFER_CAP: usize = 5_000;
+//
+// This used to be 5K because `retrain` stacked the *entire* buffer into one
+// batch, so per-step cost grew with total accumulated rewards — a 200K cap made
+// retraining crawl past ~20K rewards. Retrain now draws a minibatch of
+// `batch_size` instead, which decouples per-step cost from retention, so the
+// cap can hold far more history. Override with BANDITDB_NEURAL_BUFFER_CAP.
+const DEFAULT_BUFFER_CAP: usize = 50_000;
+
+// Minibatch drawn per retrain call. Tensors are still built once per call and
+// reused across all gradient steps, so this bounds both the host→device
+// transfer and the per-step cost. Override with BANDITDB_NEURAL_BATCH_SIZE.
+const DEFAULT_BATCH_SIZE: usize = 4_000;
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key).ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
 
 /// Immutable MLP snapshot read by the prediction hot path.
 ///
@@ -127,11 +143,15 @@ pub struct NeuralLinUCBState {
     lambda:        f64,
     pub reward_count:  usize,
     pub buffer:    VecDeque<(Vec<f64>, String, f64, f64)>, // context, arm_id, reward, propensity
+    buffer_cap:    usize,
+    batch_size:    usize,
     pub last_retrain_losses: Vec<f32>,
 }
 
 impl NeuralLinUCBState {
     pub fn new(cfg: &NeuralLinUCBConfig) -> candle_core::Result<Self> {
+        let buffer_cap = env_usize("BANDITDB_NEURAL_BUFFER_CAP", DEFAULT_BUFFER_CAP);
+        let batch_size = env_usize("BANDITDB_NEURAL_BATCH_SIZE", DEFAULT_BATCH_SIZE);
         let device = select_device();
         tracing::info!(device = ?device, "neural: device selected");
         let varmap = VarMap::new();
@@ -163,7 +183,11 @@ impl NeuralLinUCBState {
             learning_rate: cfg.learning_rate,
             lambda:        cfg.lambda,
             reward_count:        0,
-            buffer:              VecDeque::with_capacity(BUFFER_CAP),
+            // Preallocation is deliberately capped: buffer_cap can be very large,
+            // and entries arrive one reward at a time.
+            buffer:              VecDeque::with_capacity(buffer_cap.min(8_192)),
+            buffer_cap,
+            batch_size,
             last_retrain_losses: Vec::new(),
         })
     }
@@ -198,7 +222,7 @@ impl NeuralLinUCBState {
     }
 
     pub fn push(&mut self, context: Vec<f64>, arm_id: String, reward: f64, propensity: f64) {
-        if self.buffer.len() >= BUFFER_CAP {
+        if self.buffer.len() >= self.buffer_cap {
             self.buffer.pop_front();
         }
         self.buffer.push_back((context, arm_id, reward, propensity));
@@ -217,7 +241,21 @@ impl NeuralLinUCBState {
     pub fn retrain(&mut self, arm_states: &HashMap<String, ArmState>) -> candle_core::Result<()> {
         if self.buffer.is_empty() { return Ok(()); }
 
-        let buffer: Vec<_> = self.buffer.iter().cloned().collect();
+        // Draw a minibatch when the buffer is larger than batch_size. A fresh draw
+        // per call gives stochasticity across retrains while keeping the "build
+        // tensors once, reuse for every gradient step" property below.
+        let buffer: Vec<_> = if self.buffer.len() > self.batch_size {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            self.buffer
+                .iter()
+                .collect::<Vec<_>>()
+                .choose_multiple(&mut rng, self.batch_size)
+                .map(|e| (*e).clone())
+                .collect()
+        } else {
+            self.buffer.iter().cloned().collect()
+        };
         let n = buffer.len();
         let n_params: f64 = self.varmap.all_vars().iter()
             .map(|v| v.as_tensor().elem_count())

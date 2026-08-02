@@ -22,6 +22,27 @@ use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
 // ---------------------------------------------------------------------------
+// Build identity
+// ---------------------------------------------------------------------------
+
+/// Optional Cargo features this binary was compiled with, reported by
+/// `--version` and `GET /health`. Ops needs this because a plain build and a
+/// `--features neural` build are otherwise indistinguishable at runtime.
+const BUILD_FEATURES: &[&str] = &[
+    #[cfg(feature = "neural")]
+    "neural",
+    #[cfg(feature = "cuda")]
+    "cuda",
+    #[cfg(feature = "metal")]
+    "metal",
+];
+
+fn build_features_str() -> String {
+    if BUILD_FEATURES.is_empty() { "no optional features".to_string() }
+    else { BUILD_FEATURES.join(",") }
+}
+
+// ---------------------------------------------------------------------------
 // RBAC + multi-tenancy
 // ---------------------------------------------------------------------------
 
@@ -366,6 +387,10 @@ struct CampaignEntropyHealth {
 #[derive(Serialize)]
 struct HealthResponse {
     status:    &'static str,
+    version:   &'static str,
+    /// Cargo features this binary was compiled with. Empty means a plain build:
+    /// neural algorithms are unavailable and will be rejected at campaign creation.
+    features:  &'static [&'static str],
     campaigns: HashMap<String, CampaignEntropyHealth>,
 }
 
@@ -452,7 +477,23 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<
     } else {
         (StatusCode::OK, "ok")
     };
-    (http_status, Json(HealthResponse { status: overall, campaigns }))
+    (http_status, Json(HealthResponse {
+        status: overall,
+        version: env!("CARGO_PKG_VERSION"),
+        features: BUILD_FEATURES,
+        campaigns,
+    }))
+}
+
+/// True if `algorithm` — or either side of a Progressive tournament — needs an
+/// MLP embedding, and therefore the `neural` feature.
+#[cfg(not(feature = "neural"))]
+fn needs_neural(algorithm: &Algorithm) -> bool {
+    match algorithm {
+        Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => true,
+        Algorithm::Progressive(cfg) => needs_neural(&cfg.base) || needs_neural(&cfg.challenger),
+        _ => false,
+    }
 }
 
 async fn handle_create_campaign(
@@ -478,6 +519,16 @@ async fn handle_create_campaign(
         if hl <= 0.0 {
             return Err(AppError(StatusCode::BAD_REQUEST, "decay_half_life_hours must be > 0".into()));
         }
+    }
+
+    // A binary built without `--features neural` still deserialises neural
+    // algorithms, but `embed()` degrades to the identity — the campaign would
+    // silently run plain LinUCB under a neural label. Reject instead.
+    #[cfg(not(feature = "neural"))]
+    if needs_neural(&payload.algorithm) {
+        return Err(AppError(StatusCode::BAD_REQUEST,
+            "neural algorithms require a binary built with --features neural; \
+             this build has none (see GET /health `features`)".into()));
     }
 
     let arm_dim = match &payload.algorithm {
@@ -859,7 +910,7 @@ async fn main() {
     // Print version and exit before booting the runtime, so `banditdb --version`
     // works as an ops check instead of falling through to a full server start.
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V" || a == "version") {
-        println!("banditdb {}", env!("CARGO_PKG_VERSION"));
+        println!("banditdb {} ({})", env!("CARGO_PKG_VERSION"), build_features_str());
         return;
     }
 
@@ -871,9 +922,27 @@ async fn main() {
 
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string());
     let wal_path = format!("{data_dir}/bandit_wal.jsonl");
-    tracing::info!(data_dir = %data_dir, "BanditDB starting");
+    tracing::info!(data_dir = %data_dir, version = env!("CARGO_PKG_VERSION"),
+        features = %build_features_str(), "BanditDB starting");
 
     let db       = Arc::new(BanditDB::new(&wal_path, &data_dir));
+
+    // Creation of neural campaigns is rejected on a plain build, but recovery
+    // can still restore ones written by a neural build — those run as plain
+    // LinUCB, so say so loudly instead of degrading in silence.
+    #[cfg(not(feature = "neural"))]
+    {
+        let degraded: Vec<String> = db.campaigns.read().iter()
+            .filter(|(_, c)| needs_neural(&c.algorithm))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !degraded.is_empty() {
+            tracing::warn!(campaigns = ?degraded,
+                "recovered neural campaigns on a build without --features neural — \
+                 embeddings fall back to identity (plain LinUCB)");
+        }
+    }
+
     let registry = Arc::new(KeyRegistry::from_env());
 
     if registry.is_open() {
@@ -928,6 +997,38 @@ async fn main() {
             }
             tracing::info!("auto-checkpoint task stopped");
         });
+    }
+
+    // Background MLP retraining, decoupled from checkpoint(). Training cadence now
+    // follows reward arrival rather than a durability operation, so raising it no
+    // longer drags Parquet export and WAL rotation along. Set
+    // BANDITDB_RETRAIN_POLL_SECS=0 to disable and fall back to checkpoint-only
+    // retraining.
+    #[cfg(feature = "neural")]
+    {
+        let poll_secs = std::env::var("BANDITDB_RETRAIN_POLL_SECS")
+            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2);
+        if poll_secs > 0 {
+            let db_rt      = Arc::clone(&db);
+            let mut cancel = cancel_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(poll_secs)) => {}
+                        _ = cancel.changed() => { break; }
+                    }
+                    for cid in db_rt.campaigns_due_for_retrain() {
+                        let db_one = Arc::clone(&db_rt);
+                        // Retrain is CPU-bound — keep it off the async runtime threads.
+                        if let Err(e) = tokio::task::spawn_blocking(move || db_one.retrain_campaign(&cid)).await {
+                            tracing::error!(error = %e, "neural retrain task panicked");
+                        }
+                    }
+                }
+                tracing::info!("neural retrain worker stopped");
+            });
+            tracing::info!(poll_secs, "neural retrain worker started");
+        }
     }
 
     let state = Arc::clone(&app_state);
