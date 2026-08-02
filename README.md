@@ -227,6 +227,27 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 
 Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
 
+### Normalise Your Contexts
+
+**Scale every context vector to unit L2 norm before calling `/predict`.** This is the single highest-impact thing you control from the client side.
+
+LinUCB scores an arm as `θ·x + α·√(xᵀA⁻¹x)`. The exploration term scales with `‖x‖`, and the regret analysis assumes `‖x‖ ≤ 1`. Feed unnormalised or heavy-tailed features and rare high-norm rows produce enormous exploration bonuses that dominate arm selection — the model still converges, just far more slowly, with no error or warning to tell you.
+
+Measured on the UCI shuttle benchmark, identical code and identical `alpha`:
+
+| Context scaling | Cumulative regret (T=10,000) |
+|-----------------|------------------------------|
+| Per-column standardisation | 2,026 |
+| **Unit L2 norm** | **709** |
+
+A 2.9× difference from preprocessing alone. Thompson Sampling is affected the same way, since it samples `θ̃ ~ N(θ, α²A⁻¹)` in the same geometry. Min-max scale each feature into `[0, 1]` first when your features have very different ranges, then L2-normalise the row.
+
+```python
+import numpy as np
+context = np.array(raw_features, dtype=float)
+context /= np.linalg.norm(context) or 1.0   # guard the all-zeros row
+```
+
 ### Convergence Report
 
 `GET /campaign/:id/report` answers "is this campaign done?":
@@ -422,6 +443,29 @@ docker exec <container> rm -f /data/checkpoint.json
 docker compose restart
 python benchmark/movielens/evaluate_improved.py
 ```
+
+### UCI Benchmark Suite
+
+BanditDB is also validated against the UCI benchmark suite from [Neural Thompson Sampling](https://arxiv.org/abs/2010.00827) (Zhang, Zhou, Li & Gu, ICLR 2021), using the standard classification-as-bandit reduction — k classes become k arms, reward 1 for a correct pick. Unlike a logged-feedback replay, this evaluation is exact: no estimation, no discarded events.
+
+Cumulative regret (= total mistakes) at T=10,000, 3 seeds, untuned α=1.0:
+
+| Dataset | Arms | LinUCB | Thompson | NeuralLinUCB | Random |
+|---------|------|--------|----------|--------------|--------|
+| mushroom | 2 | **35** | 208 | 268 | 2,822 |
+| magic | 2 | 2,062 | 2,134 | **2,009** | 5,000 |
+| shuttle | 7 | 709 | 1,102 | **669** | 8,571 |
+| adult | 2 | **1,716** | 2,002 | 1,937 | 5,000 |
+
+On shuttle — the one configuration directly comparable to the paper (same features, arms, and horizon) — BanditDB's LinUCB scores **709 against the published 966.6**, without the exploration-parameter tuning the paper used.
+
+```bash
+python benchmark/uci/convert.py
+python benchmark/uci/evaluate.py --all --rounds 10000 --repeats 3
+python benchmark/uci/analyze.py
+```
+
+Full methodology, dataset descriptions, and the complete paper comparison: [`benchmark/uci/README.md`](benchmark/uci/README.md).
 
 ### Throughput
 
