@@ -275,6 +275,42 @@ impl Campaign {
 
 }
 
+/// Outcome of reading the on-disk checkpoint. Kept distinct from `Option` so a
+/// corrupt file can never be mistaken for an empty data directory.
+///
+/// Public so recovery decisions can be asserted directly in tests — the branch
+/// that matters most (`Corrupt`) terminates the process, which cannot be observed
+/// from inside it.
+#[derive(Debug)]
+pub enum CheckpointLoad {
+    /// No checkpoint on disk — a genuinely fresh data directory.
+    Fresh,
+    Loaded(CheckpointData),
+    /// A checkpoint exists but neither it nor the retained previous generation
+    /// could be read. Carries the failure reason for the operator.
+    Corrupt(String),
+}
+
+/// Write `bytes` to `dest` so the result survives power loss.
+///
+/// `fs::write` + `fs::rename` is atomic with respect to *naming* but not to
+/// durability: both the contents and the rename can still be sitting in the page
+/// cache. Because checkpointing is immediately followed by WAL rotation — which
+/// discards the events the checkpoint subsumes — a crash in that window used to
+/// lose everything. Three barriers close it: fsync the data, rename, then fsync
+/// the directory so the rename itself is durable.
+fn write_file_durable(dir: &str, tmp: &str, dest: &str, bytes: &[u8]) -> std::io::Result<()> {
+    {
+        let mut f = File::create(tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(tmp, dest)?;
+    // fsync the containing directory: without this the rename may not survive.
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
 /// ## Consistency model
 ///
 /// `predict()`, `reward()`, and `add_campaign()` each perform two steps in order:
@@ -462,9 +498,10 @@ impl BanditDB {
                                     tail
                                 };
 
+                                // Durable: the pre-rotation WAL is discarded here, so a
+                                // half-written replacement is unrecoverable.
                                 let tmp = format!("{writer_data_dir}/wal_rotation.tmp");
-                                fs::write(&tmp, &new_content)?;
-                                fs::rename(&tmp, &path)?;
+                                write_file_durable(&writer_data_dir, &tmp, &path, &new_content)?;
                                 let new_file = OpenOptions::new().append(true).open(&path)?;
                                 Ok((new_content.len(), new_file))
                             })();
@@ -554,14 +591,83 @@ impl BanditDB {
         db
     }
 
+    /// Load the checkpoint, preferring the current generation and falling back to
+    /// the retained previous one.
+    ///
+    /// Distinguishes three outcomes that the old `.ok().and_then(..).ok()` chain
+    /// collapsed into one: a genuinely fresh data directory, a readable checkpoint,
+    /// and a corrupt one. Treating corruption as "fresh start" silently discarded
+    /// every campaign — the WAL has already been rotated past them — and the server
+    /// then reported itself healthy while serving an empty database.
+    pub fn load_checkpoint(data_dir: &str) -> CheckpointLoad {
+        let current = format!("{data_dir}/checkpoint.json");
+        let previous = format!("{data_dir}/checkpoint.prev");
+
+        let read = |path: &str| -> Option<Result<CheckpointData, String>> {
+            if !Path::new(path).exists() { return None; }
+            Some(
+                fs::read_to_string(path)
+                    .map_err(|e| format!("read failed: {e}"))
+                    .and_then(|s| serde_json::from_str::<CheckpointData>(&s)
+                        .map_err(|e| format!("parse failed: {e}"))),
+            )
+        };
+
+        match read(&current) {
+            Some(Ok(cp)) => CheckpointLoad::Loaded(cp),
+            Some(Err(current_err)) => match read(&previous) {
+                Some(Ok(cp)) => {
+                    tracing::error!(error = %current_err,
+                        "recovery: checkpoint.json is unreadable — falling back to checkpoint.prev. \
+                         Events written since the previous checkpoint are lost.");
+                    CheckpointLoad::Loaded(cp)
+                }
+                _ => CheckpointLoad::Corrupt(current_err),
+            },
+            // No checkpoint.json. A crash between the two renames can leave only
+            // checkpoint.prev; prefer it over starting empty.
+            None => match read(&previous) {
+                Some(Ok(cp)) => {
+                    tracing::warn!("recovery: checkpoint.json absent — recovering from checkpoint.prev \
+                                    (likely a crash during checkpoint write)");
+                    CheckpointLoad::Loaded(cp)
+                }
+                Some(Err(e)) => CheckpointLoad::Corrupt(e),
+                None => CheckpointLoad::Fresh,
+            },
+        }
+    }
+
     fn recover(&self, wal_path: &str, data_dir: &str) {
         // Phase 1: Load checkpoint if one exists
         let mut wal_start_offset: u64 = 0;
-        let checkpoint_path = format!("{}/checkpoint.json", data_dir);
 
-        match fs::read_to_string(&checkpoint_path).ok()
-            .and_then(|s| serde_json::from_str::<CheckpointData>(&s).ok())
-        {
+        let loaded = match Self::load_checkpoint(data_dir) {
+            CheckpointLoad::Loaded(cp) => Some(cp),
+            CheckpointLoad::Fresh      => None,
+            CheckpointLoad::Corrupt(err) => {
+                // Refusing to start is the safe default: the WAL no longer holds the
+                // events this checkpoint subsumed, so continuing would silently serve
+                // an empty database and then overwrite the evidence at the next
+                // checkpoint. An operator who has confirmed the data is expendable can
+                // override.
+                if std::env::var("BANDITDB_ALLOW_CORRUPT_CHECKPOINT").as_deref() == Ok("true") {
+                    tracing::error!(error = %err,
+                        "recovery: checkpoint is corrupt — starting EMPTY because \
+                         BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true. Prior campaign state is lost.");
+                    None
+                } else {
+                    tracing::error!(error = %err, data_dir,
+                        "recovery: checkpoint is corrupt and no usable previous generation exists. \
+                         Refusing to start — continuing would serve an empty database and discard \
+                         recoverable state. Restore a backup, or set \
+                         BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true to start empty and accept the loss.");
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        match loaded {
             Some(checkpoint) => {
                 wal_start_offset = checkpoint.wal_offset;
                 self.last_checkpoint_secs.store(checkpoint.timestamp_secs, Ordering::Relaxed);
@@ -853,8 +959,19 @@ impl BanditDB {
 
         let tmp_path  = format!("{}/checkpoint.tmp",  self.data_dir);
         let dest_path = format!("{}/checkpoint.json", self.data_dir);
-        fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
-        fs::rename(&tmp_path, &dest_path).map_err(|e| e.to_string())?;
+        let prev_path = format!("{}/checkpoint.prev", self.data_dir);
+
+        // Retain the previous generation before overwriting. WAL rotation below
+        // discards every event this checkpoint subsumes, so if the new checkpoint
+        // is unreadable the previous one plus the retained WAL tail is the only
+        // way back. A crash between these two renames leaves checkpoint.prev
+        // valid and checkpoint.json missing — recovery handles that case.
+        if Path::new(&dest_path).exists() {
+            fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
+        }
+
+        write_file_durable(&self.data_dir, &tmp_path, &dest_path, json.as_bytes())
+            .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
 
         // 9. Rotate WAL — discard the prefix already embedded in the checkpoint
         let (rot_tx, rot_rx) = oneshot::channel::<()>();
