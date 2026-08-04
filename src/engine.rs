@@ -26,9 +26,30 @@ const BPS_CEIL:  u32 = 9_000;   // 90% — maximum before full promotion
 const BPS_SCALE: u32 = 10_000;  // denominator for the U[0, BPS_SCALE) draw
 
 pub enum WalMessage {
-    Event(Arc<DbEvent>),
+    Event {
+        event: Arc<DbEvent>,
+        /// True when losing this record would lose state. Drives enqueue failure
+        /// policy today, and the fsync grouping P0.3 adds on the writer side.
+        durable: bool,
+    },
     Checkpoint { reply: oneshot::Sender<u64> },
     Rotate { checkpoint_offset: u64, reply: oneshot::Sender<()> },
+}
+
+/// How much the caller cares about this event reaching disk.
+///
+/// Predictions are recoverable: the interaction cache holds them in memory, and a
+/// lost prediction record only costs the ability to match one late reward. Rewards
+/// and campaign lifecycle events carry state that exists nowhere else.
+///
+/// Splitting the two lets a prediction spike drop log records instead of failing
+/// user requests, while rewards keep a hard delivery guarantee.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Durability {
+    /// Dropped rather than propagated as an error if the WAL cannot keep up.
+    BestEffort,
+    /// Enqueue failure is surfaced to the caller as a 503.
+    Required,
 }
 
 /// WAL serialisation format.
@@ -348,6 +369,10 @@ pub struct BanditDB {
     /// False when the WAL writer task has encountered an unrecoverable I/O error.
     /// Exposed to the /health endpoint and checked by all write paths.
     pub wal_healthy:      Arc<AtomicBool>,
+    /// Best-effort prediction records discarded because the WAL writer fell behind.
+    /// Sustained growth means predictions are going unlogged, so late rewards for
+    /// them will not match. Exported as `banditdb_wal_dropped_total`.
+    pub wal_dropped:      AtomicU64,
     /// WAL serialisation format determined at startup from `BANDITDB_WAL_FORMAT`.
     pub wal_format:       WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
@@ -410,15 +435,23 @@ impl BanditDB {
                 let mut fatal_err: Option<std::io::Error> = None;
 
                 match msg {
-                    WalMessage::Event(event_arc) => {
-                        let mut batch = vec![event_arc];
+                    WalMessage::Event { event, durable } => {
+                        let mut batch = vec![event];
+                        // Tracks whether this batch carries state-bearing records.
+                        // P0.3 uses it to decide whether the batch needs an fsync
+                        // before the writer moves on.
+                        let mut batch_durable = durable;
                         loop {
                             match rx.try_recv() {
-                                Ok(WalMessage::Event(e)) => batch.push(e),
+                                Ok(WalMessage::Event { event, durable }) => {
+                                    batch_durable |= durable;
+                                    batch.push(event);
+                                }
                                 Ok(other) => { peeked = Some(other); break; }
                                 Err(_)    => break,
                             }
                         }
+                        let _ = batch_durable;
 
                         let mut attempt = 0u32;
                         loop {
@@ -581,6 +614,7 @@ impl BanditDB {
             max_feature_dim,
             max_arms,
             wal_healthy,
+            wal_dropped:          AtomicU64::new(0),
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
@@ -846,7 +880,8 @@ impl BanditDB {
                     // Re-emitted for reward matching; already counted + in checkpoint.
                     is_reemit:        true,
                 };
-                let _ = self.event_tx.send(WalMessage::Event(Arc::new(event))).await;
+                // Re-emitted predictions are best-effort like the originals.
+                let _ = self.event_tx.send(WalMessage::Event { event: Arc::new(event), durable: false }).await;
                 reemit_count += 1;
             }
         }
@@ -1105,12 +1140,34 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    fn wal_try_send(&self, event: Arc<DbEvent>) -> Result<(), EngineError> {
-        self.event_tx.try_send(WalMessage::Event(event))
-            .map_err(|e| match e {
-                TrySendError::Full(_)   => EngineError::WalFull,
-                TrySendError::Closed(_) => EngineError::WalUnavailable,
-            })
+    /// Enqueue an event for the WAL writer.
+    ///
+    /// `Required` events propagate enqueue failure to the caller. `BestEffort`
+    /// events are dropped and counted instead — a prediction burst that outruns the
+    /// writer degrades logging, not availability. Every drop is visible through
+    /// `banditdb_wal_dropped_total`; sustained non-zero values mean predictions are
+    /// going unlogged and late rewards will fail to match.
+    fn wal_send(&self, event: Arc<DbEvent>, durability: Durability) -> Result<(), EngineError> {
+        let durable = durability == Durability::Required;
+        match self.event_tx.try_send(WalMessage::Event { event, durable }) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if durable {
+                    return Err(match e {
+                        TrySendError::Full(_)   => EngineError::WalFull,
+                        TrySendError::Closed(_) => EngineError::WalUnavailable,
+                    });
+                }
+                let dropped = self.wal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // Log the first drop and then sparsely — a saturated writer would
+                // otherwise turn every request into a log line.
+                if dropped == 1 || dropped.is_multiple_of(1000) {
+                    tracing::warn!(dropped, reason = ?e,
+                        "WAL: dropped a best-effort prediction record — late rewards for it cannot match");
+                }
+                Ok(())
+            }
+        }
     }
 
     fn campaign_not_found(id: &str) -> EngineError {
@@ -1135,7 +1192,7 @@ impl BanditDB {
             campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_try_send(Arc::clone(&event))?;
+        self.wal_send(Arc::clone(&event), Durability::Required)?;
         self.apply_event_to_memory(&event);
         self.audit("create", campaign_id, None);
         Ok(())
@@ -1243,8 +1300,13 @@ impl BanditDB {
             is_reemit:        false,
         });
 
-        // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_try_send(Arc::clone(&event))?;
+        // Best-effort: a prediction record is a log entry, not state. If the writer
+        // is saturated this drops the record and still serves the caller, rather
+        // than failing a request because logging fell behind. That also removes the
+        // counter/WAL divergence the old ordering had — `prediction_count` was
+        // incremented during scoring above, so an enqueue failure used to leave the
+        // counter ahead of the log while returning an error to the client.
+        self.wal_send(Arc::clone(&event), Durability::BestEffort)?;
 
         // Direct cache insert — no lock needed. We skip apply_event_to_memory here
         // because the prediction_count was already incremented above.
@@ -1282,7 +1344,7 @@ impl BanditDB {
             arm_propensities: None, // Historical data doesn't usually have propensities
             is_reemit:        false,
         });
-        self.wal_try_send(Arc::clone(&pred_event))?;
+        self.wal_send(Arc::clone(&pred_event), Durability::Required)?;
         self.apply_event_to_memory(&pred_event);
 
         // 2. Emit Rewarded event
@@ -1291,7 +1353,7 @@ impl BanditDB {
             reward,
             timestamp_secs: now,
         });
-        self.wal_try_send(Arc::clone(&reward_event))?;
+        self.wal_send(Arc::clone(&reward_event), Durability::Required)?;
         self.apply_event_to_memory(&reward_event);
 
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
@@ -1304,7 +1366,7 @@ impl BanditDB {
         }
         let event = Arc::new(DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_try_send(Arc::clone(&event))?;
+        self.wal_send(Arc::clone(&event), Durability::Required)?;
         self.apply_event_to_memory(&event);
         self.audit("delete", campaign_id, None);
         Ok(())
@@ -1320,7 +1382,7 @@ impl BanditDB {
             interaction_id: interaction_id.to_string(), reward, timestamp_secs: now_secs(),
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_try_send(Arc::clone(&event))?;
+        self.wal_send(Arc::clone(&event), Durability::Required)?;
         self.apply_event_to_memory(&event);
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1333,7 +1395,7 @@ impl BanditDB {
         let event = Arc::new(DbEvent::CampaignArchived {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        self.wal_try_send(Arc::clone(&event))?;
+        self.wal_send(Arc::clone(&event), Durability::Required)?;
         self.apply_event_to_memory(&event);
         self.audit("archive", campaign_id, None);
         Ok(())
@@ -1346,7 +1408,7 @@ impl BanditDB {
         let event = Arc::new(DbEvent::CampaignRestored {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        self.wal_try_send(Arc::clone(&event))?;
+        self.wal_send(Arc::clone(&event), Durability::Required)?;
         self.apply_event_to_memory(&event);
         self.audit("restore", campaign_id, None);
         Ok(())
