@@ -61,6 +61,59 @@ fn try_metal() -> Device {
 // 200K caused retrain to slow dramatically after 20K+ accumulated rewards.
 const BUFFER_CAP: usize = 5_000;
 
+/// Immutable MLP snapshot read by the prediction hot path.
+///
+/// `predict()` runs under `arms.read()` and needs an embedding. Reaching into the
+/// live `NeuralLinUCBState` for that requires its mutex, which the retraining path
+/// holds while it takes `arms.read()` — an inversion that deadlocks once a writer
+/// is queued (see docs/PRODUCTION_STAGE1.md P0.1). Holding the mutex across a
+/// multi-second retrain also stalled every concurrent prediction.
+///
+/// The fix is to give readers a plain-tensor copy behind an `Arc`: readers clone
+/// the pointer and never block on training. Retraining builds a fresh snapshot and
+/// swaps the pointer when it finishes.
+pub struct NeuralWeights {
+    layers:    Vec<Linear>,
+    device:    Device,
+    embed_dim: usize,
+}
+
+impl NeuralWeights {
+    /// L2-normalised embedding h(x; W). Never blocks on training.
+    pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
+        embed_with(&self.layers, &self.device, self.embed_dim, context)
+    }
+
+    pub fn embed_dim(&self) -> usize { self.embed_dim }
+}
+
+/// Forward pass with L2 normalisation, shared by the live network and its snapshots.
+/// Takes layers by slice so the gradient graph is preserved when called with
+/// VarMap-backed tensors during training.
+fn forward_normalized_layers(layers: &[Linear], x: &Tensor) -> candle_core::Result<Tensor> {
+    let mut h = x.clone();
+    for (i, layer) in layers.iter().enumerate() {
+        h = layer.forward(&h)?;
+        if i < layers.len() - 1 {
+            h = h.relu()?;
+        }
+    }
+    // h / (||h||₂ + ε)  — ε via affine to avoid division by zero
+    let norm = h.sqr()?.sum_keepdim(1)?.affine(1.0, 1e-8)?.sqrt()?;
+    h.broadcast_div(&norm)
+}
+
+fn embed_with(layers: &[Linear], device: &Device, embed_dim: usize, context: &Array1<f64>) -> Array1<f64> {
+    let run = || -> candle_core::Result<Array1<f64>> {
+        let x: Vec<f32> = context.iter().map(|&v| v as f32).collect();
+        let t = Tensor::from_slice(&x, (1, x.len()), device)?;
+        let h = forward_normalized_layers(layers, &t)?.squeeze(0)?;
+        let vals: Vec<f32> = h.to_vec1()?;
+        Ok(Array1::from_vec(vals.iter().map(|&v| v as f64).collect()))
+    };
+    run().unwrap_or_else(|_| Array1::zeros(embed_dim))
+}
+
 pub struct NeuralLinUCBState {
     varmap:        VarMap,
     layers:        Vec<Linear>,
@@ -115,31 +168,33 @@ impl NeuralLinUCBState {
         })
     }
 
-    /// L2-normalised last-layer embedding — the h(x; W) used by Algorithm 1.
+    /// L2-normalised last-layer embedding against the *live* weights.
+    ///
+    /// Used by `reaccumulate` and tournament evaluation, both of which need the
+    /// freshly trained network. The prediction path must not call this — it goes
+    /// through `NeuralWeights` instead, so it never contends with training.
     pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
-        self.try_embed(context).unwrap_or_else(|_| Array1::zeros(self.embed_dim))
+        embed_with(&self.layers, &self.device, self.embed_dim, context)
     }
 
-    fn try_embed(&self, context: &Array1<f64>) -> candle_core::Result<Array1<f64>> {
-        let x: Vec<f32> = context.iter().map(|&v| v as f32).collect();
-        let t = Tensor::from_slice(&x, (1, x.len()), &self.device)?;
-        let h = self.forward_normalized(&t)?.squeeze(0)?;
-        let vals: Vec<f32> = h.to_vec1()?;
-        Ok(Array1::from_vec(vals.iter().map(|&v| v as f64).collect()))
-    }
-
-    /// Forward pass with L2 normalisation (used for both scoring and training).
     fn forward_normalized(&self, x: &Tensor) -> candle_core::Result<Tensor> {
-        let mut h = x.clone();
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h)?;
-            if i < self.layers.len() - 1 {
-                h = h.relu()?;
-            }
-        }
-        // h / (||h||₂ + ε)  — ε via affine to avoid division by zero
-        let norm = h.sqr()?.sum_keepdim(1)?.affine(1.0, 1e-8)?.sqrt()?;
-        h.broadcast_div(&norm)
+        forward_normalized_layers(&self.layers, x)
+    }
+
+    /// Detach the current weights into an immutable snapshot for readers.
+    ///
+    /// Every tensor is deep-copied out of the VarMap, so later training steps
+    /// cannot mutate a published snapshot. Cost is proportional to parameter count
+    /// (~113 KB for the default 64→128→128→32 network), negligible beside a retrain.
+    pub fn snapshot(&self) -> candle_core::Result<NeuralWeights> {
+        let layers = self.layers.iter()
+            .map(|l| {
+                let w = copy_tensor(l.weight(), &self.device)?;
+                let b = l.bias().map(|b| copy_tensor(b, &self.device)).transpose()?;
+                Ok(Linear::new(w, b))
+            })
+            .collect::<candle_core::Result<Vec<_>>>()?;
+        Ok(NeuralWeights { layers, device: self.device.clone(), embed_dim: self.embed_dim })
     }
 
     pub fn push(&mut self, context: Vec<f64>, arm_id: String, reward: f64, propensity: f64) {

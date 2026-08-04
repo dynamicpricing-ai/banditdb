@@ -2,7 +2,7 @@ use crate::state::{Algorithm, ArmDiagnostics, ArmReportStats, ArmState, Campaign
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
 #[cfg(feature = "neural")]
-use crate::neural::NeuralLinUCBState;
+use crate::neural::{NeuralLinUCBState, NeuralWeights};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
@@ -122,8 +122,15 @@ pub struct Campaign {
     pub arms:                   RwLock<HashMap<String, ArmState>>,
     pub challenger_arms:        Option<RwLock<HashMap<String, ArmState>>>,
     pub metadata:               Option<serde_json::Value>,
+    /// Live network: owns the VarMap, replay buffer, and training state. Held only
+    /// by the reward path, retraining, diagnostics, and recovery — never by `predict`.
     #[cfg(feature = "neural")]
     pub neural:                 Option<parking_lot::Mutex<NeuralLinUCBState>>,
+    /// Published read-only weights for the prediction path. Swapped after each
+    /// retrain. Readers clone the `Arc` and release the lock immediately, so a
+    /// running retrain never blocks a prediction. See `refresh_neural_weights`.
+    #[cfg(feature = "neural")]
+    pub neural_weights:         Option<RwLock<Arc<NeuralWeights>>>,
     /// Challenger traffic in basis points (0–10000). Progressive campaigns start
     /// at 1000 (10% exploration) and ramp up/down based on SNIPS tournament results.
     pub challenger_traffic_bps: AtomicU32,
@@ -194,6 +201,17 @@ impl Campaign {
             _ => None,
         };
 
+        // Publish the initial weights so predictions have something to read before
+        // the first retrain. A snapshot failure leaves this None, and embed() then
+        // falls back to the identity mapping rather than panicking.
+        #[cfg(feature = "neural")]
+        let neural_weights = neural.as_ref().and_then(|n| {
+            match n.lock().snapshot() {
+                Ok(w)  => Some(RwLock::new(Arc::new(w))),
+                Err(e) => { tracing::error!(error = %e, "neural: failed to snapshot initial weights"); None }
+            }
+        });
+
         let initial_traffic = if let Algorithm::Progressive(_) = &algorithm { BPS_FLOOR } else { 0 };
 
         Self {
@@ -204,6 +222,8 @@ impl Campaign {
             metadata,
             #[cfg(feature = "neural")]
             neural,
+            #[cfg(feature = "neural")]
+            neural_weights,
             challenger_traffic_bps:  AtomicU32::new(initial_traffic),
             tournament_wins:         std::sync::atomic::AtomicI32::new(0),
             archived:                AtomicBool::new(false),
@@ -214,12 +234,38 @@ impl Campaign {
 
     /// Returns the embedding of `context` for Algorithm 1 scoring.
     /// Identity for LinUCB / ThompsonSampling; MLP forward pass for NeuralLinUCB.
+    ///
+    /// Reads the published snapshot, never the live network. The `Arc` is cloned
+    /// and the guard dropped before the forward pass, so this holds no lock while
+    /// computing and cannot be blocked by an in-flight retrain. `predict()` calls
+    /// this while holding `arms.read()`; taking the neural mutex here instead would
+    /// invert lock order against retraining and deadlock.
     #[cfg(feature = "neural")]
     pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
-        if let Some(neural) = &self.neural {
-            return neural.lock().embed(context);
+        if let Some(weights) = &self.neural_weights {
+            let snapshot = Arc::clone(&weights.read());
+            return snapshot.embed(context);
         }
         context.clone()
+    }
+
+    /// Republish the live weights to the prediction path after training.
+    ///
+    /// LOCK ORDER: callers must hold no `arms` or `neural` lock. This briefly takes
+    /// the neural mutex (to snapshot) and then the weights write lock. Holding an
+    /// `arms` guard across this call would reintroduce the inversion P0.1 removes.
+    #[cfg(feature = "neural")]
+    pub fn refresh_neural_weights(&self, campaign_id: &str) {
+        let (Some(neural), Some(weights)) = (&self.neural, &self.neural_weights) else { return };
+        let snapshot = match neural.lock().snapshot() {
+            Ok(w)  => w,
+            Err(e) => {
+                tracing::error!(campaign = %campaign_id, error = %e,
+                    "neural: snapshot failed — predictions continue on the previous weights");
+                return;
+            }
+        };
+        *weights.write() = Arc::new(snapshot);
     }
 
     #[cfg(not(feature = "neural"))]
@@ -554,8 +600,15 @@ impl BanditDB {
                         if let Some(neural) = &campaign.neural {
                             let path = format!("{neural_dir}/{campaign_id}.safetensors");
                             if std::path::Path::new(&path).exists() {
-                                match neural.lock().load(&path) {
-                                    Ok(_)  => tracing::info!(campaign = %campaign_id, "recovery: loaded neural weights"),
+                                let loaded = neural.lock().load(&path);
+                                match loaded {
+                                    Ok(_) => {
+                                        // Publish the restored weights; without this the
+                                        // prediction path would keep serving the random
+                                        // initialisation from Campaign::new.
+                                        campaign.refresh_neural_weights(campaign_id);
+                                        tracing::info!(campaign = %campaign_id, "recovery: loaded neural weights");
+                                    }
                                     Err(e) => tracing::warn!(campaign = %campaign_id, error = %e, "recovery: failed to load neural weights"),
                                 }
                             }
@@ -757,6 +810,10 @@ impl BanditDB {
                             arms_write.insert(arm_id, new_state);
                         }
                     }
+
+                    // Publish the retrained weights. Deliberately after the arms
+                    // guard above has dropped — see refresh_neural_weights lock order.
+                    campaign.refresh_neural_weights(campaign_id);
 
                     // 7b. Tournament — re-acquire neural lock (no arms lock held).
                     if is_progressive {
