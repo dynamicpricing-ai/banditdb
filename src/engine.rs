@@ -380,6 +380,16 @@ pub struct BanditDB {
     /// Upper bound on the number of arms per campaign.
     /// Env: BANDITDB_MAX_ARMS (default 1000).
     pub max_arms:         usize,
+    /// Largest absolute value accepted in a context vector.
+    ///
+    /// Finiteness alone is not enough. `update()` forms `x·A⁻¹·x` and an outer
+    /// product of `A⁻¹x`; at |x| ≈ 1e200 those squared terms overflow to infinity
+    /// and `inf / inf` yields NaN. That NaN lands in `a_inv` and `theta`, makes
+    /// every later score NaN, and is written to the checkpoint — so it survives
+    /// restart and the campaign is permanently poisoned. One malformed request
+    /// from any writer-role caller is enough.
+    /// Env: BANDITDB_MAX_CONTEXT_MAGNITUDE (default 1e6).
+    pub max_context_magnitude: f64,
     /// False when the WAL writer task has encountered an unrecoverable I/O error.
     /// Exposed to the /health endpoint and checked by all write paths.
     pub wal_healthy:      Arc<AtomicBool>,
@@ -668,6 +678,9 @@ impl BanditDB {
             .ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
         let max_arms: usize = std::env::var("BANDITDB_MAX_ARMS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+        let max_context_magnitude: f64 = std::env::var("BANDITDB_MAX_CONTEXT_MAGNITUDE")
+            .ok().and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite() && *v > 0.0)
+            .unwrap_or(1e6);
 
         // Ceiling on pending (predicted, not yet rewarded) interactions.
         //
@@ -737,6 +750,7 @@ impl BanditDB {
             data_dir:             data_dir.to_string(),
             max_feature_dim,
             max_arms,
+            max_context_magnitude,
             wal_healthy,
             wal_dropped:          AtomicU64::new(0),
             wal_fsyncs,
@@ -1343,6 +1357,93 @@ impl BanditDB {
         EngineError::NotFound(format!("Campaign '{id}' not found"))
     }
 
+    /// Reject context vectors that would corrupt arm matrices.
+    ///
+    /// Enforced here rather than in the HTTP handlers because handler-level checks
+    /// are bypassable — `/campaign/:id/interact` reached `interact()` with an
+    /// unchecked context for exactly that reason, and the SDK and embedded users
+    /// never pass through a handler at all. This is the boundary every write path
+    /// shares.
+    fn validate_context(&self, context: &[f64]) -> Result<(), EngineError> {
+        if context.is_empty() {
+            return Err(EngineError::BadRequest("context must not be empty".into()));
+        }
+        if context.len() > self.max_feature_dim {
+            return Err(EngineError::BadRequest(format!(
+                "context length {} exceeds BANDITDB_MAX_FEATURE_DIM={}",
+                context.len(), self.max_feature_dim
+            )));
+        }
+        for (i, v) in context.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(EngineError::BadRequest(format!(
+                    "context[{i}] is {v} — NaN and infinity propagate into the arm's \
+                     covariance matrix and cannot be cleared without deleting the campaign"
+                )));
+            }
+            if v.abs() > self.max_context_magnitude {
+                return Err(EngineError::BadRequest(format!(
+                    "context[{i}] magnitude {} exceeds BANDITDB_MAX_CONTEXT_MAGNITUDE={} — \
+                     squared terms would overflow to infinity during the rank-one update",
+                    v.abs(), self.max_context_magnitude
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject algorithm configs that would panic or produce NaN once traffic starts.
+    ///
+    /// Zero dimensions build degenerate matrices whose dot products panic on a
+    /// length mismatch, and a non-finite learning rate turns the first gradient step
+    /// into NaN weights that then flow into every embedding.
+    fn validate_algorithm(algorithm: &Algorithm, max_dim: usize) -> Result<(), EngineError> {
+        let check_neural = |cfg: &crate::state::NeuralLinUCBConfig| -> Result<(), EngineError> {
+            let bad = |what: &str, v: String| {
+                EngineError::BadRequest(format!("neural config: {what} is invalid ({v})"))
+            };
+            for (name, dim) in [
+                ("context_dim", cfg.context_dim),
+                ("embed_dim", cfg.embed_dim),
+                ("hidden_dim", cfg.hidden_dim),
+            ] {
+                if dim == 0 { return Err(bad(name, "0".into())); }
+                if dim > max_dim { return Err(bad(name, format!("{dim} exceeds max {max_dim}"))); }
+            }
+            if cfg.hidden_layers == 0 { return Err(bad("hidden_layers", "0".into())); }
+            if !cfg.learning_rate.is_finite() || cfg.learning_rate <= 0.0 {
+                return Err(bad("learning_rate", cfg.learning_rate.to_string()));
+            }
+            if !cfg.lambda.is_finite() || cfg.lambda < 0.0 {
+                return Err(bad("lambda", cfg.lambda.to_string()));
+            }
+            Ok(())
+        };
+
+        match algorithm {
+            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => check_neural(cfg),
+            Algorithm::Progressive(cfg) => {
+                Self::validate_algorithm(&cfg.base, max_dim)?;
+                Self::validate_algorithm(&cfg.challenger, max_dim)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Rewards must be finite and within [0, 1]; the confidence bounds and the
+    /// SNIPS tournament estimator both assume that range.
+    fn validate_reward(reward: f64) -> Result<(), EngineError> {
+        if !reward.is_finite() {
+            return Err(EngineError::BadRequest(format!("reward {reward} is not finite")));
+        }
+        if !(0.0..=1.0).contains(&reward) {
+            return Err(EngineError::BadRequest(format!(
+                "reward {reward} is outside the required range [0.0, 1.0]"
+            )));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)] // campaign construction params; grouping into a struct would only move the noise
     pub fn add_campaign(
         &self,
@@ -1357,6 +1458,21 @@ impl BanditDB {
         if self.campaigns.read().contains_key(campaign_id) {
             return Err(EngineError::AlreadyExists(format!("Campaign '{campaign_id}' already exists")));
         }
+        // A non-finite alpha makes every score NaN from the first prediction; a
+        // negative one inverts exploration into a penalty on uncertainty.
+        if !alpha.is_finite() || alpha < 0.0 {
+            return Err(EngineError::BadRequest(format!(
+                "alpha must be finite and non-negative, got {alpha}"
+            )));
+        }
+        if let Some(hl) = decay_half_life_hours {
+            if !hl.is_finite() || hl <= 0.0 {
+                return Err(EngineError::BadRequest(format!(
+                    "decay_half_life_hours must be finite and positive, got {hl}"
+                )));
+            }
+        }
+        Self::validate_algorithm(&algorithm, self.max_feature_dim)?;
         let event = Arc::new(DbEvent::CampaignCreated {
             campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
@@ -1368,6 +1484,7 @@ impl BanditDB {
     }
 
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Result<(String, String), EngineError> {
+        self.validate_context(&context)?;
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
@@ -1502,6 +1619,14 @@ impl BanditDB {
         context:     Vec<f64>,
         reward:      f64,
     ) -> Result<String, EngineError> {
+        // The HTTP handler for this route validated only the IDs, so an unchecked
+        // context and an out-of-range reward reached the matrix math directly.
+        self.validate_context(&context)?;
+        Self::validate_reward(reward)?;
+        if !self.campaigns.read().contains_key(campaign_id) {
+            return Err(Self::campaign_not_found(campaign_id));
+        }
+
         let interaction_id = Uuid::new_v4().to_string();
         let now = now_secs();
 
@@ -1556,6 +1681,7 @@ impl BanditDB {
     /// light, since the writer syncs before parking, and up to
     /// `BANDITDB_FSYNC_INTERVAL_MS` when batching under load.
     pub async fn reward(&self, interaction_id: &str, reward: f64) -> Result<(), EngineError> {
+        Self::validate_reward(reward)?;
         if self.interactions.get(interaction_id).is_none() {
             return Err(EngineError::NotFound(
                 format!("Interaction '{interaction_id}' not found or already rewarded")

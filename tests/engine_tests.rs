@@ -18,17 +18,22 @@ async fn test_1_2_asymptotic_convergence() {
     let db = BanditDB::new(wal, "/tmp");
     let _ = db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
-    let true_theta = [3.0_f64, -2.0_f64];
+    // Rewards must lie in [0, 1] — the engine enforces the documented contract, so
+    // this uses a positive-quadrant context and coefficients whose linear response
+    // stays in range. The identifiability the test depends on is unchanged: the two
+    // features still trace out independent directions.
+    let true_theta = [0.6_f64, 0.3_f64];
 
-    // Deterministic contexts tracing the unit circle (sin/cos at 0.1-radian steps).
-    // Dense, balanced coverage of all directions with no rand crate needed.
+    // Deterministic contexts sweeping the positive quadrant (|sin|/|cos| at
+    // 0.1-radian steps). Dense, balanced coverage with no rand crate needed.
     for i in 0..500_usize {
         let angle = i as f64 * 0.1;
-        let ctx = vec![angle.sin(), angle.cos()];
+        let ctx = vec![angle.sin().abs(), angle.cos().abs()];
         let reward = true_theta[0] * ctx[0] + true_theta[1] * ctx[1];
+        debug_assert!((0.0..=1.0).contains(&reward), "test reward {reward} out of range");
 
         if let Ok((_, iid)) = db.predict("convergence", ctx) {
-            let _ = db.reward(&iid, reward).await;
+            db.reward(&iid, reward).await.expect("reward must be accepted");
         }
     }
 
@@ -227,11 +232,15 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     let _ = std::fs::remove_file(wal);
 }
 
-/// Test V.4 — Non-Finite Reward Is Rejected, Out-of-Range Is Warned But Applied
+/// Test V.4 — Rewards outside [0, 1] are rejected by the engine, not just the handler.
 ///
-/// The engine rejects Inf and NaN rewards entirely (existing guard in update()).
-/// A reward outside [0, 1] (e.g. 5.0) is a caller mistake that the HTTP handler
-/// warns about but the engine still applies — this test verifies both behaviours.
+/// This previously asserted the opposite: that an out-of-range reward was "a caller
+/// mistake that the HTTP handler warns about but the engine still applies". That
+/// contradicted the documented contract (README and openapi.yaml both state the
+/// reward must be in [0, 1]) and left the rule bypassable — `/campaign/:id/interact`
+/// reached the engine without it, and SDK or embedded callers never pass a handler
+/// at all. The confidence bounds and the SNIPS estimator both assume the range, so
+/// the engine now enforces it.
 #[tokio::test]
 async fn test_v4_reward_range_behaviour() {
     let wal = "/tmp/banditdb_test_v4.jsonl";
@@ -240,37 +249,37 @@ async fn test_v4_reward_range_behaviour() {
     let db = BanditDB::new(wal, "/tmp");
     let _ = db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
-    // Non-finite reward: engine must reject it, theta stays at zero
+    let theta_of = |db: &BanditDB| {
+        let c = db.campaigns.read();
+        let campaign = c.get("range_test").unwrap();
+        let arms = campaign.arms.read();
+        arms.get("arm").unwrap().theta.clone()
+    };
+
+    // Non-finite reward: rejected, theta untouched.
     let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    let _ = db.reward(&iid_inf, f64::INFINITY).await;
+    assert!(db.reward(&iid_inf, f64::INFINITY).await.is_err(), "Inf reward must be rejected");
+    assert!(theta_of(&db).iter().all(|&v| v == 0.0), "Inf reward must not update theta");
 
-    let theta_after_inf = {
-        let c = db.campaigns.read();
-        let campaign = c.get("range_test").unwrap();
-        let arms = campaign.arms.read();
-        let x = arms.get("arm").unwrap().theta.clone();
-        x
-    };
-    assert!(
-        theta_after_inf.iter().all(|&v| v == 0.0),
-        "Inf reward must not update theta"
-    );
+    let (_, iid_nan) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
+    assert!(db.reward(&iid_nan, f64::NAN).await.is_err(), "NaN reward must be rejected");
+    assert!(theta_of(&db).iter().all(|&v| v == 0.0), "NaN reward must not update theta");
 
-    // Out-of-range but finite reward: engine applies it (handler warns, but does not block)
+    // Finite but out of range: also rejected, and nothing is applied.
     let (_, iid_oob) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    assert!(db.reward(&iid_oob, 5.0).await.is_ok(), "Out-of-range finite reward must still return true");
-
-    let theta_after_oob = {
-        let c = db.campaigns.read();
-        let campaign = c.get("range_test").unwrap();
-        let arms = campaign.arms.read();
-        let x = arms.get("arm").unwrap().theta.clone();
-        x
-    };
+    assert!(db.reward(&iid_oob, 5.0).await.is_err(), "reward above 1.0 must be rejected");
+    let (_, iid_neg) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
+    assert!(db.reward(&iid_neg, -0.5).await.is_err(), "negative reward must be rejected");
     assert!(
-        theta_after_oob.iter().any(|&v| v != 0.0),
-        "Out-of-range finite reward must update theta"
+        theta_of(&db).iter().all(|&v| v == 0.0),
+        "a rejected reward must leave theta untouched — partial application would \
+         corrupt the arm with a value the confidence bounds cannot represent"
     );
+
+    // In-range reward still works.
+    let (_, iid_ok) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
+    assert!(db.reward(&iid_ok, 1.0).await.is_ok(), "valid reward must be accepted");
+    assert!(theta_of(&db).iter().any(|&v| v != 0.0), "valid reward must update theta");
 
     let _ = std::fs::remove_file(wal);
 }
