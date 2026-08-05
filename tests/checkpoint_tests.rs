@@ -50,7 +50,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         let reward =
             (true_theta[0] * ctx[0] + true_theta[1] * ctx[1]).clamp(0.0, 1.0);
         if let Ok((_, iid)) = db.predict("routing", ctx) {
-            let _ = db.reward(&iid, reward);
+            let _ = db.reward(&iid, reward).await;
         }
     }
 
@@ -101,7 +101,17 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     let ckpt: CheckpointData =
         serde_json::from_str(&ckpt_raw).expect("checkpoint.json must be valid JSON");
 
-    assert!(ckpt.wal_offset > 0, "wal_offset must be positive");
+    // A completed checkpoint ends with WAL rotation, after which the WAL begins
+    // exactly at the checkpoint boundary — so the replay offset is 0, not the
+    // pre-rotation absolute position. Recording the absolute offset here used to
+    // lose data: recovery seeked to that byte in the rotated file and skipped
+    // every record before it once the new WAL grew past it.
+    assert_eq!(
+        ckpt.wal_offset, 0,
+        "after rotation the WAL starts at the checkpoint boundary, so replay must \
+         begin at 0; a non-zero offset here points into the rotated file and skips \
+         committed records"
+    );
     assert!(ckpt.timestamp_secs > 0, "timestamp must be set");
     assert!(
         ckpt.campaigns.contains_key("routing"),
@@ -261,7 +271,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         "predicted arm must be a registered arm, got: {}",
         arm_id
     );
-    let _ = db2.reward(&iid, 1.0); // must not panic
+    let _ = db2.reward(&iid, 1.0).await; // must not panic
 
     let pred_post = db2.predict("post_ckpt", vec![0.5]);
     assert!(
@@ -319,7 +329,7 @@ async fn test_4_2_prediction_count_survives_wal_replay() {
         let (_, iid) = db.predict("routing", ctx).expect("predict must succeed");
         // Reward only every other prediction — the counter must still see all N.
         if i % 2 == 0 {
-            let _ = db.reward(&iid, 1.0);
+            let _ = db.reward(&iid, 1.0).await;
         }
     }
 
@@ -406,7 +416,7 @@ async fn test_4_3_reemit_does_not_double_count() {
         let ctx = vec![angle.sin(), angle.cos()];
         let (_, iid) = db.predict("routing", ctx).expect("predict must succeed");
         if i < REWARDED {
-            let _ = db.reward(&iid, 1.0);
+            let _ = db.reward(&iid, 1.0).await;
         }
     }
     assert_eq!(total_predictions(&db, "routing"), N as u64, "live count must be N");

@@ -134,7 +134,7 @@ async fn snapshot_is_isolated_from_subsequent_training() {
     // Drive enough rewards to make a retrain due, then run one.
     for i in 0..60 {
         if let Ok((arm, iid)) = db.predict("c", ctx(i)) {
-            let _ = db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await;
         }
     }
     db.checkpoint().await.expect("checkpoint");
@@ -174,12 +174,16 @@ async fn concurrent_predict_reward_retrain_stays_live() {
     let predicts = Arc::new(AtomicU64::new(0));
     let max_latency_us = Arc::new(AtomicU64::new(0));
 
+    // reward() is async now; these workers are plain OS threads outside the
+    // runtime, so they drive it through a runtime handle.
+    let handle = tokio::runtime::Handle::current();
     let mut workers = Vec::new();
     for t in 0..3 {
         let db = Arc::clone(&db);
         let stop = Arc::clone(&stop);
         let predicts = Arc::clone(&predicts);
         let max_latency_us = Arc::clone(&max_latency_us);
+        let handle = handle.clone();
         workers.push(std::thread::spawn(move || {
             let mut i = t * 1000;
             while !stop.load(Ordering::Relaxed) {
@@ -189,7 +193,7 @@ async fn concurrent_predict_reward_retrain_stays_live() {
                 max_latency_us.fetch_max(elapsed, Ordering::Relaxed);
                 if let Ok((arm, iid)) = outcome {
                     predicts.fetch_add(1, Ordering::Relaxed);
-                    let _ = db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 });
+                    let _ = handle.block_on(db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }));
                 }
                 i += 1;
             }

@@ -28,7 +28,7 @@ async fn test_1_2_asymptotic_convergence() {
         let reward = true_theta[0] * ctx[0] + true_theta[1] * ctx[1];
 
         if let Ok((_, iid)) = db.predict("convergence", ctx) {
-            let _ = db.reward(&iid, reward);
+            let _ = db.reward(&iid, reward).await;
         }
     }
 
@@ -105,7 +105,7 @@ async fn test_v1_duplicate_campaign_rejected() {
 
     // Train it so theta is non-zero
     let (_, iid) = db.predict("dup_test", vec![1.0, 0.0]).unwrap();
-    let _ = db.reward(&iid, 1.0);
+    let _ = db.reward(&iid, 1.0).await;
 
     let theta_before = {
         let c = db.campaigns.read();
@@ -154,7 +154,7 @@ async fn test_v2_double_reward_rejected() {
     let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
 
     // First reward must succeed and update the model
-    assert!(db.reward(&iid, 1.0).is_ok(), "First reward must return true");
+    assert!(db.reward(&iid, 1.0).await.is_ok(), "First reward must return true");
 
     let theta_after_first = {
         let c = db.campaigns.read();
@@ -166,7 +166,7 @@ async fn test_v2_double_reward_rejected() {
 
     // Second reward with the same id must be rejected
     assert!(
-        db.reward(&iid, 1.0).is_err(),
+        db.reward(&iid, 1.0).await.is_err(),
         "Second reward with same interaction_id must return false"
     );
 
@@ -207,7 +207,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     };
 
     assert!(
-        db.reward("interaction-id-that-never-existed", 1.0).is_err(),
+        db.reward("interaction-id-that-never-existed", 1.0).await.is_err(),
         "Reward for unknown interaction_id must return false"
     );
 
@@ -242,7 +242,7 @@ async fn test_v4_reward_range_behaviour() {
 
     // Non-finite reward: engine must reject it, theta stays at zero
     let (_, iid_inf) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    let _ = db.reward(&iid_inf, f64::INFINITY);
+    let _ = db.reward(&iid_inf, f64::INFINITY).await;
 
     let theta_after_inf = {
         let c = db.campaigns.read();
@@ -258,7 +258,7 @@ async fn test_v4_reward_range_behaviour() {
 
     // Out-of-range but finite reward: engine applies it (handler warns, but does not block)
     let (_, iid_oob) = db.predict("range_test", vec![1.0, 0.0]).unwrap();
-    assert!(db.reward(&iid_oob, 5.0).is_ok(), "Out-of-range finite reward must still return true");
+    assert!(db.reward(&iid_oob, 5.0).await.is_ok(), "Out-of-range finite reward must still return true");
 
     let theta_after_oob = {
         let c = db.campaigns.read();
@@ -290,10 +290,10 @@ async fn test_bandit_learns_context() {
 
     for _ in 0..50 {
         let (arm, iid) = db.predict("homepage", mobile_context.clone()).unwrap();
-        let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
+        let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 }).await;
 
         let (arm, iid) = db.predict("homepage", desktop_context.clone()).unwrap();
-        let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
+        let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 }).await;
     }
 
     let (mobile_pred, _) = db.predict("homepage", mobile_context).unwrap();
@@ -321,10 +321,10 @@ async fn test_ts_learns_context() {
 
         for _ in 0..100 {
             let (arm, iid) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
-            let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "layout_a" { 1.0 } else { 0.0 }).await;
 
             let (arm, iid) = db.predict("ts_homepage", desktop_context.clone()).unwrap();
-            let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "layout_b" { 1.0 } else { 0.0 }).await;
         }
 
         let (mobile_pred, _) = db.predict("ts_homepage", mobile_context.clone()).unwrap();
@@ -384,7 +384,7 @@ async fn test_ts_checkpoint_recovery() {
     for i in 0..20_usize {
         let ctx = vec![(i as f64 * 0.3).sin(), (i as f64 * 0.3).cos()];
         if let Ok((arm, iid)) = db.predict("ts_camp", ctx) {
-            let _ = db.reward(&iid, if arm == "x" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "x" { 1.0 } else { 0.0 }).await;
         }
     }
 
@@ -422,10 +422,10 @@ async fn test_linucb_ts_coexist() {
 
     for _ in 0..20 {
         if let Ok((_, iid)) = db.predict("ucb_camp", vec![1.0, 0.0]) {
-            let _ = db.reward(&iid, 1.0);
+            let _ = db.reward(&iid, 1.0).await;
         }
         if let Ok((_, iid)) = db.predict("ts_camp", vec![1.0, 0.0]) {
-            let _ = db.reward(&iid, 1.0);
+            let _ = db.reward(&iid, 1.0).await;
         }
     }
 
@@ -685,7 +685,7 @@ async fn test_ts_propensity_concentrates_after_learning() {
 
         for _ in 0..150 {
             if let Ok((arm, iid)) = db.predict("ts_prop_conc", vec![1.0, 0.0]) {
-                let _ = db.reward(&iid, if arm == "win" { 1.0 } else { 0.0 });
+                let _ = db.reward(&iid, if arm == "win" { 1.0 } else { 0.0 }).await;
             }
         }
 
@@ -794,7 +794,7 @@ async fn test_neural_thompson_sampling_basic() {
         *arm_counts.entry(arm.clone()).or_insert(0u32) += 1;
 
         let reward = if arm == "A" { 1.0 } else { 0.0 };
-        db.reward(&iid, reward).expect("reward must succeed");
+        db.reward(&iid, reward).await.expect("reward must succeed");
     }
 
     // Verify reward counters updated.

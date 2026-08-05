@@ -373,6 +373,7 @@ async fn handle_interact(
         payload.context,
         payload.reward,
     )
+    .await
     .map_err(map_engine_err)?;
 
     Ok(Json(PredictResponse { arm_id: payload.arm_id, interaction_id }))
@@ -647,10 +648,11 @@ async fn handle_reward(
         return Err(AppError(StatusCode::BAD_REQUEST,
             format!("reward {} is outside required range [0.0, 1.0]", payload.reward)));
     }
-    let db = Arc::clone(&state.db);
-    tokio::task::spawn_blocking(move || db.reward(&payload.interaction_id, payload.reward))
+    // Awaited directly rather than via spawn_blocking: reward() is now async
+    // because it waits on the WAL fsync, and its CPU cost is a single rank-one
+    // matrix update. Handing it to a blocking thread would only add a hop.
+    state.db.reward(&payload.interaction_id, payload.reward)
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("reward task failed: {e}")))?
         .map(|_| Json("OK"))
         .map_err(map_engine_err)
 }

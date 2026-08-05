@@ -86,7 +86,7 @@ async fn test_no_spurious_promotion_on_linear() {
     for i in 1..=200 {
         for ctx in contexts {
             if let Ok((arm, iid)) = db.predict("linear", ctx.clone()) {
-                let _ = db.reward(&iid, linear_reward(&arm, ctx));
+                let _ = db.reward(&iid, linear_reward(&arm, ctx)).await;
             }
         }
         if i % 20 == 0 { let _ = db.checkpoint().await; }
@@ -143,7 +143,7 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
         for i in 1..=100 {
             for (ctx, target) in xor_data {
                 if let Ok((arm, iid)) = db.predict("camp", ctx.clone()) {
-                    let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 });
+                    let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 }).await;
                 }
             }
             if i % 25 == 0 { let _ = db.checkpoint().await; }
@@ -226,7 +226,7 @@ async fn test_gradual_traffic_ramp() {
     for i in 1..=500 {
         for (ctx, target) in xor_data {
             if let Ok((arm, iid)) = db.predict("xor", ctx.clone()) {
-                let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 });
+                let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 }).await;
             }
         }
 
@@ -307,7 +307,7 @@ async fn test_reward_continuity_across_transition() {
         for (ctx, target) in xor_data {
             if let Ok((arm, iid)) = db.predict("xor", ctx.clone()) {
                 let r = if &arm == target { 1.0 } else { 0.0 };
-                let _ = db.reward(&iid, r);
+                let _ = db.reward(&iid, r).await;
                 sum += r;
                 n   += 1;
             }
@@ -396,11 +396,11 @@ async fn test_rollback_on_challenger_degradation() {
     // Populate buffer with perfectly uniform logged data.
     // For each context, log both arms equally so any policy has full coverage.
     for _ in 0..10 {
-        let _ = db.interact("rollback", "A", ctx_a.clone(), 1.0); // Correct
-        let _ = db.interact("rollback", "B", ctx_a.clone(), 0.0); // Wrong
+        let _ = db.interact("rollback", "A", ctx_a.clone(), 1.0).await; // Correct
+        let _ = db.interact("rollback", "B", ctx_a.clone(), 0.0).await; // Wrong
         
-        let _ = db.interact("rollback", "B", ctx_b.clone(), 1.0); // Correct
-        let _ = db.interact("rollback", "A", ctx_b.clone(), 0.0); // Wrong
+        let _ = db.interact("rollback", "B", ctx_b.clone(), 1.0).await; // Correct
+        let _ = db.interact("rollback", "A", ctx_b.clone(), 0.0).await; // Wrong
     }
 
     // Force base to be perfect (always picks target).

@@ -102,7 +102,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     };
 
     // Ghost reward: this interaction_id was never predicted — not in the Moka cache.
-    let _ = db.reward("ghost-id-that-was-never-predicted", 999.0);
+    let _ = db.reward("ghost-id-that-was-never-predicted", 999.0).await;
 
     let theta_after_ghost = {
         let campaigns = db.campaigns.read();
@@ -118,7 +118,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
 
     // Contrast: a valid reward DOES update theta, confirming the arm can learn.
     let (_, iid) = db.predict("orphan_test", vec![1.0, 0.0]).unwrap();
-    let _ = db.reward(&iid, 1.0);
+    let _ = db.reward(&iid, 1.0).await;
 
     let theta_after_valid = {
         let campaigns = db.campaigns.read();
@@ -156,7 +156,7 @@ async fn test_3_3_idempotent_recovery() {
             let angle = i as f64 * 0.1;
             let ctx = vec![angle.sin(), angle.cos()];
             if let Ok((_, iid)) = db.predict("recovery_campaign", ctx) {
-                let _ = db.reward(&iid, 1.0);
+                let _ = db.reward(&iid, 1.0).await;
             }
         }
 
@@ -254,7 +254,7 @@ async fn test_3_4_concurrent_export_safety() {
             let ctx = vec![(i as f64 * 0.1).sin(), (i as f64 * 0.1).cos(), 0.5];
             while !stop.load(Ordering::Relaxed) {
                 if let Ok((_, iid)) = db.predict("export_stress", ctx.clone()) {
-                    let _ = db.reward(&iid, 1.0);
+                    let _ = db.reward(&iid, 1.0).await;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }

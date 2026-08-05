@@ -37,7 +37,7 @@ async fn test_2_1_commutative_b_assertion() {
         let db = Arc::clone(&db);
         let ids = Arc::clone(&ids);
         handles.push(tokio::spawn(async move {
-            let _ = db.reward(&ids[i], 1.0);
+            let _ = db.reward(&ids[i], 1.0).await;
         }));
     }
     for h in handles {
@@ -91,7 +91,7 @@ async fn test_2_2_wal_event_count_integrity() {
                 (i as f64 * 0.1) % 1.0,
             ];
             if let Ok((_, iid)) = db.predict("concurrent", ctx) {
-                let _ = db.reward(&iid, 1.0);
+                let _ = db.reward(&iid, 1.0).await;
             }
         }));
     }
@@ -173,7 +173,7 @@ async fn test_2_3_reader_starvation_check() {
             while !stop.load(Ordering::Relaxed) {
                 match db.predict("stress", ctx.clone()) {
                     Ok((_, iid)) => {
-                        let _ = db.reward(&iid, 1.0);
+                        let _ = db.reward(&iid, 1.0).await;
                         rewards.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {

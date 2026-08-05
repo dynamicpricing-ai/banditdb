@@ -78,7 +78,7 @@ async fn reward_still_fails_hard_on_a_saturated_wal() {
         return;
     }
 
-    match db.reward(&iid, 1.0) {
+    match db.reward(&iid, 1.0).await {
         Err(EngineError::WalFull) => {}
         Err(EngineError::WalUnavailable) => {}
         other => panic!(
@@ -105,7 +105,7 @@ async fn interact_treats_its_paired_events_as_durable() {
     }
 
     let before = db.wal_dropped.load(Ordering::Relaxed);
-    let result = db.interact("c", "A", vec![0.3, 0.4], 1.0);
+    let result = db.interact("c", "A", vec![0.3, 0.4], 1.0).await;
     assert!(
         result.is_err(),
         "interact must fail rather than half-log a paired prediction/reward"
@@ -127,7 +127,7 @@ async fn healthy_wal_drops_nothing() {
     for i in 0..200 {
         let ctx = vec![(i % 9) as f64 / 9.0, (i % 4) as f64 / 4.0];
         let (arm, iid) = db.predict("c", ctx).expect("predict");
-        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).expect("reward");
+        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
     }
 
     assert_eq!(

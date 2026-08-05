@@ -41,7 +41,7 @@ async fn durable_events_are_fsynced() {
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
     let (_, iid) = db.predict("c", vec![0.2, 0.4]).expect("predict");
-    db.reward(&iid, 1.0).expect("reward");
+    db.reward(&iid, 1.0).await.expect("reward");
     settle().await;
 
     assert!(
@@ -64,7 +64,7 @@ async fn lone_reward_is_synced_without_waiting_for_the_window() {
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
     let (_, iid) = db.predict("c", vec![0.5, 0.1]).expect("predict");
-    db.reward(&iid, 1.0).expect("reward");
+    db.reward(&iid, 1.0).await.expect("reward");
     settle().await;
 
     assert!(
@@ -98,22 +98,34 @@ async fn predictions_alone_do_not_force_a_sync() {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// Under a burst the commit window should amortise: far fewer fsyncs than rewards.
-#[tokio::test]
-async fn burst_of_rewards_is_batched_into_fewer_syncs() {
+/// Group commit amortises across *concurrent* rewards.
+///
+/// It cannot amortise sequential ones: since P0.3b each caller awaits the fsync
+/// covering its own record, so a serial client necessarily pays one sync per
+/// reward. Batching is what keeps that cost flat as concurrency rises — many
+/// in-flight rewards share a single disk round trip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_rewards_share_syncs() {
     let dir = "/tmp/banditdb_p03_batching";
-    let db = setup(dir);
+    let db = std::sync::Arc::new(setup(dir));
     settle().await;
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
-    // Collect interactions first so the rewards land as a tight burst.
+    // Collect interactions first so the rewards can be issued all at once.
     let mut iids = Vec::new();
     for i in 0..400 {
         let (_, iid) = db.predict("c", vec![(i % 11) as f64 / 11.0, 0.3]).expect("predict");
         iids.push(iid);
     }
+
+    let mut tasks = Vec::new();
     for iid in &iids {
-        db.reward(iid, 1.0).expect("reward");
+        let db = std::sync::Arc::clone(&db);
+        let iid = iid.clone();
+        tasks.push(tokio::spawn(async move { db.reward(&iid, 1.0).await }));
+    }
+    for t in tasks {
+        t.await.expect("join").expect("reward");
     }
     settle().await;
 
@@ -121,8 +133,8 @@ async fn burst_of_rewards_is_batched_into_fewer_syncs() {
     assert!(syncs > 0, "a burst of rewards must still be synced");
     assert!(
         syncs < iids.len() as u64,
-        "group commit did not amortise: {syncs} fsyncs for {} rewards means every \
-         record paid for its own disk round trip",
+        "group commit did not amortise: {syncs} fsyncs for {} concurrent rewards means \
+         every record paid for its own disk round trip",
         iids.len()
     );
     let _ = fs::remove_dir_all(dir);

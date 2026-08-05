@@ -29,8 +29,12 @@ pub enum WalMessage {
     Event {
         event: Arc<DbEvent>,
         /// True when losing this record would lose state. Drives enqueue failure
-        /// policy today, and the fsync grouping P0.3 adds on the writer side.
+        /// policy and fsync grouping on the writer side.
         durable: bool,
+        /// Resolved once the record is written *and* covered by an fsync. Callers
+        /// that await it are guaranteed the write survives process death; `None`
+        /// means the caller did not ask to be told.
+        ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     Checkpoint { reply: oneshot::Sender<u64> },
     Rotate { checkpoint_offset: u64, reply: oneshot::Sender<()> },
@@ -48,8 +52,18 @@ pub enum WalMessage {
 pub enum Durability {
     /// Dropped rather than propagated as an error if the WAL cannot keep up.
     BestEffort,
-    /// Enqueue failure is surfaced to the caller as a 503.
+    /// Enqueue failure is surfaced to the caller as a 503. The record is written
+    /// and fsynced, but the caller is not told when.
     Required,
+    /// As `Required`, and the caller waits until the record is on disk before its
+    /// own operation returns.
+    ///
+    /// Without this an acked write can still be lost: `try_send` only puts the
+    /// event on a channel, so process death discards the queue and the client was
+    /// already told "recorded". Acking something we can lose is the failure mode
+    /// this removes — it is what makes the published RPO true rather than
+    /// aspirational.
+    Acked,
 }
 
 /// WAL serialisation format.
@@ -445,6 +459,9 @@ impl BanditDB {
             );
             let mut pending_durable = false;
             let mut last_sync = std::time::Instant::now();
+            // Callers blocked until the fsync covering their record completes.
+            // Replied to only after `sync_all` returns, never merely after `write`.
+            let mut pending_acks: Vec<oneshot::Sender<Result<(), String>>> = Vec::new();
 
             loop {
                 let msg = match peeked.take() {
@@ -458,9 +475,14 @@ impl BanditDB {
                                     pending_durable = false;
                                     last_sync = std::time::Instant::now();
                                     fsync_count.fetch_add(1, Ordering::Relaxed);
+                                    for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
                                 }
                                 Err(e) => {
                                     tracing::error!(error = %e, "WAL writer: fsync failed — shutting down");
+                                    // Never leave a caller believing its write is durable.
+                                    for tx in pending_acks.drain(..) {
+                                        let _ = tx.send(Err(format!("WAL fsync failed: {e}")));
+                                    }
                                     wal_healthy_writer.store(false, Ordering::SeqCst);
                                     break;
                                 }
@@ -476,16 +498,18 @@ impl BanditDB {
                 let mut fatal_err: Option<std::io::Error> = None;
 
                 match msg {
-                    WalMessage::Event { event, durable } => {
+                    WalMessage::Event { event, durable, ack } => {
                         let mut batch = vec![event];
+                        if let Some(tx) = ack { pending_acks.push(tx); }
                         // Tracks whether this batch carries state-bearing records.
                         // P0.3 uses it to decide whether the batch needs an fsync
                         // before the writer moves on.
                         let mut batch_durable = durable;
                         loop {
                             match rx.try_recv() {
-                                Ok(WalMessage::Event { event, durable }) => {
+                                Ok(WalMessage::Event { event, durable, ack }) => {
                                     batch_durable |= durable;
+                                    if let Some(tx) = ack { pending_acks.push(tx); }
                                     batch.push(event);
                                 }
                                 Ok(other) => { peeked = Some(other); break; }
@@ -550,6 +574,7 @@ impl BanditDB {
                                     pending_durable = false;
                                     last_sync = std::time::Instant::now();
                                     fsync_count.fetch_add(1, Ordering::Relaxed);
+                                    for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
                                 }
                                 Err(e) => fatal_err = Some(e),
                             }
@@ -562,9 +587,11 @@ impl BanditDB {
                             .and_then(|_| file.seek(SeekFrom::End(0)))
                         {
                             Ok(offset) => {
-                                // The checkpoint barrier is itself an fsync.
+                                // The checkpoint barrier is itself an fsync, so it
+                                // discharges anything waiting on durability.
                                 pending_durable = false;
                                 last_sync = std::time::Instant::now();
+                                for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
                                 let _ = reply.send(offset);
                             }
                             Err(e)     => fatal_err = Some(e),
@@ -616,6 +643,11 @@ impl BanditDB {
                 }
 
                 if let Some(e) = fatal_err {
+                    // Dropping these senders would surface as a generic channel error;
+                    // send the real reason so callers can log something actionable.
+                    for tx in pending_acks.drain(..) {
+                        let _ = tx.send(Err(format!("WAL writer failed: {e}")));
+                    }
                     tracing::error!(error = %e, "WAL writer: unrecoverable I/O error — shutting down");
                     wal_healthy_writer.store(false, Ordering::SeqCst);
                     break;
@@ -943,7 +975,7 @@ impl BanditDB {
                     is_reemit:        true,
                 };
                 // Re-emitted predictions are best-effort like the originals.
-                let _ = self.event_tx.send(WalMessage::Event { event: Arc::new(event), durable: false }).await;
+                let _ = self.event_tx.send(WalMessage::Event { event: Arc::new(event), durable: false, ack: None }).await;
                 reemit_count += 1;
             }
         }
@@ -1051,7 +1083,7 @@ impl BanditDB {
 
         let timestamp_secs = now_secs();
         self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
-        let data = CheckpointData { wal_offset, timestamp_secs, campaigns: campaigns_snapshot };
+        let mut data = CheckpointData { wal_offset, timestamp_secs, campaigns: campaigns_snapshot };
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
 
         let tmp_path  = format!("{}/checkpoint.tmp",  self.data_dir);
@@ -1077,6 +1109,26 @@ impl BanditDB {
             .await
             .map_err(|_| "WAL channel closed during rotation".to_string())?;
         rot_rx.await.map_err(|_| "WAL writer closed during rotation".to_string())?;
+
+        // Rotation rewrote the WAL so it now begins exactly at the checkpoint
+        // boundary, which makes the absolute offset just recorded meaningless.
+        // Recording it anyway loses data: recovery seeks to that byte in the *new*
+        // file and skips everything before it. The `offset > file_len` guard in
+        // recover() does not catch this, because a rotated WAL grows past the old
+        // offset within seconds of normal traffic — after which every crash
+        // silently discards the records in between, fsynced or not.
+        //
+        // So once rotation has succeeded, rewrite the offset as 0. The window
+        // between the two writes carries no risk: no events are appended during
+        // it, so a crash there leaves a near-empty WAL whose length is below the
+        // old offset, and the existing guard does fire.
+        //
+        // checkpoint.prev is deliberately left alone here — this is a correction
+        // to the current generation, not a new one.
+        data.wal_offset = 0;
+        let rotated_json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        write_file_durable(&self.data_dir, &tmp_path, &dest_path, rotated_json.as_bytes())
+            .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))?;
 
         let msg = format!(
             "Checkpoint written and WAL rotated: {} campaigns, offset {} bytes, {} interactions exported, {} in-flight re-emitted",
@@ -1210,9 +1262,26 @@ impl BanditDB {
     /// `banditdb_wal_dropped_total`; sustained non-zero values mean predictions are
     /// going unlogged and late rewards will fail to match.
     fn wal_send(&self, event: Arc<DbEvent>, durability: Durability) -> Result<(), EngineError> {
-        let durable = durability == Durability::Required;
-        match self.event_tx.try_send(WalMessage::Event { event, durable }) {
-            Ok(()) => Ok(()),
+        self.wal_enqueue(event, durability).map(|_| ())
+    }
+
+    /// Enqueue and, for `Acked`, hand back the receiver that resolves once the
+    /// record is on disk. Callers awaiting it convert "we queued this" into
+    /// "this survives a crash".
+    fn wal_enqueue(
+        &self,
+        event: Arc<DbEvent>,
+        durability: Durability,
+    ) -> Result<Option<oneshot::Receiver<Result<(), String>>>, EngineError> {
+        let durable = durability != Durability::BestEffort;
+        let (ack, rx) = if durability == Durability::Acked {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        match self.event_tx.try_send(WalMessage::Event { event, durable, ack }) {
+            Ok(()) => Ok(rx),
             Err(e) => {
                 if durable {
                     return Err(match e {
@@ -1227,7 +1296,7 @@ impl BanditDB {
                     tracing::warn!(dropped, reason = ?e,
                         "WAL: dropped a best-effort prediction record — late rewards for it cannot match");
                 }
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -1386,7 +1455,9 @@ impl BanditDB {
         Ok((best_arm, interaction_id))
     }
 
-    pub fn interact(
+    /// Ingest a historical (arm, context, reward) triple. Returns once both
+    /// records are on disk — see `reward` for why this is async.
+    pub async fn interact(
         &self,
         campaign_id: &str,
         arm_id:      &str,
@@ -1415,10 +1486,13 @@ impl BanditDB {
             reward,
             timestamp_secs: now,
         });
-        self.wal_send(Arc::clone(&reward_event), Durability::Required)?;
+        // One ack covers both records: the prediction was enqueued first, so any
+        // fsync that reaches the reward has necessarily already covered it.
+        let ack = self.wal_enqueue(Arc::clone(&reward_event), Durability::Acked)?;
         self.apply_event_to_memory(&reward_event);
 
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
+        Self::await_ack(ack).await?;
         Ok(interaction_id)
     }
 
@@ -1434,7 +1508,16 @@ impl BanditDB {
         Ok(())
     }
 
-    pub fn reward(&self, interaction_id: &str, reward: f64) -> Result<(), EngineError> {
+    /// Record an outcome. Returns only once the record is on disk.
+    ///
+    /// Async because it waits for the WAL writer's fsync. Blocking instead would
+    /// deadlock a current-thread runtime — the writer is itself a task, so a
+    /// blocked caller would prevent the very sync it is waiting for.
+    ///
+    /// Latency is one commit window: roughly an fsync (~0.4 ms) when traffic is
+    /// light, since the writer syncs before parking, and up to
+    /// `BANDITDB_FSYNC_INTERVAL_MS` when batching under load.
+    pub async fn reward(&self, interaction_id: &str, reward: f64) -> Result<(), EngineError> {
         if self.interactions.get(interaction_id).is_none() {
             return Err(EngineError::NotFound(
                 format!("Interaction '{interaction_id}' not found or already rewarded")
@@ -1444,10 +1527,27 @@ impl BanditDB {
             interaction_id: interaction_id.to_string(), reward, timestamp_secs: now_secs(),
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_send(Arc::clone(&event), Durability::Required)?;
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
+        // Applied before awaiting: the update is visible to concurrent readers
+        // immediately, while the caller's ack still means "durable".
         self.apply_event_to_memory(&event);
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Self::await_ack(ack).await
+    }
+
+    /// Wait for a durability acknowledgement, mapping both failure shapes to an
+    /// error the caller can surface. A dropped sender means the writer died.
+    async fn await_ack(
+        ack: Option<oneshot::Receiver<Result<(), String>>>,
+    ) -> Result<(), EngineError> {
+        match ack {
+            None     => Ok(()),
+            Some(rx) => match rx.await {
+                Ok(Ok(()))   => Ok(()),
+                Ok(Err(msg)) => Err(EngineError::Internal(msg)),
+                Err(_)       => Err(EngineError::WalUnavailable),
+            },
+        }
     }
 
     pub fn archive_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {

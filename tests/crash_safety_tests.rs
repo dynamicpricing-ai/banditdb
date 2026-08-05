@@ -28,7 +28,7 @@ async fn seeded_db(dir: &str, rewards: usize) -> BanditDB {
     for i in 0..rewards {
         let ctx = vec![(i % 5) as f64 / 5.0, (i % 3) as f64 / 3.0];
         if let Ok((arm, iid)) = db.predict("c", ctx) {
-            let _ = db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 });
+            let _ = db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await;
         }
     }
     db.checkpoint().await.expect("checkpoint");
@@ -139,6 +139,49 @@ async fn crash_between_generation_renames_recovers_from_prev() {
         CheckpointLoad::Loaded(cp) => assert!(cp.campaigns.contains_key("c")),
         other => panic!("crash between renames must recover from checkpoint.prev, got {other:?}"),
     }
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Rotation resets the WAL to begin at the checkpoint boundary, so the recorded
+/// replay offset must be 0.
+///
+/// Recording the pre-rotation absolute offset silently lost committed data: the
+/// `offset > file_len` guard in recover() only catches an offset past the end of
+/// the file, and a rotated WAL grows back past the old offset within seconds of
+/// normal traffic. After that, every restart seeked into the middle of the new
+/// file and skipped every record before it — fsynced and acknowledged or not.
+#[tokio::test]
+async fn rotation_resets_the_replay_offset() {
+    let dir = "/tmp/banditdb_p02_rotation_offset";
+    fresh(dir);
+    let db = seeded_db(dir, 40).await;
+
+    let raw = fs::read_to_string(format!("{dir}/checkpoint.json")).unwrap();
+    let cp: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        cp["wal_offset"].as_u64(), Some(0),
+        "checkpoint records a replay offset into a WAL that rotation has already \
+         rewritten; recovery would skip everything before it"
+    );
+
+    // Grow the rotated WAL well past where the old absolute offset would have been,
+    // then recover. Every one of these must survive.
+    for i in 0..60 {
+        let ctx = vec![(i % 7) as f64 / 7.0, (i % 4) as f64 / 4.0];
+        if let Ok((arm, iid)) = db.predict("c", ctx) {
+            db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+        }
+    }
+    let before = db.campaign_report("c").unwrap().total_rewards;
+    drop(db);
+
+    let recovered = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
+    let after = recovered.campaign_report("c").unwrap().total_rewards;
+    assert_eq!(
+        after, before,
+        "post-rotation records were skipped on replay: {before} committed, {after} recovered"
+    );
+
     let _ = fs::remove_dir_all(dir);
 }
 

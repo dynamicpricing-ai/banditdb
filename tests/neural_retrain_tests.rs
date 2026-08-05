@@ -20,12 +20,12 @@ fn neural_cfg(retrain_every: usize) -> NeuralLinUCBConfig {
 }
 
 /// Drive `n` predict/reward round trips through the campaign.
-fn drive(db: &BanditDB, campaign: &str, n: usize) {
+async fn drive(db: &BanditDB, campaign: &str, n: usize) {
     for i in 0..n {
         let ctx = vec![(i % 7) as f64 / 7.0, (i % 3) as f64 / 3.0];
         if let Ok((arm, iid)) = db.predict(campaign, ctx) {
             let reward = if arm == "A" { 1.0 } else { 0.0 };
-            let _ = db.reward(&iid, reward);
+            let _ = db.reward(&iid, reward).await;
         }
     }
 }
@@ -60,7 +60,7 @@ async fn campaign_becomes_due_then_clears_after_retrain() {
         "a fresh campaign has no accumulated rewards and must not be due"
     );
 
-    drive(&db, "c", 40);
+    drive(&db, "c", 40).await;
     assert_eq!(
         db.campaigns_due_for_retrain(),
         vec!["c".to_string()],
@@ -80,7 +80,7 @@ async fn campaign_becomes_due_then_clears_after_retrain() {
 async fn retrain_persists_weights_and_keeps_serving() {
     let dir = "/tmp/banditdb_test_retrain_weights";
     let db = setup(dir, 20);
-    drive(&db, "c", 40);
+    drive(&db, "c", 40).await;
 
     assert!(db.retrain_campaign("c"));
     assert!(
@@ -112,7 +112,7 @@ async fn worker_retrain_publishes_weights_to_prediction_path() {
         w.embed(&probe)
     };
 
-    drive(&db, "c", 40);
+    drive(&db, "c", 40).await;
     assert!(db.retrain_campaign("c"), "retrain should run");
 
     let after = {
@@ -156,7 +156,7 @@ async fn buffer_retains_beyond_legacy_cap() {
 
     let dir = "/tmp/banditdb_test_retrain_buffer";
     let db = setup(dir, 100_000); // never auto-due; drive the retrain manually
-    drive(&db, "c", 6_000);
+    drive(&db, "c", 6_000).await;
 
     {
         let campaigns = db.campaigns.read();
