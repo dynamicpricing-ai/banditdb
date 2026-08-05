@@ -227,12 +227,14 @@ impl ArmState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionRecord {
     pub campaign_id:      String,
     pub arm_id:           String,
     pub context:          Array1<f64>,
+    #[serde(default)]
     pub arm_propensities: Option<HashMap<String, f64>>,
+    #[serde(default)]
     pub timestamp_secs:   u64,
 }
 
@@ -398,6 +400,18 @@ pub struct CheckpointData {
     pub wal_offset: u64,      // byte position in WAL; recovery replays from here
     pub timestamp_secs: u64,  // unix epoch, for diagnostics
     pub campaigns: HashMap<String, CampaignCheckpoint>,
+    /// Predictions still awaiting a reward when this checkpoint was taken.
+    ///
+    /// These used to be re-emitted into the WAL as `is_reemit` Predicted records so
+    /// a late reward could still match after rotation, which rewrote the whole
+    /// unmatched set on every checkpoint. Carrying them here instead costs one copy
+    /// per checkpoint rather than one WAL record each, and recovery restores the
+    /// cache directly instead of replaying them.
+    ///
+    /// Empty on checkpoints written before this field existed; such files simply
+    /// recover the old way from any re-emitted records still in the WAL.
+    #[serde(default)]
+    pub pending_interactions: HashMap<String, InteractionRecord>,
 }
 
 

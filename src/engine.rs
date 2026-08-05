@@ -391,6 +391,11 @@ pub struct BanditDB {
     /// effectively the commit window is batching. Exported as
     /// `banditdb_wal_fsync_total`.
     pub wal_fsyncs:       Arc<AtomicU64>,
+    /// Pending interactions dropped because the cache hit its capacity limit.
+    /// Each one is a prediction whose reward can no longer be matched, so this
+    /// must be alerted on rather than merely graphed. Exported as
+    /// `banditdb_interactions_evicted_total`.
+    pub interactions_evicted: Arc<AtomicU64>,
     /// WAL serialisation format determined at startup from `BANDITDB_WAL_FORMAT`.
     pub wal_format:       WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
@@ -664,6 +669,21 @@ impl BanditDB {
         let max_arms: usize = std::env::var("BANDITDB_MAX_ARMS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
 
+        // Ceiling on pending (predicted, not yet rewarded) interactions.
+        //
+        // TTL alone does not bound this. At 1,000 predictions/sec against the default
+        // 24h TTL the cache would hold 86.4M records, each carrying its context
+        // vector — tens of gigabytes, and an OOM kill rather than a graceful
+        // degradation. Rough budget: entry ≈ context_dim × 8 B + ~200 B overhead, so
+        // 100k × 64 dims ≈ 70 MB.
+        //
+        // Eviction is not free: an evicted prediction can never be matched to its
+        // reward, so `banditdb_interactions_evicted_total` is an alerting signal.
+        let max_pending: usize = std::env::var("BANDITDB_MAX_PENDING_INTERACTIONS")
+            .ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(100_000);
+        let interactions_evicted = Arc::new(AtomicU64::new(0));
+        let evicted = Arc::clone(&interactions_evicted);
+
         if wal_format == WalFormat::Msgpack {
             tracing::info!("WAL format: MessagePack (binary, length-framed)");
         }
@@ -699,7 +719,18 @@ impl BanditDB {
 
         let db = Self {
             campaigns:            RwLock::new(HashMap::new()),
-            interactions:         Cache::builder().time_to_live(Duration::from_secs(ttl_secs)).build(),
+            interactions:         Cache::builder()
+                                      .time_to_live(Duration::from_secs(ttl_secs))
+                                      .max_capacity(max_pending as u64)
+                                      .eviction_listener(move |_k, _v, cause| {
+                                          // Only capacity pressure is a problem. Expiry is
+                                          // the TTL doing its job, and explicit invalidation
+                                          // happens on every matched reward.
+                                          if cause == moka::notification::RemovalCause::Size {
+                                              evicted.fetch_add(1, Ordering::Relaxed);
+                                          }
+                                      })
+                                      .build(),
             event_tx:             tx,
             rewarded_count:       AtomicU64::new(0),
             wal_path:             wal_path.to_string(),
@@ -709,6 +740,7 @@ impl BanditDB {
             wal_healthy,
             wal_dropped:          AtomicU64::new(0),
             wal_fsyncs,
+            interactions_evicted,
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
@@ -804,8 +836,16 @@ impl BanditDB {
                     campaigns  = checkpoint.campaigns.len(),
                     wal_offset = checkpoint.wal_offset,
                     epoch      = checkpoint.timestamp_secs,
+                    pending    = checkpoint.pending_interactions.len(),
                     "recovery: checkpoint snapshot"
                 );
+
+                // Restore predictions that were still awaiting a reward. Without this
+                // a reward arriving after restart finds no interaction to match and is
+                // silently discarded.
+                for (iid, record) in checkpoint.pending_interactions {
+                    self.interactions.insert(iid, record);
+                }
                 for (campaign_id, camp) in &checkpoint.campaigns {
                     let mut arms: Vec<&String> = camp.arms.keys().collect();
                     arms.sort();
@@ -958,27 +998,21 @@ impl BanditDB {
             (matched, rows)
         }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
 
-        // 6. Re-emit in-flight (unmatched) Predicted events into the WAL tail so that
-        //    their reward — however delayed — lands in the same future WAL segment and
-        //    can be matched at the next checkpoint.
-        let mut reemit_count = 0usize;
-        for (iid, record) in self.interactions.iter() {
-            if !matched.contains(iid.as_ref()) {
-                let event = DbEvent::Predicted {
-                    interaction_id:   iid.as_ref().clone(),
-                    campaign_id:      record.campaign_id.clone(),
-                    arm_id:           record.arm_id.clone(),
-                    context:          record.context.to_vec(),
-                    timestamp_secs:   record.timestamp_secs,
-                    arm_propensities: record.arm_propensities.clone(),
-                    // Re-emitted for reward matching; already counted + in checkpoint.
-                    is_reemit:        true,
-                };
-                // Re-emitted predictions are best-effort like the originals.
-                let _ = self.event_tx.send(WalMessage::Event { event: Arc::new(event), durable: false, ack: None }).await;
-                reemit_count += 1;
-            }
-        }
+        // 6. Capture in-flight (unmatched) predictions so a late reward can still be
+        //    matched after rotation discards their WAL records.
+        //
+        //    Previously each one was re-emitted into the WAL as an `is_reemit`
+        //    Predicted record — rewriting the entire unmatched set on every
+        //    checkpoint, so a campaign with a low conversion rate paid for its whole
+        //    backlog again and again. They travel in the checkpoint now: written once
+        //    per checkpoint either way, but the WAL stays small and recovery restores
+        //    the cache directly instead of replaying them.
+        let pending_interactions: HashMap<String, InteractionRecord> = self.interactions
+            .iter()
+            .filter(|(iid, _)| !matched.contains(iid.as_ref()))
+            .map(|(iid, record)| (iid.as_ref().clone(), record))
+            .collect();
+        let reemit_count = pending_interactions.len();
 
         // 7. (Neural) Run Algorithm 2 on campaigns that have accumulated enough rewards,
         //    then re-accumulate arm matrices in embedding space (warm start).
@@ -1083,7 +1117,11 @@ impl BanditDB {
 
         let timestamp_secs = now_secs();
         self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
-        let mut data = CheckpointData { wal_offset, timestamp_secs, campaigns: campaigns_snapshot };
+        let mut data = CheckpointData {
+            wal_offset, timestamp_secs,
+            campaigns: campaigns_snapshot,
+            pending_interactions,
+        };
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
 
         let tmp_path  = format!("{}/checkpoint.tmp",  self.data_dir);
