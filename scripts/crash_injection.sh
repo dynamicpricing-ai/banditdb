@@ -11,13 +11,21 @@
 #      unreadable with no usable fallback.
 #   2. Campaigns survive every kill.
 #
-# MEASURED, not enforced until P0.3 + P0.4 land:
-#   3. Reward loss. `predict`/`reward` currently ack the client after queueing to a
-#      bounded channel, before the WAL writer has written anything (see the
-#      consistency-model comment in src/engine.rs). SIGKILL discards that backlog,
-#      so committed-but-unwritten rewards are lost. That is the ack-before-durability
-#      gap P0.4 closes and P0.3 then makes durable; this harness reports the observed
-#      loss as an RPO measurement. Pass --strict to enforce zero loss once both land.
+# MEASURED, not enforced — requires a durable ack, which is NOT yet implemented:
+#   3. Reward loss. `reward()` returns to the client after `try_send` puts the event
+#      on a bounded channel, before the WAL writer has written anything. SIGKILL
+#      discards that queue, so acked-but-unwritten rewards are lost.
+#
+#      Group-commit fsync (P0.3) does NOT fix this, and this harness cannot measure
+#      what fsync does fix. SIGKILL does not discard the page cache: anything the
+#      writer has already `write()`n survives regardless of fsync. fsync protects
+#      against power loss, kernel panic, and VM preemption, none of which SIGKILL
+#      simulates. What this harness measures is purely the channel-backlog gap.
+#
+#      Closing it needs `reward()` to await confirmation that its record was written
+#      and synced, at a cost of one commit window of latency per reward. Until then
+#      --strict is expected to fail intermittently; the loss figure below is a
+#      measurement of the gap, and it is noisy run to run.
 #
 # Usage:
 #   ./scripts/crash_injection.sh [iterations] [--strict]   # default 50; plan target 500+
@@ -46,7 +54,9 @@ api() { curl -sS --max-time 5 -H "X-Api-Key: $KEY" -H 'Content-Type: application
 
 start_server() {
   DATA_DIR="$WORK" PORT="$PORT" BANDITDB_API_KEY="$KEY" \
-    BANDITDB_RATE_LIMIT_PER_SEC=100000 "$BIN" >>"$WORK/server.log" 2>&1 &
+    BANDITDB_RATE_LIMIT_PER_SEC=100000 \
+    BANDITDB_FSYNC_INTERVAL_MS="${BANDITDB_FSYNC_INTERVAL_MS:-200}" \
+    "$BIN" >>"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 60); do
     if api "$URL/health" >/dev/null 2>&1; then return 0; fi
@@ -127,7 +137,7 @@ for iter in $(seq 1 "$ITERATIONS"); do
 done
 
 echo
-echo "--- reward loss (ack-before-durability, closed by P0.4 + P0.3)"
+echo "--- reward loss (channel backlog; needs a durable ack, not yet implemented)"
 echo "    total lost across $ITERATIONS kills: $total_lost"
 echo "    worst single kill:                   $worst_lost"
 if (( failures == 0 )); then

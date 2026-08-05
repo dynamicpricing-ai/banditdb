@@ -804,6 +804,9 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> (HeaderMap, Strin
     out.push_str("# HELP banditdb_wal_dropped_total Best-effort prediction records dropped because the WAL writer fell behind\n");
     out.push_str("# TYPE banditdb_wal_dropped_total counter\n");
     out.push_str(&format!("banditdb_wal_dropped_total {}\n\n", state.db.wal_dropped.load(Ordering::Relaxed)));
+    out.push_str("# HELP banditdb_wal_fsync_total Group-commit fsyncs completed on the WAL\n");
+    out.push_str("# TYPE banditdb_wal_fsync_total counter\n");
+    out.push_str(&format!("banditdb_wal_fsync_total {}\n\n", state.db.wal_fsyncs.load(Ordering::Relaxed)));
 
     // Per-arm counters + campaign gauges (single lock acquisition)
     struct ArmCounts { p: u64, r: u64 }

@@ -373,6 +373,10 @@ pub struct BanditDB {
     /// Sustained growth means predictions are going unlogged, so late rewards for
     /// them will not match. Exported as `banditdb_wal_dropped_total`.
     pub wal_dropped:      AtomicU64,
+    /// Completed group-commit fsyncs. Ratio against reward throughput shows how
+    /// effectively the commit window is batching. Exported as
+    /// `banditdb_wal_fsync_total`.
+    pub wal_fsyncs:       Arc<AtomicU64>,
     /// WAL serialisation format determined at startup from `BANDITDB_WAL_FORMAT`.
     pub wal_format:       WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
@@ -390,6 +394,8 @@ impl BanditDB {
 
         let wal_healthy        = Arc::new(AtomicBool::new(true));
         let wal_healthy_writer = Arc::clone(&wal_healthy);
+        let wal_fsyncs         = Arc::new(AtomicU64::new(0));
+        let fsync_count        = Arc::clone(&wal_fsyncs);
 
         // 1. Spawn the WAL writer task.
         //
@@ -423,13 +429,48 @@ impl BanditDB {
             // One-slot peek buffer for non-Event messages surfaced during batch drain.
             let mut peeked: Option<WalMessage> = None;
 
+            // Group commit. `write()` only reaches the page cache; without fsync a
+            // power loss or VM preemption discards it. Syncing every record would
+            // put a disk round trip on every reward, so durable records are synced
+            // in groups: whenever `fsync_interval` has elapsed, and always before
+            // the writer parks. The idle sync is what keeps RPO near zero at low
+            // traffic — a lone reward is not left unsynced waiting for company.
+            //
+            // The published RPO is this interval. BANDITDB_FSYNC_INTERVAL_MS=0
+            // syncs every durable batch (lowest RPO, highest cost).
+            let fsync_interval = Duration::from_millis(
+                std::env::var("BANDITDB_FSYNC_INTERVAL_MS").ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(200),
+            );
+            let mut pending_durable = false;
+            let mut last_sync = std::time::Instant::now();
+
             loop {
                 let msg = match peeked.take() {
                     Some(m) => m,
-                    None    => match rx.recv().await {
-                        Some(m) => m,
-                        None    => break,
-                    },
+                    None => {
+                        // About to park: nothing more is coming, so make what we
+                        // already wrote durable rather than holding it in cache.
+                        if pending_durable {
+                            match file.sync_all() {
+                                Ok(())  => {
+                                    pending_durable = false;
+                                    last_sync = std::time::Instant::now();
+                                    fsync_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "WAL writer: fsync failed — shutting down");
+                                    wal_healthy_writer.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                        }
+                        match rx.recv().await {
+                            Some(m) => m,
+                            None    => break,
+                        }
+                    }
                 };
 
                 let mut fatal_err: Option<std::io::Error> = None;
@@ -451,8 +492,6 @@ impl BanditDB {
                                 Err(_)    => break,
                             }
                         }
-                        let _ = batch_durable;
-
                         let mut attempt = 0u32;
                         loop {
                             let mut write_err: Option<std::io::Error> = None;
@@ -498,6 +537,23 @@ impl BanditDB {
                                 Some(e) => { fatal_err = Some(e); break; }
                             }
                         }
+
+                        // Group commit: durable records are now in the page cache.
+                        // Sync when the window has elapsed; otherwise let the next
+                        // batch (or the idle path above) carry them.
+                        if batch_durable {
+                            pending_durable = true;
+                        }
+                        if pending_durable && last_sync.elapsed() >= fsync_interval {
+                            match file.sync_all() {
+                                Ok(()) => {
+                                    pending_durable = false;
+                                    last_sync = std::time::Instant::now();
+                                    fsync_count.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(e) => fatal_err = Some(e),
+                            }
+                        }
                     }
 
                     WalMessage::Checkpoint { reply } => {
@@ -505,7 +561,12 @@ impl BanditDB {
                             .and_then(|_| file.sync_all())
                             .and_then(|_| file.seek(SeekFrom::End(0)))
                         {
-                            Ok(offset) => { let _ = reply.send(offset); }
+                            Ok(offset) => {
+                                // The checkpoint barrier is itself an fsync.
+                                pending_durable = false;
+                                last_sync = std::time::Instant::now();
+                                let _ = reply.send(offset);
+                            }
                             Err(e)     => fatal_err = Some(e),
                         }
                     }
@@ -615,6 +676,7 @@ impl BanditDB {
             max_arms,
             wal_healthy,
             wal_dropped:          AtomicU64::new(0),
+            wal_fsyncs,
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
