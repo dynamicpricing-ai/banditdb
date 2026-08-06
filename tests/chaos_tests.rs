@@ -5,6 +5,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// Each test gets its own data directory. BanditDB takes an exclusive lock on
+/// `data_dir`, because two instances sharing one would interleave WAL appends and
+/// race on checkpoint renames. Keyed off the WAL filename, which is already unique
+/// per test.
+fn data_dir_for(wal: &str) -> String {
+    let stem = std::path::Path::new(wal)
+        .file_stem().map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = format!("/tmp/bdb_{stem}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+
 /// Test 3.1 — Torn Write Recovery
 ///
 /// Appending a truncated JSON fragment after 100 valid WAL lines simulates a
@@ -62,7 +77,7 @@ async fn test_3_1_torn_write_recovery() {
     }
 
     // Recover: must skip the corrupt fragment and restore all 100 valid events.
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
 
     let campaigns = db.campaigns.read();
     assert!(
@@ -91,7 +106,7 @@ async fn test_3_2_orphaned_reward_is_noop() {
     let wal = "/tmp/banditdb_test_3_2.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     let theta_before = {
@@ -149,7 +164,7 @@ async fn test_3_3_idempotent_recovery() {
 
     // Phase 1: train a model and capture its final theta.
     let theta_original = {
-        let db = BanditDB::new(wal, "/tmp");
+        let db = BanditDB::new(wal, &data_dir_for(wal));
         let _ = db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
         for i in 0..N {
@@ -189,7 +204,7 @@ async fn test_3_3_idempotent_recovery() {
     // db is dropped here; the WAL file persists on disk.
 
     // Phase 2: reconstruct from WAL and verify theta is identical.
-    let db_recovered = BanditDB::new(wal, "/tmp");
+    let db_recovered = BanditDB::new(wal, &data_dir_for(wal));
 
     let theta_recovered = {
         let campaigns = db_recovered.campaigns.read();

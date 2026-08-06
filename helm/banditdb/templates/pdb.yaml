@@ -1,0 +1,28 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- /*
+  values.yaml referenced podDisruptionBudget but no template existed, so enabling
+  it silently did nothing.
+
+  Note the interaction with single-writer: BanditDB runs one replica with
+  strategy Recreate. A PDB of minAvailable: 1 therefore *blocks* voluntary
+  evictions entirely — node drains will hang rather than proceed. That is a
+  deliberate choice (protect the writer) but it is not free, so this stays
+  disabled by default and the trade-off is stated here.
+*/ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "banditdb.fullname" . }}
+  labels:
+    {{- include "banditdb.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "banditdb.selectorLabels" . | nindent 6 }}
+{{- end }}

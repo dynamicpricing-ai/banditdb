@@ -326,6 +326,110 @@ pub enum CheckpointLoad {
     Corrupt(String),
 }
 
+/// Take an exclusive lock on the data directory, or refuse to start.
+///
+/// BanditDB is single-writer: two processes sharing a `DATA_DIR` interleave WAL
+/// appends and race on checkpoint renames, corrupting both silently. The Helm chart
+/// guards against this with `replicaCount: 1` and `strategy: Recreate`, but those
+/// are conventions — a bad values file, a manual run, `docker compose up --scale`,
+/// or a failed Recreate all bypass them. Nothing in the process itself objected.
+///
+/// Uses `flock`, so the lock is released by the kernel when the process exits,
+/// however it exits. A stale lock file left by a SIGKILLed process therefore does
+/// not block startup, which is why the PID inside it is diagnostic only.
+///
+/// Set BANDITDB_SKIP_DATA_DIR_LOCK=true to bypass — intended for read-only forensic
+/// inspection of a data directory, never for serving.
+fn acquire_data_dir_lock(data_dir: &str) -> Option<File> {
+    if std::env::var("BANDITDB_SKIP_DATA_DIR_LOCK").as_deref() == Ok("true") {
+        tracing::warn!(data_dir, "data directory lock skipped — concurrent writers will corrupt the WAL");
+        return None;
+    }
+    let _ = fs::create_dir_all(data_dir);
+    let path = format!("{data_dir}/banditdb.lock");
+
+    let file = match OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(path, error = %e, "cannot open data directory lock — refusing to start");
+            std::process::exit(1);
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // LOCK_EX | LOCK_NB — fail immediately rather than queue behind the holder.
+        let rc = unsafe { libc_flock(file.as_raw_fd(), 2 | 4) };
+        if rc != 0 {
+            let holder = fs::read_to_string(&path).unwrap_or_default();
+            tracing::error!(
+                path, holder = holder.trim(),
+                "another BanditDB process already holds this data directory. Two writers \
+                 would interleave WAL appends and corrupt it. Refusing to start."
+            );
+            std::process::exit(1);
+        }
+    }
+
+    let stamp = format!("pid={} host={}\n",
+        std::process::id(),
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()));
+    let mut f = &file;
+    use std::io::Write as _;
+    let _ = f.write_all(stamp.as_bytes());
+    let _ = f.flush();
+
+    // Returned, not leaked: the lock must live exactly as long as the BanditDB
+    // instance that owns it. Holding it for the whole process would stop the same
+    // process from reopening a directory it has already closed — which is what
+    // recovery does.
+    Some(file)
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "flock"]
+    fn libc_flock(fd: i32, operation: i32) -> i32;
+}
+
+/// Delete the oldest Parquet shards once a campaign exceeds the retention limit.
+///
+/// Every checkpoint writes a new shard and nothing ever removed them, so `exports/`
+/// grew without bound until the volume filled — at which point checkpointing starts
+/// failing and the WAL stops rotating. Recovery never reads these files (it uses
+/// checkpoint.json plus the WAL), so pruning is safe: the cost is only that
+/// offline analysis loses the oldest history.
+///
+/// Retention is per campaign, newest first. `BANDITDB_EXPORT_RETAIN_SHARDS=0`
+/// disables pruning entirely.
+fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
+    if retain == 0 { return; }
+
+    let prefix = format!("{campaign_id}_");
+    let Ok(entries) = fs::read_dir(export_dir) else { return };
+
+    // Shard names embed a microsecond timestamp, so lexical order is chronological.
+    let mut shards: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(".parquet"))
+        .collect();
+    if shards.len() <= retain { return; }
+    shards.sort();
+
+    let doomed = shards.len() - retain;
+    for name in shards.into_iter().take(doomed) {
+        let path = format!("{export_dir}/{name}");
+        match fs::remove_file(&path) {
+            Ok(())  => tracing::debug!(shard = %name, "export: pruned old shard"),
+            Err(e)  => tracing::warn!(shard = %name, error = %e, "export: could not prune shard"),
+        }
+    }
+    tracing::info!(campaign = %campaign_id, pruned = doomed, retained = retain,
+        "export: pruned old Parquet shards");
+}
+
 /// Write `bytes` to `dest` so the result survives power loss.
 ///
 /// `fs::write` + `fs::rename` is atomic with respect to *naming* but not to
@@ -401,6 +505,10 @@ pub struct BanditDB {
     /// effectively the commit window is batching. Exported as
     /// `banditdb_wal_fsync_total`.
     pub wal_fsyncs:       Arc<AtomicU64>,
+    /// Exclusive lock on `data_dir`, held for this instance's lifetime. Dropping
+    /// the instance closes the fd and releases the flock, so the directory can be
+    /// reopened — by recovery, or by a replacement process after a clean shutdown.
+    _data_dir_lock:   Option<File>,
     /// Pending interactions dropped because the cache hit its capacity limit.
     /// Each one is a prediction whose reward can no longer be matched, so this
     /// must be alerted on rather than merely graphed. Exported as
@@ -419,6 +527,7 @@ pub struct BanditDB {
 
 impl BanditDB {
     pub fn new(wal_path: &str, data_dir: &str) -> Self {
+        let data_dir_lock = acquire_data_dir_lock(data_dir);
         let (tx, mut rx) = channel::<WalMessage>(100_000);
 
         let wal_healthy        = Arc::new(AtomicBool::new(true));
@@ -755,6 +864,7 @@ impl BanditDB {
             wal_dropped:          AtomicU64::new(0),
             wal_fsyncs,
             interactions_evicted,
+            _data_dir_lock:       data_dir_lock,
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
@@ -962,6 +1072,11 @@ impl BanditDB {
         let wal_path_clone  = self.wal_path.clone();
         let export_dir_clone = export_dir.clone();
         let wal_fmt         = self.wal_format;
+        // Parquet shards accumulate one per checkpoint per campaign and nothing used
+        // to remove them, so exports/ filled the volume and then checkpointing began
+        // to fail. Recovery never reads these files, so the oldest can be dropped.
+        let export_retain: usize = std::env::var("BANDITDB_EXPORT_RETAIN_SHARDS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(50);
 
         let (matched, parquet_rows) = tokio::task::spawn_blocking(move || {
             // Scan the WAL for matched Predicted+Rewarded pairs.
@@ -1003,6 +1118,7 @@ impl BanditDB {
             let mut rows = 0usize;
             for (campaign_id, interactions) in &by_campaign {
                 let feature_dim = interactions[0].context.len();
+                prune_export_shards(&export_dir_clone, campaign_id, export_retain);
                 match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
                     Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
                     Ok(())  => rows += interactions.len(),

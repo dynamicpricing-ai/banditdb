@@ -4,6 +4,21 @@ use banditdb::state::Algorithm;
 use banditdb::state::NeuralLinUCBConfig;
 use banditdb::BanditDB;
 
+/// Each test gets its own data directory. BanditDB takes an exclusive lock on
+/// `data_dir`, because two instances sharing one would interleave WAL appends and
+/// race on checkpoint renames. Keyed off the WAL filename, which is already unique
+/// per test.
+fn data_dir_for(wal: &str) -> String {
+    let stem = std::path::Path::new(wal)
+        .file_stem().map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = format!("/tmp/bdb_{stem}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+
 /// Test 1.2 — Asymptotic Convergence to Known Theta
 ///
 /// We define a ground-truth weight vector (true_theta) and train the engine with
@@ -15,7 +30,7 @@ async fn test_1_2_asymptotic_convergence() {
     let wal = "/tmp/banditdb_test_convergence.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("convergence", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     // Rewards must lie in [0, 1] — the engine enforces the documented contract, so
@@ -66,7 +81,7 @@ async fn test_1_4_wrong_feature_dim_no_panic() {
     let wal = "/tmp/banditdb_test_dim_fuzz.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("dim_test", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     // Baseline: correct dim must succeed.
@@ -103,7 +118,7 @@ async fn test_v1_duplicate_campaign_rejected() {
     let wal = "/tmp/banditdb_test_v1.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
 
     // First create must succeed
     assert!(db.add_campaign("dup_test", vec!["arm_a".to_string()], 2, 1.0, Algorithm::Linucb, None, None).is_ok());
@@ -153,7 +168,7 @@ async fn test_v2_double_reward_rejected() {
     let wal = "/tmp/banditdb_test_v2.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("double_reward_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     let (_, iid) = db.predict("double_reward_test", vec![1.0, 0.0]).unwrap();
@@ -200,7 +215,7 @@ async fn test_v3_unknown_interaction_reward_rejected() {
     let wal = "/tmp/banditdb_test_v3.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("unknown_iid_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     let theta_before = {
@@ -246,7 +261,7 @@ async fn test_v4_reward_range_behaviour() {
     let wal = "/tmp/banditdb_test_v4.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("range_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     let theta_of = |db: &BanditDB| {
@@ -291,7 +306,7 @@ async fn test_bandit_learns_context() {
     let wal = "/tmp/banditdb_test_learns_context.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     let mobile_context = vec![1.0, 0.0];
@@ -322,7 +337,7 @@ async fn test_ts_learns_context() {
 
     for attempt in 0..3 {
         let _ = std::fs::remove_file(wal);
-        let db = BanditDB::new(wal, "/tmp");
+        let db = BanditDB::new(wal, &data_dir_for(wal));
         let _ = db.add_campaign("ts_homepage", vec!["layout_a".to_string(), "layout_b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None, None);
 
         let mobile_context  = vec![1.0, 0.0];
@@ -358,7 +373,7 @@ async fn test_ts_explores() {
     let wal = "/tmp/banditdb_test_ts_explores.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("ts_explore", vec!["a".to_string(), "b".to_string(), "c".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None, None);
 
     let mut seen = std::collections::HashSet::new();
@@ -425,7 +440,7 @@ async fn test_linucb_ts_coexist() {
     let wal = "/tmp/banditdb_test_coexist.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign("ucb_camp", vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
     let _ = db.add_campaign("ts_camp",  vec!["a".to_string(), "b".to_string()], 2, 1.0, Algorithm::ThompsonSampling, None, None);
 
@@ -605,7 +620,7 @@ async fn test_ts_propensity_is_some() {
     let wal = "/tmp/banditdb_test_ts_prop_some.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign(
         "ts_prop_some",
         vec!["a".to_string(), "b".to_string(), "c".to_string()],
@@ -633,7 +648,7 @@ async fn test_ts_propensity_valid_distribution() {
     let wal = "/tmp/banditdb_test_ts_prop_dist.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let arm_names = vec!["x".to_string(), "y".to_string(), "z".to_string()];
     let _ = db.add_campaign(
         "ts_prop_dist",
@@ -685,7 +700,7 @@ async fn test_ts_propensity_concentrates_after_learning() {
 
     for attempt in 0..3 {
         let _ = std::fs::remove_file(wal);
-        let db = BanditDB::new(wal, "/tmp");
+        let db = BanditDB::new(wal, &data_dir_for(wal));
         let _ = db.add_campaign(
             "ts_prop_conc",
             vec!["win".to_string(), "lose".to_string()],
@@ -727,7 +742,7 @@ async fn test_linucb_propensity_unaffected_by_ts_changes() {
     let wal = "/tmp/banditdb_test_linucb_prop.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = BanditDB::new(wal, "/tmp");
+    let db = BanditDB::new(wal, &data_dir_for(wal));
     let _ = db.add_campaign(
         "ucb_prop",
         vec!["a".to_string(), "b".to_string()],

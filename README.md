@@ -178,6 +178,9 @@ services:
       - BANDITDB_REQUIRE_AUTH=true             # refuse to start without API keys
       # - BANDITDB_CORS_ORIGINS=https://app.example.com   # default: deny all browsers
       # - BANDITDB_METRICS_PUBLIC=true         # expose /metrics without a key
+      # - BANDITDB_EXPORT_RETAIN_SHARDS=50     # Parquet shards kept per campaign (0 = keep all)
+      # - BANDITDB_MAX_PENDING_INTERACTIONS=100000  # cache ceiling; evictions lose reward matching
+      # - BANDITDB_MAX_CONTEXT_MAGNITUDE=1e6   # reject context values that overflow the update
       # --- neural builds only ---
       # - BANDITDB_RETRAIN_POLL_SECS=2         # background MLP retrain cadence; 0 = checkpoint-only
       # - BANDITDB_NEURAL_BUFFER_CAP=50000     # replay buffer retention per campaign

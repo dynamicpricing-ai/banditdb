@@ -4,6 +4,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+/// Each test gets its own data directory. BanditDB takes an exclusive lock on
+/// `data_dir`, because two instances sharing one would interleave WAL appends and
+/// race on checkpoint renames. Keyed off the WAL filename, which is already unique
+/// per test.
+fn data_dir_for(wal: &str) -> String {
+    let stem = std::path::Path::new(wal)
+        .file_stem().map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed".to_string());
+    let dir = format!("/tmp/bdb_{stem}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+
 /// Test 2.1 — Commutative b Assertion
 ///
 /// b += context * reward is commutative: addition order doesn't matter. After
@@ -15,7 +30,7 @@ async fn test_2_1_commutative_b_assertion() {
     let wal = "/tmp/banditdb_test_2_1.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = Arc::new(BanditDB::new(wal, "/tmp"));
+    let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
     let _ = db.add_campaign("stress", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
 
     const N: usize = 1000;
@@ -76,7 +91,7 @@ async fn test_2_2_wal_event_count_integrity() {
     let wal = "/tmp/banditdb_test_2_2.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = Arc::new(BanditDB::new(wal, "/tmp"));
+    let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
     let _ = db.add_campaign("concurrent", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None, None);
 
     const N: usize = 500;
@@ -137,7 +152,7 @@ async fn test_2_3_reader_starvation_check() {
     let wal = "/tmp/banditdb_test_2_3.jsonl";
     let _ = std::fs::remove_file(wal);
 
-    let db = Arc::new(BanditDB::new(wal, "/tmp"));
+    let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
     let _ = db.add_campaign("stress", vec!["a".to_string(), "b".to_string(), "c".to_string()], 4, 1.0, Algorithm::Linucb, None, None);
 
     let error_count = Arc::new(AtomicUsize::new(0));

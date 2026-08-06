@@ -1,0 +1,59 @@
+# cargo-deny configuration — enforced by .github/workflows/ci.yml
+#
+# Scope: 439 crates reach the production binary. Before this, nothing checked them
+# for known vulnerabilities, licence incompatibility, or unexpected registries.
+
+[advisories]
+# Fail on any crate with a filed security advisory.
+yanked = "deny"
+# Entries need a justification and an expiry so they are revisited rather than
+# accumulating silently.
+ignore = [
+    # Segfault in fast-float's AsciiStr::first on malformed input, reached through
+    # polars-arrow's text float parsing. No fixed release of fast-float exists.
+    #
+    # Not reachable from the request path: BanditDB uses polars only to *write*
+    # Parquet exports. Request bodies are parsed by serde_json, and context values
+    # are validated for finiteness and magnitude before reaching any numeric code.
+    # Nothing feeds untrusted text to a polars float parser.
+    #
+    # Exit: upgrade polars past the versions that depend on fast-float.
+    { id = "RUSTSEC-2025-0003", reason = "fast-float via polars-arrow; write-only Parquet path, no untrusted text parsing. REVIEW BY 2026-12-31." },
+]
+
+[licenses]
+# Permissive licences only. Anything copyleft would change the terms under which
+# BanditDB itself can be distributed, so it must be a deliberate decision rather
+# than something a transitive dependency introduces quietly.
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    # Boost Software License 1.0 (xxhash-rust). Permissive and OSI-approved.
+    # Not to be confused with the Business Source License, which is BUSL-1.1 and
+    # is deliberately absent from this list.
+    "BSL-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate major versions bloat the binary and make advisory triage ambiguous —
+# warn rather than fail, since transitive graphs routinely carry a few.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Only crates.io. An unexpected git or registry source in a dependency tree is a
+# supply-chain red flag.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -48,3 +48,21 @@ jobs:
       - name: Format check (non-blocking)
         run: cargo fmt --all --check
         continue-on-error: true
+
+  # Supply chain. 439 crates reach production; nothing was checking them for known
+  # vulnerabilities or licence incompatibilities.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      # advisories = known CVEs, bans = duplicate/banned crates,
+      # licenses = incompatible terms, sources = unexpected registries.
+      - name: cargo-deny
+        run: cargo deny check advisories bans licenses sources

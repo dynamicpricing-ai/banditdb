@@ -117,3 +117,30 @@ BanditDB does not currently support multiple write replicas. The Helm chart enfo
 - **Leader election** — via Kubernetes lease or etcd for transparent failover.
 
 Until then, availability SLA is limited to single-pod restart time (~5–15 s including final checkpoint + recovery). For stricter SLAs, use a PVC backed by a regional/replicated storage class and configure `PodDisruptionBudget`.
+
+
+## Backup and Restore
+
+`scripts/backup_restore.sh` covers backup, restore, and — importantly — verification.
+
+```bash
+./scripts/backup_restore.sh backup  /data /backups     # create an archive
+./scripts/backup_restore.sh restore <archive> /data    # restore into an empty dir
+./scripts/backup_restore.sh verify  <archive>          # boot it in a temp dir
+./scripts/backup_restore.sh drill   /data              # backup then verify, end to end
+```
+
+**What is captured, and why:**
+
+| File | Why it matters |
+|---|---|
+| `checkpoint.json` | Model state as of the last checkpoint |
+| `checkpoint.prev` | Retained previous generation — the fallback when the current one is unreadable |
+| `bandit_wal.jsonl` | Events since that checkpoint; without it everything after the last checkpoint is lost |
+| `neural/` | MLP weights. A neural campaign restored without these serves its random initialisation until the next retrain |
+
+`exports/` is deliberately excluded: Parquet shards are for offline analysis, recovery never reads them, and they are the bulk of the volume. Restoring loses offline history, not model state.
+
+**Run the drill on a schedule.** A backup nobody has restored is a hypothesis. `drill` restores into a throwaway directory, boots the server against it, and asserts the campaigns come back — it is the only step that distinguishes a backup from an untested tarball.
+
+**Restore is refused into a non-empty data directory.** Recovering over a live database would merge two histories.
