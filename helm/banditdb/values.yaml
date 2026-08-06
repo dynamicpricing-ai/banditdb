@@ -50,12 +50,19 @@ auth:
   apiKeys: ""
   # Legacy single admin key (backward compat):
   apiKey: ""
+  # Refuse to start when no keys are configured. Without keys every caller is
+  # granted admin, so a missing secret would otherwise publish an open database.
+  # Leave true for any deployment; set false only for a throwaway local install.
+  required: true
 
 # ── Multi-tenancy ──────────────────────────────────────────────────────────────
 tenantMode: false
 
 # ── Server configuration ──────────────────────────────────────────────────────
 config:
+  # Comma-separated browser origins allowed to call the API. Empty denies all
+  # cross-origin requests; "*" allows any (not recommended with client-side keys).
+  corsOrigins: ""
   port: 8080
   logFormat: ""          # set to "json" for production structured logging
   rustLog: "info"

@@ -1357,6 +1357,16 @@ impl BanditDB {
         EngineError::NotFound(format!("Campaign '{id}' not found"))
     }
 
+    /// Namespaced campaign an interaction belongs to, if it is still pending.
+    ///
+    /// `/reward` identifies its target by interaction id alone, so this is what lets
+    /// the HTTP layer check tenant ownership before applying it. Without it a tenant
+    /// holding a valid key could reward another tenant's interaction by presenting
+    /// its id.
+    pub fn interaction_campaign(&self, interaction_id: &str) -> Option<String> {
+        self.interactions.get(interaction_id).map(|r| r.campaign_id.clone())
+    }
+
     /// Reject context vectors that would corrupt arm matrices.
     ///
     /// Enforced here rather than in the HTTP handlers because handler-level checks

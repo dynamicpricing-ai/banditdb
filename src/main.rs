@@ -385,12 +385,21 @@ struct CampaignEntropyHealth {
     status:  EntropyStatus,
 }
 
+/// Public liveness payload. Carries no campaign data — see `handle_health`.
 #[derive(Serialize)]
 struct HealthResponse {
     status:    &'static str,
     version:   &'static str,
     /// Cargo features this binary was compiled with. Empty means a plain build:
     /// neural algorithms are unavailable and will be rejected at campaign creation.
+    features:  &'static [&'static str],
+}
+
+/// Authenticated health payload, scoped to the caller's tenant.
+#[derive(Serialize)]
+struct HealthDetailResponse {
+    status:    &'static str,
+    version:   &'static str,
     features:  &'static [&'static str],
     campaigns: HashMap<String, CampaignEntropyHealth>,
 }
@@ -463,22 +472,49 @@ async fn require_role(min: Role, Extension(auth): Extension<AuthContext>, req: R
 // Route handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
+/// Overall status shared by the public probe and the authenticated detail view.
+fn health_status(state: &AppState) -> (StatusCode, &'static str, Vec<(String, f64, EntropyStatus)>) {
     let wal_ok   = state.db.wal_healthy.load(Ordering::Relaxed);
     let statuses = state.db.entropy_status_all();
     let degraded = statuses.iter().any(|(_, _, s)| !matches!(s, EntropyStatus::Ok));
-    let campaigns = statuses.into_iter()
-        .map(|(id, entropy, status)| (id, CampaignEntropyHealth { entropy, status }))
-        .collect();
 
-    let (http_status, overall) = if !wal_ok {
+    let (code, overall) = if !wal_ok {
         (StatusCode::SERVICE_UNAVAILABLE, "degraded: wal unavailable")
     } else if degraded {
         (StatusCode::OK, "degraded")
     } else {
         (StatusCode::OK, "ok")
     };
-    (http_status, Json(HealthResponse {
+    (code, overall, statuses)
+}
+
+/// Unauthenticated liveness probe.
+///
+/// Deliberately carries no campaign data. This route sits outside the auth layer so
+/// load balancers and k8s probes can reach it, and it used to return every campaign
+/// ID with its entropy — in tenant mode those IDs carry the tenant prefix, so any
+/// anonymous caller could enumerate the customer list. Per-campaign detail moved to
+/// `/health/detail`, which requires a reader key.
+async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
+    let (code, overall, _) = health_status(&state);
+    (code, Json(HealthResponse {
+        status: overall,
+        version: env!("CARGO_PKG_VERSION"),
+        features: BUILD_FEATURES,
+    }))
+}
+
+/// Authenticated health detail: per-campaign entropy, scoped to the caller's tenant.
+async fn handle_health_detail(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> (StatusCode, Json<HealthDetailResponse>) {
+    let (code, overall, statuses) = health_status(&state);
+    let campaigns = statuses.into_iter()
+        .filter(|(id, _, _)| owns(&auth, id))
+        .map(|(id, entropy, status)| (strip_ns(&auth, &id), CampaignEntropyHealth { entropy, status }))
+        .collect();
+    (code, Json(HealthDetailResponse {
         status: overall,
         version: env!("CARGO_PKG_VERSION"),
         features: BUILD_FEATURES,
@@ -641,13 +677,27 @@ async fn handle_batch_predict(
 
 async fn handle_reward(
     State(state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthContext>,
+    Extension(auth): Extension<AuthContext>,
     Json(payload): Json<RewardRequest>,
 ) -> Result<Json<&'static str>, AppError> {
     if !(0.0..=1.0).contains(&payload.reward) {
         return Err(AppError(StatusCode::BAD_REQUEST,
             format!("reward {} is outside required range [0.0, 1.0]", payload.reward)));
     }
+    // Tenant check. This route names its target by interaction id alone, so without
+    // resolving the owning campaign a tenant could reward another tenant's
+    // interaction by presenting its id. Unknown ids fall through to the engine,
+    // which returns the same NotFound — so this does not reveal whether an id
+    // exists under a different tenant.
+    if auth.tenant_id.is_some() {
+        if let Some(cid) = state.db.interaction_campaign(&payload.interaction_id) {
+            if !owns(&auth, &cid) {
+                return Err(AppError(StatusCode::NOT_FOUND,
+                    format!("Interaction '{}' not found or already rewarded", payload.interaction_id)));
+            }
+        }
+    }
+
     // Awaited directly rather than via spawn_blocking: reward() is now async
     // because it waits on the WAL fsync, and its CPU cost is a single rank-one
     // matrix update. Handing it to a blocking thread would only add a hop.
@@ -747,7 +797,10 @@ async fn handle_checkpoint(State(state): State<Arc<AppState>>) -> Result<Json<St
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
-async fn handle_export(State(state): State<Arc<AppState>>) -> Result<Json<ExportResponse>, AppError> {
+async fn handle_export(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<ExportResponse>, AppError> {
     let export_dir = state.db.export_dir();
     let entries = std::fs::read_dir(&export_dir)
         .map_err(|e| AppError(StatusCode::NOT_FOUND, format!("No exports yet: {e}")))?;
@@ -761,7 +814,10 @@ async fn handle_export(State(state): State<Arc<AppState>>) -> Result<Json<Export
             .filter(|&pos| stem[pos + 1..].chars().all(|c| c.is_ascii_digit()))
             .map(|pos| stem[..pos].to_string())
             .unwrap_or_else(|| stem.to_string());
-        shards.entry(cid).or_default().push(name);
+        // Shard filenames embed the namespaced campaign id, so listing them
+        // unfiltered exposed every tenant's campaign names to any reader key.
+        if !owns(&auth, &cid) { continue; }
+        shards.entry(strip_ns(&auth, &cid)).or_default().push(name);
     }
     for v in shards.values_mut() { v.sort(); }
     Ok(Json(ExportResponse { export_dir, shards }))
@@ -960,7 +1016,23 @@ async fn main() {
     let registry = Arc::new(KeyRegistry::from_env());
 
     if registry.is_open() {
-        tracing::warn!("running in open mode — set BANDITDB_API_KEYS to enable authentication");
+        // Open mode grants every caller Role::Admin. That is a reasonable default for
+        // local development and a catastrophic one for a deployment, so operators can
+        // make it fatal. The Helm chart sets BANDITDB_REQUIRE_AUTH=true.
+        let require_auth = std::env::var("BANDITDB_REQUIRE_AUTH")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if require_auth {
+            tracing::error!(
+                "BANDITDB_REQUIRE_AUTH is set but no keys are configured — refusing to \
+                 start. Every request would be granted admin. Set BANDITDB_API_KEYS."
+            );
+            std::process::exit(1);
+        }
+        tracing::warn!(
+            "running in OPEN MODE — every request is granted admin. Set BANDITDB_API_KEYS \
+             to enable authentication, and BANDITDB_REQUIRE_AUTH=true to make this fatal."
+        );
     } else {
         tracing::info!(key_count = registry.key_count(),
             tenant_mode = registry.tenant_mode, "API key authentication enabled");
@@ -1052,6 +1124,7 @@ async fn main() {
         .route("/campaign/:id",             get(handle_campaign_info))
         .route("/campaign/:id/report",      get(handle_campaign_report))
         .route("/campaign/:id/diagnostics", get(handle_campaign_diagnostics))
+        .route("/health/detail",            get(handle_health_detail))
         .route("/export",                   get(handle_export));
 
     let writer_routes = Router::new()
@@ -1091,10 +1164,31 @@ async fn main() {
             .layer(middleware::from_fn_with_state(Arc::clone(&metrics_state), auth_middleware))
     };
 
+    // CORS defaults to deny. Previously any origin could drive the API from a
+    // browser, so a key exposed in client-side code was usable from anywhere.
+    // BANDITDB_CORS_ORIGINS is a comma-separated allow-list; "*" restores the old
+    // permissive behaviour explicitly.
+    let cors_origins = std::env::var("BANDITDB_CORS_ORIGINS").unwrap_or_default();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
+    let cors = if cors_origins.trim() == "*" {
+        tracing::warn!("CORS allows any origin — set BANDITDB_CORS_ORIGINS to an explicit list");
+        cors.allow_origin(Any)
+    } else {
+        let origins: Vec<_> = cors_origins
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        if origins.is_empty() {
+            tracing::info!("CORS: no origins allowed (set BANDITDB_CORS_ORIGINS to permit browsers)");
+        } else {
+            tracing::info!(count = origins.len(), "CORS: allow-list configured");
+        }
+        cors.allow_origin(origins)
+    };
 
     let app = Router::new()
         .route("/health",       get(handle_health))

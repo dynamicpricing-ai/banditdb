@@ -1,0 +1,30 @@
+# BanditDB
+
+> BanditDB is an open-source decision database for AI agents and applications. It stores learned policies — which action works in which context — as contextual-bandit state (LinUCB, Thompson Sampling, NeuralLinUCB, NeuralThompsonSampling, Progressive Tournament) behind a plain HTTP API. Agents write outcomes and read the best next action; every reward makes the next prediction sharper. Single Rust binary (~11MB), WAL durability, checkpoints, RBAC, Prometheus metrics.
+
+Core loop: create_campaign(id, arms, feature_dim) once → predict(campaign_id, context) returns {arm_id, interaction_id} → your code acts → reward(interaction_id, value) closes the prediction-action-reward tuple and updates the model in microseconds.
+
+Interfaces: Python (`pip install banditdb-python`), TypeScript/JavaScript (banditdb-js), HTTP (curl), MCP server (`claude mcp add banditdb banditdb-mcp --env BANDITDB_URL=http://localhost:8080` — tools: create_campaign, get_intuition, record_outcome, campaign_diagnostics).
+
+Run: `docker run -d -p 8080:8080 simeonlukov/banditdb:latest` or native binary installer.
+
+## Docs
+
+- [Documentation](https://banditdb.com/docs/): full guide — campaigns, algorithms, decay, tournaments, diagnostics
+- [API reference](https://banditdb.com/api/): rendered OpenAPI endpoint reference
+- [OpenAPI spec](https://banditdb.com/openapi.yaml): machine-readable API spec
+- [Live sandbox](https://sandbox.banditdb.com/ui): hosted instance, no install
+
+## Source & packages
+
+- [GitHub](https://github.com/dynamicpricing-ai/banditdb): source, examples, benchmarks (Apache-2.0)
+- [PyPI](https://pypi.org/project/banditdb-python/): Python SDK
+- [Docker Hub](https://hub.docker.com/r/simeonlukov/banditdb): container image
+
+## Key facts
+
+- Storage model: per-arm d×d inverse covariance matrix (A_inv) + weight vector (theta) — a sufficient statistic, not a document log; O(d²) Sherman-Morrison update per reward, no retraining pipeline
+- Write unit: prediction-action-reward tuple; propensities logged (LinUCB) for causal/off-policy analysis; full tuple log exports to Parquet
+- Durability: write-ahead log before memory, checkpoint + WAL rotation, deterministic replay on restart
+- Optional per-campaign decay half-life for non-stationary environments
+- Neural variants embed high-dim contexts (e.g. 256-dim LLM embeddings) via an MLP into a compact matrix space

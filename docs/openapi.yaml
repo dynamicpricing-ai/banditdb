@@ -147,7 +147,10 @@ paths:
     get:
       summary: Health check
       description: |
-        Returns overall service and per-campaign entropy status. Always public.
+        Public liveness probe. Returns overall service status only — no campaign
+        identifiers, since this route is unauthenticated and in tenant mode those
+        identifiers would expose the tenant list. Per-campaign entropy moved to
+        `/health/detail`, which requires a reader key.
         `status` is `"degraded"` (HTTP 200) when any active campaign has low entropy without
         a convergence signal. `status` is `"degraded: wal unavailable"` (HTTP 503) when the
         WAL writer has failed. Safe for load balancer probes and k8s readiness checks.
@@ -173,20 +176,21 @@ paths:
                     type: array
                     items: { type: string, enum: [neural, cuda, metal] }
                     example: ["neural"]
-                  campaigns:
-                    type: object
-                    additionalProperties:
-                      type: object
-                      properties:
-                        entropy: { type: number }
-                        status:  { type: string, enum: [ok, warning, critical] }
+                  version: { type: string }
+                  features:
+                    type: array
+                    items: { type: string }
+                    description: Cargo features compiled in; empty means neural is unavailable.
         "503":
           description: WAL writer unavailable
 
   /metrics:
     get:
       summary: Prometheus metrics
-      description: Returns Prometheus text-format metrics (no authentication required).
+      description: |
+        Prometheus text-format metrics. Requires a valid API key by default —
+        the output names campaigns and arms. Set BANDITDB_METRICS_PUBLIC=true to
+        expose it anonymously.
       security: []
       responses:
         "200":

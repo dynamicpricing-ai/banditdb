@@ -175,6 +175,9 @@ services:
       # - BANDITDB_MAX_WAL_SIZE_MB=50          # auto-checkpoint when WAL exceeds N MB
       # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
       # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
+      - BANDITDB_REQUIRE_AUTH=true             # refuse to start without API keys
+      # - BANDITDB_CORS_ORIGINS=https://app.example.com   # default: deny all browsers
+      # - BANDITDB_METRICS_PUBLIC=true         # expose /metrics without a key
       # --- neural builds only ---
       # - BANDITDB_RETRAIN_POLL_SECS=2         # background MLP retrain cadence; 0 = checkpoint-only
       # - BANDITDB_NEURAL_BUFFER_CAP=50000     # replay buffer retention per campaign
@@ -212,8 +215,9 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 
 | Method | Endpoint | Min Role | Description |
 |--------|----------|----------|-------------|
-| `GET` | `/health` | — | Returns `{"status":"ok"\|"degraded", "campaigns":{...}}`. Always public — safe for load balancer probes. Entropy collapse raises overall status to `"degraded"`. |
-| `GET` | `/metrics` | — | Prometheus text-format metrics. Public unless `BANDITDB_METRICS_PUBLIC=false`. |
+| `GET` | `/health` | — | Public liveness: `{"status":"ok"\|"degraded", "version", "features"}`. No campaign data — safe for load balancer probes and safe to expose. |
+| `GET` | `/health/detail` | reader | Per-campaign entropy, scoped to the caller's tenant. |
+| `GET` | `/metrics` | reader | Prometheus text-format metrics. Authenticated by default (output names campaigns and arms); set `BANDITDB_METRICS_PUBLIC=true` to expose anonymously. |
 | `GET` | `/openapi.yaml` | — | OpenAPI 3.1 specification (this API). |
 | `GET` | `/campaigns` | reader | List all campaigns with algorithm, arm count, and metadata. |
 | `GET` | `/campaign/:id` | reader | Full per-arm state: theta vectors, reward counts, campaign-level totals. |

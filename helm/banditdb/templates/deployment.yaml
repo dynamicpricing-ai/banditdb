@@ -86,6 +86,17 @@ spec:
                   key: BANDITDB_API_KEY
             {{- end }}
             {{- end }}
+            {{- if .Values.auth.required }}
+            # Fail closed: without keys every request is granted admin, so a
+            # missing or mistyped secret must stop the pod rather than silently
+            # publish an unauthenticated database.
+            - name: BANDITDB_REQUIRE_AUTH
+              value: "true"
+            {{- end }}
+            {{- with .Values.config.corsOrigins }}
+            - name: BANDITDB_CORS_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
