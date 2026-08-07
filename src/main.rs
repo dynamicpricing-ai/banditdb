@@ -587,6 +587,7 @@ async fn handle_create_campaign(
         payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata,
         payload.decay_half_life_hours,
     )
+    .await
     .map(|_| Json("Campaign Created"))
     .map_err(map_engine_err)
 }
@@ -598,6 +599,7 @@ async fn handle_delete_campaign(
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
     state.db.delete_campaign(&ns(&auth, &campaign_id))
+        .await
         .map(|_| Json("Campaign Deleted"))
         .map_err(map_engine_err)
 }
@@ -609,6 +611,7 @@ async fn handle_archive_campaign(
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
     state.db.archive_campaign(&ns(&auth, &campaign_id))
+        .await
         .map(|_| Json("Campaign Archived"))
         .map_err(map_engine_err)
 }
@@ -620,6 +623,7 @@ async fn handle_restore_campaign(
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
     state.db.restore_campaign(&ns(&auth, &campaign_id))
+        .await
         .map(|_| Json("Campaign Restored"))
         .map_err(map_engine_err)
 }

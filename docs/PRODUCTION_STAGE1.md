@@ -314,9 +314,13 @@ Reviewed 2026-08-07 against `main`.
 
 Accepted rather than fixed. Each is a deliberate Stage 1 boundary, not an oversight.
 
+> Closed after the review: campaign lifecycle events are now durability-acked
+> alongside rewards, so `add`/`delete`/`archive`/`restore` return only once the
+> record is on disk. Covered by `campaign_lifecycle_is_durable_before_returning`
+> and `created_campaign_survives_immediate_restart`.
+
 | Gap | Impact | Why accepted |
 |---|---|---|
-| Campaign lifecycle events are not durability-acked | A create/archive immediately followed by process death can be lost | Low volume, retry-safe, and the operation is idempotent from the caller's side |
 | No cap on campaign count | An admin key can create campaigns until memory runs out | Stage 1 assumes trusted admin credentials |
 | Promotion/rollback untested in CI | Tournament traffic shifts are covered only by ignored stochastic tests | candle 0.10.2 cannot seed the CPU RNG; needs a weights fixture |
 | Helm templates unrendered | Chart changes are syntactically plausible but unverified | `helm` was unavailable in the working environment — run `helm template` before relying on them |

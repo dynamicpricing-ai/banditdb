@@ -126,7 +126,7 @@ async fn same_process_can_reopen_after_dropping_the_instance() {
     std::fs::create_dir_all(dir).unwrap();
 
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
     db.checkpoint().await.expect("checkpoint");
     drop(db);

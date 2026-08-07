@@ -23,7 +23,7 @@ fn fresh(dir: &str) {
 /// Build a campaign, drive traffic, and checkpoint it.
 async fn seeded_db(dir: &str, rewards: usize) -> BanditDB {
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
     for i in 0..rewards {
         let ctx = vec![(i % 5) as f64 / 5.0, (i % 3) as f64 / 3.0];

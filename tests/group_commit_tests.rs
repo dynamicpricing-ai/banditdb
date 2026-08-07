@@ -20,11 +20,11 @@ use std::fs;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-fn setup(dir: &str) -> BanditDB {
+async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
     db
 }
@@ -36,7 +36,7 @@ async fn settle() {
 #[tokio::test]
 async fn durable_events_are_fsynced() {
     let dir = "/tmp/banditdb_p03_durable";
-    let db = setup(dir);
+    let db = setup(dir).await;
     settle().await;
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
@@ -59,7 +59,7 @@ async fn lone_reward_is_synced_without_waiting_for_the_window() {
     let dir = "/tmp/banditdb_p03_idle";
     // A long window would hide the idle path if it were missing.
     std::env::set_var("BANDITDB_FSYNC_INTERVAL_MS", "60000");
-    let db = setup(dir);
+    let db = setup(dir).await;
     settle().await;
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
@@ -81,7 +81,7 @@ async fn lone_reward_is_synced_without_waiting_for_the_window() {
 #[tokio::test]
 async fn predictions_alone_do_not_force_a_sync() {
     let dir = "/tmp/banditdb_p03_besteffort";
-    let db = setup(dir);
+    let db = setup(dir).await;
     settle().await;
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
@@ -107,7 +107,7 @@ async fn predictions_alone_do_not_force_a_sync() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_rewards_share_syncs() {
     let dir = "/tmp/banditdb_p03_batching";
-    let db = std::sync::Arc::new(setup(dir));
+    let db = std::sync::Arc::new(setup(dir).await);
     settle().await;
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 

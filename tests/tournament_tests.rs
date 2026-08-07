@@ -72,7 +72,7 @@ async fn test_no_spurious_promotion_on_linear() {
         progressive_algo(10, 3, 1000, 20),
         None,
         None,
-    ).unwrap();
+    ).await.unwrap();
 
     // Balanced contexts that span the decision boundary clearly
     let contexts: &[Vec<f64>] = &[
@@ -138,7 +138,7 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
             progressive_algo(5, 1, 1000, 20), // required_wins=1 for fast progress
             None,
             None,
-        ).unwrap();
+        ).await.unwrap();
 
         for i in 1..=100 {
             for (ctx, target) in xor_data {
@@ -212,7 +212,7 @@ async fn test_gradual_traffic_ramp() {
         progressive_algo(5, 1, STEP, 20), // required_wins=1 for fastest possible ramp
         None,
         None,
-    ).unwrap();
+    ).await.unwrap();
 
     let xor_data: &[(Vec<f64>, &str)] = &[
         (vec![0.0, 0.0], "A"),
@@ -288,7 +288,7 @@ async fn test_reward_continuity_across_transition() {
         progressive_algo(5, 1, 1000, 20),
         None,
         None,
-    ).unwrap();
+    ).await.unwrap();
 
     let xor_data: &[(Vec<f64>, &str)] = &[
         (vec![0.0, 0.0], "A"),
@@ -384,7 +384,7 @@ async fn test_rollback_on_challenger_degradation() {
         }),
         None,
         None,
-    ).unwrap();
+    ).await.unwrap();
 
     // Contexts where A is best and B is best
     let ctx_a = vec![0.9, 0.9];

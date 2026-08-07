@@ -31,7 +31,7 @@ async fn test_2_1_commutative_b_assertion() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
-    let _ = db.add_campaign("stress", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None);
+    let _ = db.add_campaign("stress", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None).await;
 
     const N: usize = 1000;
 
@@ -92,7 +92,7 @@ async fn test_2_2_wal_event_count_integrity() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
-    let _ = db.add_campaign("concurrent", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None, None);
+    let _ = db.add_campaign("concurrent", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None, None).await;
 
     const N: usize = 500;
     let mut handles = Vec::with_capacity(N);
@@ -153,7 +153,7 @@ async fn test_2_3_reader_starvation_check() {
     let _ = std::fs::remove_file(wal);
 
     let db = Arc::new(BanditDB::new(wal, &data_dir_for(wal)));
-    let _ = db.add_campaign("stress", vec!["a".to_string(), "b".to_string(), "c".to_string()], 4, 1.0, Algorithm::Linucb, None, None);
+    let _ = db.add_campaign("stress", vec!["a".to_string(), "b".to_string(), "c".to_string()], 4, 1.0, Algorithm::Linucb, None, None).await;
 
     let error_count = Arc::new(AtomicUsize::new(0));
     let reward_count = Arc::new(AtomicUsize::new(0));

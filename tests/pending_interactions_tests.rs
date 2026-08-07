@@ -14,11 +14,11 @@ use banditdb::state::{Algorithm, CheckpointData};
 use std::fs;
 use std::sync::atomic::Ordering;
 
-fn setup(dir: &str) -> BanditDB {
+async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
     db
 }
@@ -40,7 +40,7 @@ fn read_checkpoint(dir: &str) -> CheckpointData {
 async fn cache_is_bounded_and_reports_evictions() {
     let dir = "/tmp/banditdb_p05_bounded";
     std::env::set_var("BANDITDB_MAX_PENDING_INTERACTIONS", "100");
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     // Predict without rewarding, so nothing is invalidated and the cache can only grow.
     for i in 0..2_000 {
@@ -71,7 +71,7 @@ async fn cache_is_bounded_and_reports_evictions() {
 #[tokio::test]
 async fn checkpoint_carries_unmatched_predictions() {
     let dir = "/tmp/banditdb_p05_pending";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     // 10 rewarded (matched), 15 left in flight.
     for i in 0..10 {
@@ -102,7 +102,7 @@ async fn checkpoint_carries_unmatched_predictions() {
 #[tokio::test]
 async fn checkpoint_does_not_carry_matched_predictions() {
     let dir = "/tmp/banditdb_p05_matched";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for i in 0..20 {
         let (arm, iid) = db.predict("c", ctx(i)).expect("predict");
@@ -123,7 +123,7 @@ async fn checkpoint_does_not_carry_matched_predictions() {
 #[tokio::test]
 async fn late_reward_matches_across_checkpoint_and_restart() {
     let dir = "/tmp/banditdb_p05_late_reward";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     let (_, iid) = db.predict("c", ctx(1)).expect("predict");
     db.checkpoint().await.expect("checkpoint");
@@ -149,7 +149,7 @@ async fn late_reward_matches_across_checkpoint_and_restart() {
 #[tokio::test]
 async fn repeated_checkpoints_do_not_rewrite_the_backlog() {
     let dir = "/tmp/banditdb_p05_no_amplification";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for i in 0..40 {
         db.predict("c", ctx(i)).expect("predict");

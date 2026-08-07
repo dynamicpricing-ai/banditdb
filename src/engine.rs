@@ -1570,8 +1570,13 @@ impl BanditDB {
         Ok(())
     }
 
+    /// Create a campaign. Returns once the record is durable.
+    ///
+    /// Async for the same reason as `reward`: it awaits the WAL fsync covering its
+    /// event. A create that returned before reaching disk could be lost to process
+    /// death, leaving a caller that believes the campaign exists.
     #[allow(clippy::too_many_arguments)] // campaign construction params; grouping into a struct would only move the noise
-    pub fn add_campaign(
+    pub async fn add_campaign(
         &self,
         campaign_id:          &str,
         arms:                 Vec<String>,
@@ -1603,10 +1608,10 @@ impl BanditDB {
             campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_send(Arc::clone(&event), Durability::Required)?;
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
         self.apply_event_to_memory(&event);
         self.audit("create", campaign_id, None);
-        Ok(())
+        Self::await_ack(ack).await
     }
 
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Result<(String, String), EngineError> {
@@ -1785,16 +1790,17 @@ impl BanditDB {
         Ok(interaction_id)
     }
 
-    pub fn delete_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
+    /// Durable: returns only once the record is on disk. See `add_campaign`.
+    pub async fn delete_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
         if !self.campaigns.read().contains_key(campaign_id) {
             return Err(Self::campaign_not_found(campaign_id));
         }
         let event = Arc::new(DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        self.wal_send(Arc::clone(&event), Durability::Required)?;
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
         self.apply_event_to_memory(&event);
         self.audit("delete", campaign_id, None);
-        Ok(())
+        Self::await_ack(ack).await
     }
 
     /// Record an outcome. Returns only once the record is on disk.
@@ -1840,30 +1846,32 @@ impl BanditDB {
         }
     }
 
-    pub fn archive_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
+    /// Durable: returns only once the record is on disk. See `add_campaign`.
+    pub async fn archive_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
         if !self.campaigns.read().contains_key(campaign_id) {
             return Err(Self::campaign_not_found(campaign_id));
         }
         let event = Arc::new(DbEvent::CampaignArchived {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        self.wal_send(Arc::clone(&event), Durability::Required)?;
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
         self.apply_event_to_memory(&event);
         self.audit("archive", campaign_id, None);
-        Ok(())
+        Self::await_ack(ack).await
     }
 
-    pub fn restore_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
+    /// Durable: returns only once the record is on disk. See `add_campaign`.
+    pub async fn restore_campaign(&self, campaign_id: &str) -> Result<(), EngineError> {
         if !self.campaigns.read().contains_key(campaign_id) {
             return Err(Self::campaign_not_found(campaign_id));
         }
         let event = Arc::new(DbEvent::CampaignRestored {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        self.wal_send(Arc::clone(&event), Durability::Required)?;
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
         self.apply_event_to_memory(&event);
         self.audit("restore", campaign_id, None);
-        Ok(())
+        Self::await_ack(ack).await
     }
 
     pub fn campaign_diagnostics(&self, campaign_id: &str) -> Result<CampaignDiagnosticsData, EngineError> {

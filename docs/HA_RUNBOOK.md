@@ -11,7 +11,7 @@ State lives in memory and is journalled to a WAL (`bandit_wal.jsonl`), with peri
 | Event | Guarantee |
 |---|---|
 | Rewards | **Acknowledged only after fsync.** `POST /reward` blocks until the record is on disk, so a 200 response survives power loss. |
-| Campaign lifecycle (create, delete, archive, restore) | Written and fsynced, but the caller is **not** made to wait. A 200 can precede durability by up to one commit window, so a create immediately followed by process death may be lost. Retry is safe. |
+| Campaign lifecycle (create, delete, archive, restore) | **Acknowledged only after fsync**, same as rewards. A 200 from `POST /campaign` means the campaign survives restart. |
 | Predictions | Best-effort. Dropped under WAL backlog rather than failing the request. |
 
 Predictions are recoverable — the pending-interaction cache holds them, and the checkpoint carries them across restarts — so losing a prediction *record* costs only the ability to match a late reward, never model state.

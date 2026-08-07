@@ -17,11 +17,11 @@ use banditdb::BanditDB;
 use banditdb::state::{Algorithm, NeuralLinUCBConfig};
 use std::fs;
 
-fn setup(dir: &str) -> BanditDB {
+async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
     db
 }
@@ -53,7 +53,7 @@ fn theta_is_finite(db: &BanditDB, campaign: &str) -> bool {
 #[tokio::test]
 async fn predict_rejects_hostile_context_values() {
     let dir = "/tmp/banditdb_p06_predict";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for (label, v) in hostile_values() {
         for pos in 0..2 {
@@ -77,7 +77,7 @@ async fn predict_rejects_hostile_context_values() {
 #[tokio::test]
 async fn interact_rejects_hostile_context_values() {
     let dir = "/tmp/banditdb_p06_interact_ctx";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for (label, v) in hostile_values() {
         assert!(
@@ -93,7 +93,7 @@ async fn interact_rejects_hostile_context_values() {
 #[tokio::test]
 async fn interact_enforces_reward_range_and_campaign_existence() {
     let dir = "/tmp/banditdb_p06_interact_reward";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for bad in [f64::NAN, f64::INFINITY, 5.0, -0.5, 1.000_001] {
         assert!(
@@ -115,7 +115,7 @@ async fn interact_enforces_reward_range_and_campaign_existence() {
 #[tokio::test]
 async fn context_dimension_limits_are_enforced() {
     let dir = "/tmp/banditdb_p06_dims";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     assert!(db.predict("c", vec![]).is_err(), "empty context must be rejected");
     assert!(
@@ -128,24 +128,24 @@ async fn context_dimension_limits_are_enforced() {
 #[tokio::test]
 async fn campaign_creation_rejects_degenerate_parameters() {
     let dir = "/tmp/banditdb_p06_campaign";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     for bad_alpha in [f64::NAN, f64::INFINITY, -1.0] {
         assert!(
-            db.add_campaign("x", vec!["A".into()], 2, bad_alpha, Algorithm::Linucb, None, None).is_err(),
+            db.add_campaign("x", vec!["A".into()], 2, bad_alpha, Algorithm::Linucb, None, None).await.is_err(),
             "alpha {bad_alpha} must be rejected: it makes every score NaN or inverts exploration"
         );
     }
 
     for bad_hl in [Some(0.0), Some(-5.0), Some(f64::NAN)] {
         assert!(
-            db.add_campaign("y", vec!["A".into()], 2, 1.0, Algorithm::Linucb, None, bad_hl).is_err(),
+            db.add_campaign("y", vec!["A".into()], 2, 1.0, Algorithm::Linucb, None, bad_hl).await.is_err(),
             "decay half-life {bad_hl:?} must be rejected"
         );
     }
 
     assert!(
-        db.add_campaign("ok", vec!["A".into()], 2, 0.0, Algorithm::Linucb, None, None).is_ok(),
+        db.add_campaign("ok", vec!["A".into()], 2, 0.0, Algorithm::Linucb, None, None).await.is_ok(),
         "alpha = 0 is valid (pure exploitation) and must still be accepted"
     );
     let _ = fs::remove_dir_all(dir);
@@ -154,7 +154,7 @@ async fn campaign_creation_rejects_degenerate_parameters() {
 #[tokio::test]
 async fn neural_config_rejects_degenerate_dimensions() {
     let dir = "/tmp/banditdb_p06_neural_cfg";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     let base = NeuralLinUCBConfig {
         context_dim: 4, embed_dim: 8, hidden_dim: 16, hidden_layers: 2,
@@ -177,7 +177,7 @@ async fn neural_config_rejects_degenerate_dimensions() {
     ] {
         assert!(
             db.add_campaign("n", vec!["A".into()], 8, 1.0,
-                            Algorithm::NeuralLinUCB(cfg), None, None).is_err(),
+                            Algorithm::NeuralLinUCB(cfg), None, None).await.is_err(),
             "neural config with {label} must be rejected — zero dimensions build \
              degenerate matrices whose dot products panic on a length mismatch"
         );
@@ -185,7 +185,7 @@ async fn neural_config_rejects_degenerate_dimensions() {
 
     assert!(
         db.add_campaign("n_ok", vec!["A".into()], 8, 1.0,
-                        Algorithm::NeuralLinUCB(base), None, None).is_ok(),
+                        Algorithm::NeuralLinUCB(base), None, None).await.is_ok(),
         "a valid neural config must still be accepted"
     );
     let _ = fs::remove_dir_all(dir);
@@ -196,7 +196,7 @@ async fn neural_config_rejects_degenerate_dimensions() {
 #[tokio::test]
 async fn magnitude_sweep_never_corrupts_arm_state() {
     let dir = "/tmp/banditdb_p06_sweep";
-    let db = setup(dir);
+    let db = setup(dir).await;
 
     // Range deliberately spans the overflow threshold: f64 squaring only overflows
     // above ~1e154, so a sweep stopping at 1e30 never reaches the dangerous region.
@@ -210,7 +210,7 @@ async fn magnitude_sweep_never_corrupts_arm_state() {
         for (sign, candidate) in [("p", v), ("n", -v)] {
             let name = format!("s{sign}{exp}");
             db.add_campaign(&name, vec!["A".into(), "B".into()], 2, 1.0,
-                            Algorithm::Linucb, None, None).unwrap();
+                            Algorithm::Linucb, None, None).await.unwrap();
 
             if let Ok((arm, iid)) = db.predict(&name, vec![candidate, 0.5]) {
                 accepted += 1;

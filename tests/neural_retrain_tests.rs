@@ -30,7 +30,7 @@ async fn drive(db: &BanditDB, campaign: &str, n: usize) {
     }
 }
 
-fn setup(dir: &str, retrain_every: usize) -> BanditDB {
+async fn setup(dir: &str, retrain_every: usize) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
@@ -45,7 +45,7 @@ fn setup(dir: &str, retrain_every: usize) -> BanditDB {
         Algorithm::NeuralLinUCB(cfg),
         None,
         None,
-    )
+    ).await
     .unwrap();
     db
 }
@@ -53,7 +53,7 @@ fn setup(dir: &str, retrain_every: usize) -> BanditDB {
 #[tokio::test]
 async fn campaign_becomes_due_then_clears_after_retrain() {
     let dir = "/tmp/banditdb_test_retrain_due";
-    let db = setup(dir, 20);
+    let db = setup(dir, 20).await;
 
     assert!(
         db.campaigns_due_for_retrain().is_empty(),
@@ -79,7 +79,7 @@ async fn campaign_becomes_due_then_clears_after_retrain() {
 #[tokio::test]
 async fn retrain_persists_weights_and_keeps_serving() {
     let dir = "/tmp/banditdb_test_retrain_weights";
-    let db = setup(dir, 20);
+    let db = setup(dir, 20).await;
     drive(&db, "c", 40).await;
 
     assert!(db.retrain_campaign("c"));
@@ -102,7 +102,7 @@ async fn retrain_persists_weights_and_keeps_serving() {
 #[tokio::test]
 async fn worker_retrain_publishes_weights_to_prediction_path() {
     let dir = "/tmp/banditdb_test_retrain_publishes";
-    let db = setup(dir, 20);
+    let db = setup(dir, 20).await;
     let probe = ndarray::Array1::from_vec(vec![0.3, 0.7]);
 
     let before = {
@@ -137,7 +137,7 @@ async fn retrain_campaign_is_safe_on_unknown_and_non_neural_campaigns() {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("linear", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None)
+    db.add_campaign("linear", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
         .unwrap();
 
     assert!(!db.retrain_campaign("does_not_exist"));
@@ -155,7 +155,7 @@ async fn buffer_retains_beyond_legacy_cap() {
     std::env::set_var("BANDITDB_NEURAL_BATCH_SIZE", "100");
 
     let dir = "/tmp/banditdb_test_retrain_buffer";
-    let db = setup(dir, 100_000); // never auto-due; drive the retrain manually
+    let db = setup(dir, 100_000).await; // never auto-due; drive the retrain manually
     drive(&db, "c", 6_000).await;
 
     {

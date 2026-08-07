@@ -37,7 +37,7 @@ fn neural_cfg(retrain_every: usize, retrain_steps: usize) -> NeuralLinUCBConfig 
     }
 }
 
-fn setup(dir: &str, retrain_every: usize, retrain_steps: usize) -> Arc<BanditDB> {
+async fn setup(dir: &str, retrain_every: usize, retrain_steps: usize) -> Arc<BanditDB> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = Arc::new(BanditDB::new(&format!("{dir}/wal.jsonl"), dir));
@@ -52,7 +52,7 @@ fn setup(dir: &str, retrain_every: usize, retrain_steps: usize) -> Arc<BanditDB>
         Algorithm::NeuralLinUCB(cfg),
         None,
         None,
-    )
+    ).await
     .unwrap();
     db
 }
@@ -69,7 +69,7 @@ fn ctx(i: usize) -> Vec<f64> {
 #[tokio::test]
 async fn predict_does_not_block_while_neural_lock_is_held() {
     let dir = "/tmp/banditdb_p01_held_lock";
-    let db = setup(dir, 100_000, 5);
+    let db = setup(dir, 100_000, 5).await;
 
     let (tx, rx) = std::sync::mpsc::channel();
     let db_predict = Arc::clone(&db);
@@ -117,7 +117,7 @@ async fn predict_does_not_block_while_neural_lock_is_held() {
 #[tokio::test]
 async fn snapshot_is_isolated_from_subsequent_training() {
     let dir = "/tmp/banditdb_p01_isolation";
-    let db = setup(dir, 20, 50);
+    let db = setup(dir, 20, 50).await;
 
     let probe = ndarray::Array1::from_vec(ctx(3));
 
@@ -168,7 +168,7 @@ async fn snapshot_is_isolated_from_subsequent_training() {
 async fn concurrent_predict_reward_retrain_stays_live() {
     let dir = "/tmp/banditdb_p01_stress";
     // Small retrain_every + real step count so retrains fire constantly during the run.
-    let db = setup(dir, 25, 40);
+    let db = setup(dir, 25, 40).await;
 
     let stop = Arc::new(AtomicBool::new(false));
     let predicts = Arc::new(AtomicU64::new(0));
