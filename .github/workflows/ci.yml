@@ -49,6 +49,50 @@ jobs:
         run: cargo fmt --all --check
         continue-on-error: true
 
+  # Durability suites. These drive the real binary rather than the library, so
+  # `cargo test` cannot cover them — and until this job existed they were only ever
+  # run by hand, which is the same as not being covered.
+  durability:
+    name: Crash injection + restore drill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --features neural
+
+      # Iteration count is a CI-time compromise. The plan targets 500+; each
+      # iteration spawns and kills a server, so a full run belongs on a schedule.
+      # 25 is enough to catch a systematic durability regression.
+      - name: Crash injection (strict — zero acknowledged-reward loss)
+        run: ./scripts/crash_injection.sh 25 --strict
+
+      # A backup is a hypothesis until a restore has been proven.
+      - name: Backup / restore drill
+        run: |
+          set -euo pipefail
+          DIR=$(mktemp -d)
+          DATA_DIR="$DIR" PORT=18700 BANDITDB_API_KEY=ci \
+            ./target/release/banditdb & SRV=$!
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:18700/health >/dev/null && break || sleep 0.5
+          done
+          curl -sf -X POST http://127.0.0.1:18700/campaign \
+            -H 'X-Api-Key: ci' -H 'Content-Type: application/json' \
+            -d '{"campaign_id":"drill","arms":["A","B"],"feature_dim":2,"alpha":1.0}'
+          curl -sf -X POST http://127.0.0.1:18700/checkpoint -H 'X-Api-Key: ci' -d '{}'
+          kill $SRV; sleep 1
+          ./scripts/backup_restore.sh drill "$DIR"
+
+      # Smoke only: the numbers are host-dependent, so this guards against the
+      # harness rotting rather than asserting a throughput floor.
+      - name: Scale harness smoke
+        run: |
+          pip install --quiet aiohttp psutil
+          python3 benchmark/scale/limits.py --quick
+
   # Supply chain. 439 crates reach production; nothing was checking them for known
   # vulnerabilities or licence incompatibilities.
   audit:
