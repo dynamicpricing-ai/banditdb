@@ -2,7 +2,19 @@
 
 ## Current Architecture
 
-BanditDB is a **single-writer** service. All state lives in memory, is durably journalled to a WAL (`bandit_wal.jsonl`), and is periodically checkpointed to Parquet + `checkpoint.json`.
+BanditDB is a **single-writer** service, enforced by an exclusive `flock` on `DATA_DIR`: a second process on the same volume refuses to start rather than corrupting it.
+
+State lives in memory and is journalled to a WAL (`bandit_wal.jsonl`), with periodic checkpoints to `checkpoint.json` plus Parquet exports for offline analysis.
+
+**Durability is split by event type, deliberately:**
+
+| Event | Guarantee |
+|---|---|
+| Rewards | **Acknowledged only after fsync.** `POST /reward` blocks until the record is on disk, so a 200 response survives power loss. |
+| Campaign lifecycle (create, delete, archive, restore) | Written and fsynced, but the caller is **not** made to wait. A 200 can precede durability by up to one commit window, so a create immediately followed by process death may be lost. Retry is safe. |
+| Predictions | Best-effort. Dropped under WAL backlog rather than failing the request. |
+
+Predictions are recoverable — the pending-interaction cache holds them, and the checkpoint carries them across restarts — so losing a prediction *record* costs only the ability to match a late reward, never model state.
 
 ```
 ┌─────────────────────────────┐
@@ -25,9 +37,14 @@ BanditDB is a **single-writer** service. All state lives in memory, is durably j
 ## What Happens on Pod Restart
 
 1. Axum receives SIGTERM → graceful shutdown runs a **final checkpoint** (30 s timeout).
-2. On restart, `BanditDB::recover()` loads `checkpoint.json` first, then replays any WAL entries written after the last checkpoint.
-3. **Maximum data loss** = events written to the WAL after the last successful checkpoint that did not make it into the final checkpoint. This window is bounded by `BANDITDB_CHECKPOINT_INTERVAL` (default: 5 000 rewards) and `BANDITDB_MAX_WAL_SIZE_MB` (default: 100 MB).
-4. Recovery is automatic — no manual intervention required for a clean restart.
+2. On restart, `BanditDB::recover()` loads `checkpoint.json`, falling back to the retained `checkpoint.prev` if the current generation is unreadable, then replays the WAL from the recorded offset.
+3. **Maximum data loss = zero for acknowledged rewards.** `POST /reward` does not return until the record has been written *and* covered by an fsync, so a 200 response means it survives process death, power loss, and VM preemption alike. Only in-flight requests that never received a response are lost.
+
+   This is not bounded by the checkpoint interval, and earlier revisions of this runbook were wrong to say so. Checkpointing controls WAL size and replay time, not durability.
+
+   **Predictions are deliberately weaker.** They are best-effort: under a WAL backlog a prediction record is dropped rather than failing the request, which costs the ability to match a late reward for it. Watch `banditdb_wal_dropped_total`.
+4. Recovery is automatic — no manual intervention for a clean restart. Measured replay: **0.6 s for 100k events / 38 MB WAL**, so restart time is dominated by pod scheduling.
+5. If the checkpoint is corrupt *and* no usable `checkpoint.prev` exists, the server **refuses to start** rather than coming up empty. Restore from backup, or set `BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true` to start empty and accept the loss.
 
 ## Backup Strategy
 
@@ -108,6 +125,10 @@ kubectl logs -f deployment/banditdb | grep -E "recovered|checkpoint"
 | Planned rolling update | Graceful shutdown triggers final checkpoint before termination |
 | WAL writer failure | Health endpoint returns 503; new writes are rejected; existing state is safe |
 | Storage full | WAL writes fail; health endpoint reflects degraded state |
+| Second process on the same volume | Refuses to start — `flock` on `DATA_DIR` prevents the interleaved writes that would corrupt it |
+| Corrupt checkpoint | Falls back to `checkpoint.prev`; refuses to start if neither is readable, rather than serving an empty database |
+| Prediction backlog | Prediction log records are dropped, not requests. Serving continues; `banditdb_wal_dropped_total` rises and late rewards for dropped records will not match |
+| Pending-interaction cache full | Oldest entries evicted; `banditdb_interactions_evicted_total` rises. Each eviction permanently breaks reward matching for that prediction — alert on it |
 
 ## Multi-Replica (Not Yet Supported)
 
