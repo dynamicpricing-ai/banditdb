@@ -1,6 +1,6 @@
 # BanditDB — Stage 1 Production Readiness Plan
 
-**Status:** proposed
+**Status:** P0/P1/P2 complete; gate reviewed 2026-08-07, pending SLA sign-off
 **Target:** small public cloud database — single-writer, single-node, small shared multi-tenant
 **Baseline audited:** v1.0.4 (`main`)
 
@@ -291,12 +291,45 @@ Harnesses 1 and 2 should be built *alongside* P0.1 and P0.2, not afterwards.
 
 ### Stage 1 launch gate
 
-- [ ] All P0 items complete
-- [ ] All P1 items complete
-- [ ] Test workstream items 1–5 green in CI
-- [ ] Published scale limits measured, not estimated
-- [ ] HA runbook rewritten to match actual durability semantics
-- [ ] SLA table in §1 reviewed and signed off as accurate
+Reviewed 2026-08-07 against `main`.
+
+- [x] **All P0 items complete** — P0.1–P0.6 plus P0.3b, each merged with an acceptance
+      test verified to fail against the pre-fix behaviour.
+- [x] **All P1 items complete** — P1.1–P1.4, covered by `tests/http_rbac_tenant_tests.rs`
+      driving a real server process.
+- [x] **Test workstream items 1–5 green in CI** — items 1, 3, 4 run under `cargo test`;
+      items 2 and 5 were shell/Python harnesses that nothing executed until the
+      `durability` CI job was added. Reviewing the gate is what surfaced that.
+- [x] **Published scale limits measured, not estimated** — §6, from `benchmark/scale/limits.py`.
+- [x] **HA runbook rewritten to match actual durability semantics** — it had drifted in
+      *both* directions: it claimed WAL journalling was durable when no fsync existed, and
+      then (after P0.3b) still described a loss window bounded by the checkpoint interval
+      that no longer exists.
+- [ ] **SLA table reviewed and signed off** — requires a human owner. The figures are
+      measured and the caveats are stated; the commitment itself is not mine to make.
+
+**Verdict: technically ready for Stage 1, pending sign-off and the caveats below.**
+
+### Known gaps at gate time
+
+Accepted rather than fixed. Each is a deliberate Stage 1 boundary, not an oversight.
+
+| Gap | Impact | Why accepted |
+|---|---|---|
+| Campaign lifecycle events are not durability-acked | A create/archive immediately followed by process death can be lost | Low volume, retry-safe, and the operation is idempotent from the caller's side |
+| No cap on campaign count | An admin key can create campaigns until memory runs out | Stage 1 assumes trusted admin credentials |
+| Promotion/rollback untested in CI | Tournament traffic shifts are covered only by ignored stochastic tests | candle 0.10.2 cannot seed the CPU RNG; needs a weights fixture |
+| Helm templates unrendered | Chart changes are syntactically plausible but unverified | `helm` was unavailable in the working environment — run `helm template` before relying on them |
+| Single-AZ, single-writer | No HA; node loss means downtime until reschedule | Explicit Stage 1 scope |
+
+### Crash harness measurement caveat
+
+`crash_injection.sh` counts "committed" from the server's in-memory report, which is
+updated just before the durability ack. A kill inside that sub-millisecond window
+inflates the expected count for a reward the client was never told succeeded. No
+*acknowledged* write is lost, but the harness cannot distinguish the two — worth
+tightening to track client-confirmed rewards before these numbers back a contractual
+SLA.
 
 ---
 
