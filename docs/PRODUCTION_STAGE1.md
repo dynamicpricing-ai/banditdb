@@ -16,19 +16,27 @@ Half the disagreement between the source audits came from unstated scope. Stage 
 
 > **Single-writer, single-node, small shared multi-tenant. Explicitly not highly available.**
 
-The SLA this plan makes honest to publish:
+The SLA this plan makes honest to publish. Figures are measured, not estimated —
+see §6 for the harness and the raw numbers.
 
 | Property | Stage 1 commitment |
 |---|---|
 | Availability | 99.5% monthly, single-AZ, planned restart windows excluded |
-| RPO (data loss) | ≤ *N* seconds of rewards, where *N* is the configured fsync interval |
-| RTO (recovery) | ≤ 5 min — pod reschedule plus WAL replay; scales with WAL size |
-| Durability | Rewards durable to disk. **Predictions are best-effort.** |
-| Scale limits | Documented and enforced: max campaigns, arms, feature dim, req/s |
+| RPO (data loss) | **Zero for acknowledged rewards.** A 200 response means the record is on disk. |
+| RTO (recovery) | ≤ 5 min, dominated by pod scheduling — WAL replay is **&lt;1 s for 100k events / 38 MB** |
+| Durability | Rewards durable to disk before the caller is acknowledged. **Predictions are best-effort** and may be dropped under load (`banditdb_wal_dropped_total`). |
+| Throughput | **~10,000 predict/s** (p99 4.6 ms) and **~4,400 reward/s** (p99 8.0 ms) at concurrency 32, 12-core host |
+| Memory | ~1 KB per pending interaction; the 100k default cap is ≈ 70–130 MB |
 | Multi-tenancy | Logical isolation by namespacing — **not** a hard boundary between mutually hostile tenants |
 
-That last row is a commercial constraint, not just a technical one. Stage 1 can serve many
-customers, but must not claim isolation sufficient for regulated or adversarial workloads.
+The multi-tenancy row is a commercial constraint, not just a technical one. Stage 1 can serve
+many customers, but must not claim isolation sufficient for regulated or adversarial workloads.
+
+The RPO row came out stronger than planned. The plan assumed rewards would be
+acknowledged before reaching disk, making RPO equal to the fsync interval; P0.3b
+made the caller wait for the fsync instead, so an acknowledged reward cannot be
+lost at all. Unacknowledged in-flight requests are still lost on process death,
+which is ordinary for any database.
 
 **Explicitly deferred to Stage 2+:** multi-replica HA, warm standby, read replicas, campaign
 sharding, Kafka-style external log, hard tenant isolation.
@@ -258,8 +266,16 @@ None of the above is verifiable without this, and all three audits underweighted
    mismatch. Proof for P0.6.
 5. **Load test establishing the published limits** — a scale ceiling that has not been measured
    cannot be documented.
-6. **Seed or remove the 3 ignored stochastic tournament tests** — promotion and rollback behaviour
-   is currently uncovered in CI.
+6. ~~**Seed or remove the 3 ignored stochastic tournament tests**~~ — **not achievable as
+   specified.** candle 0.10.2's CPU backend rejects seeding outright
+   (`cpu_backend/mod.rs:3054`: `bail!("cannot seed the CPU rng with set_seed")`), so neural
+   weight initialisation cannot be made deterministic through that API. The tests stay
+   `#[ignore]`d and CI runs them non-blocking for signal.
+
+   Promotion and rollback therefore remain uncovered by a gating test. The workable
+   alternative is to commit a fixed-weight safetensors fixture and load it via
+   `NeuralLinUCBState::load`, trading a binary test fixture for determinism. Deferred, and
+   listed here so the gap is explicit rather than implied by three ignored tests.
 
 Harnesses 1 and 2 should be built *alongside* P0.1 and P0.2, not afterwards.
 
@@ -281,3 +297,77 @@ Harnesses 1 and 2 should be built *alongside* P0.1 and P0.2, not afterwards.
 - [ ] Published scale limits measured, not estimated
 - [ ] HA runbook rewritten to match actual durability semantics
 - [ ] SLA table in §1 reviewed and signed off as accurate
+
+---
+
+## 6. Measured limits
+
+`benchmark/scale/limits.py` produces these. Re-run after any change to the write
+path — the reward figures in particular moved by an order of magnitude during P0.3b.
+
+Host: 12 cores, local SSD, loopback. Treat as a ceiling, not a cloud figure.
+
+### Throughput
+
+| Concurrency | predict ops/s | p99 ms | reward ops/s | p99 ms |
+|---|---|---|---|---|
+| 1 | 5,422 | 0.30 | 244 | 6.36 |
+| 8 | 9,729 | 1.16 | 1,254 | 11.10 |
+| **32** | **10,057** | **4.62** | **4,364** | **7.99** |
+| 64 | 10,056 | 8.20 | 3,506 | 15.24 |
+| 128 | 9,372 | 19.24 | 1,880 | 30.24 |
+
+Both paths peak at concurrency 32 and degrade past 64 — that is the operating
+point to size against.
+
+Reward throughput is ~2.3× lower than predict because each caller waits for the
+fsync covering its record. Per-request latency is ~3.4 ms at concurrency 1, but
+throughput scales to 4,364/s because group commit amortises one fsync across many
+concurrent waiters. Serial clients pay the full latency; concurrent ones do not.
+
+### The fsync interval barely matters
+
+| `BANDITDB_FSYNC_INTERVAL_MS` | reward ops/s | p50 ms | p99 ms |
+|---|---|---|---|
+| 0 | 2,404 | 5.12 | 11.50 |
+| 50 | 2,451 | 4.93 | 8.80 |
+| 200 (default) | 2,651 | 4.52 | 8.69 |
+| 1000 | 2,621 | 4.61 | 7.92 |
+
+Changing the commit window across a 20× range moves nothing. The writer syncs
+whenever it goes idle, and at realistic concurrency it goes idle constantly, so the
+interval only binds under sustained saturation. Tuning it is not a useful lever;
+leave it at the default.
+
+### Recovery
+
+| Events replayed | WAL size | Recovery |
+|---|---|---|
+| 5,000 | 1.9 MB | 0.4 s |
+| 25,000 | 9.5 MB | 0.4 s |
+| 100,000 | 38.0 MB | 0.6 s |
+
+Replay is not the constraint. RTO is pod scheduling and volume attach; the database
+itself is available in well under a second.
+
+### Memory
+
+≈ 700–1,300 bytes per pending interaction at `context_dim = 64` (RSS sampling is
+noisy across runs). The 100,000 default cap is therefore roughly 70–130 MB. Size
+`BANDITDB_MAX_PENDING_INTERACTIONS` from the reward-arrival lag: entries live until
+their reward arrives or the TTL expires, and eviction permanently breaks matching
+for that prediction.
+
+### Enforced ceilings
+
+| Limit | Default | Env |
+|---|---|---|
+| Arms per campaign | 1,000 | `BANDITDB_MAX_ARMS` |
+| Feature dimension | 4,096 | `BANDITDB_MAX_FEATURE_DIM` |
+| Context magnitude | 1e6 | `BANDITDB_MAX_CONTEXT_MAGNITUDE` |
+| Pending interactions | 100,000 | `BANDITDB_MAX_PENDING_INTERACTIONS` |
+| Export shards per campaign | 50 | `BANDITDB_EXPORT_RETAIN_SHARDS` |
+
+Campaign count is **not** capped — an admin key can create campaigns until memory
+runs out. Tracked as a known gap rather than fixed, since Stage 1 assumes trusted
+admin credentials.
