@@ -48,13 +48,9 @@ Predictions are recoverable — the pending-interaction cache holds them, and th
 
 ## Backup Strategy
 
-### What to back up
-
-| File | Why |
-|---|---|
-| `checkpoint.json` | Fast-recovery starting point |
-| `bandit_wal.jsonl` | Events since last checkpoint |
-| `exports/*.parquet` | Historical arm interaction data |
+Use `scripts/backup_restore.sh` — it selects the right files and can verify the
+result. The file list and the reasoning are in [Backup and Restore](#backup-and-restore)
+below. The CronJob here is the same selection expressed for Kubernetes.
 
 ### Kubernetes CronJob backup (GCS example)
 
@@ -77,9 +73,13 @@ spec:
             - -c
             - |
               TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-              gsutil -m cp /data/checkpoint.json gs://$BUCKET/banditdb/$TIMESTAMP/
-              gsutil -m cp /data/bandit_wal.jsonl gs://$BUCKET/banditdb/$TIMESTAMP/
-              gsutil -m rsync /data/exports/ gs://$BUCKET/banditdb/$TIMESTAMP/exports/
+              DEST=gs://$BUCKET/banditdb/$TIMESTAMP
+              gsutil -m cp /data/checkpoint.json  $DEST/
+              gsutil -m cp /data/checkpoint.prev  $DEST/ || true   # absent before the 2nd checkpoint
+              gsutil -m cp /data/bandit_wal.jsonl $DEST/
+              gsutil -m rsync -r /data/neural/    $DEST/neural/    # MLP weights
+              # exports/ is deliberately NOT backed up: recovery never reads it and
+              # it is the bulk of the volume. See "Backup and Restore" below.
             env:
             - name: BUCKET
               value: my-banditdb-backups
@@ -105,9 +105,10 @@ kubectl run restore --rm -it --image=google/cloud-sdk:alpine \
   --overrides='{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"banditdb-data"}}],"containers":[{"name":"restore","image":"google/cloud-sdk:alpine","command":["sh"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}'
 
 # Inside the pod:
-gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/checkpoint.json /data/
+gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/checkpoint.json  /data/
+gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/checkpoint.prev  /data/ || true
 gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/bandit_wal.jsonl /data/
-gsutil -m rsync gs://$BUCKET/banditdb/$TIMESTAMP/exports/ /data/exports/
+gsutil -m rsync -r gs://$BUCKET/banditdb/$TIMESTAMP/neural/ /data/neural/
 
 # 3. Restart BanditDB
 kubectl scale deployment banditdb --replicas=1
@@ -137,7 +138,7 @@ BanditDB does not currently support multiple write replicas. The Helm chart enfo
 - **Read replicas** — serve `/predict` from a warm in-memory snapshot replicated via Parquet on object storage.
 - **Leader election** — via Kubernetes lease or etcd for transparent failover.
 
-Until then, availability SLA is limited to single-pod restart time (~5–15 s including final checkpoint + recovery). For stricter SLAs, use a PVC backed by a regional/replicated storage class and configure `PodDisruptionBudget`.
+Until then, availability is limited to single-pod restart time. Measured recovery is **0.6 s for 100k events / 38 MB of WAL**, so the wall-clock figure is dominated by pod scheduling and volume attach rather than by BanditDB. For stricter SLAs, use a PVC backed by a regional/replicated storage class and configure `PodDisruptionBudget`.
 
 
 ## Backup and Restore
