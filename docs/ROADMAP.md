@@ -4,21 +4,15 @@ Deferred work and known gaps. Not committed dates — priority order within each
 
 ## Durability / storage
 
-### Export retention & compaction
-**Problem:** `checkpoint()` writes one parquet shard per campaign per checkpoint
-(`write_campaign_parquet`, `src/engine.rs`), named `{campaign_id}_{timestamp_us}.parquet`.
-Nothing ever deletes or compacts them — `exports/` grows unbounded. Lowering
-`BANDITDB_CHECKPOINT_INTERVAL` (e.g. pilot default 500) multiplies file count.
-On a busy node this is a disk-fill risk.
+### ~~Export retention~~ — DONE (P2.3)
 
-Exports are offline-analysis artifacts only — recovery uses `checkpoint.json` + WAL
-replay and never reads `exports/`, so shards are safe to prune.
+`BANDITDB_EXPORT_RETAIN_SHARDS` (default 50, per campaign) prunes the oldest shards at
+checkpoint time. `0` restores the old keep-everything behaviour.
 
-**Options:**
-- `BANDITDB_EXPORT_RETENTION_*` env (prune shards older than N, or keep last K per
-  campaign) applied at checkpoint time.
-- Compaction: merge small per-checkpoint shards into larger periodic files.
-- Or skip per-checkpoint export entirely; export on demand via `GET /export`.
+**Still open: compaction.** Retention bounds shard *count*, not the fragmentation that
+comes from one small file per checkpoint. Merging them into larger periodic files would
+help analytical read performance. Not urgent — the disk-fill risk, which was the actual
+hazard, is closed.
 
 ## Scale / availability (the #2 ceiling)
 
@@ -43,6 +37,38 @@ bites under load.
 
 ## Already deferred (from project memory)
 - DashMap sharded campaigns lock
-- Binary WAL (MessagePack length-framed) with backward-compat detection
 - OpenTelemetry OTLP distributed tracing
 - BLAS backend (ndarray-linalg needs LAPACK system dep)
+
+> Binary WAL was on this list but is **implemented**: `BANDITDB_WAL_FORMAT=msgpack`
+> with a `BDMP` magic header for backward-compat detection.
+
+## Known gaps after Stage 1 hardening
+
+Carried forward from the gate review in PRODUCTION_STAGE1. Each is a deliberate
+boundary, recorded here so it stays visible.
+
+### No cap on campaign count
+`max_arms` and `max_feature_dim` are enforced per campaign, but the number of
+campaigns is unbounded — an admin key can create them until memory runs out. Stage 1
+assumes trusted admin credentials. Fix is a `BANDITDB_MAX_CAMPAIGNS` check in
+`add_campaign`.
+
+### Promotion / rollback untested in CI
+The three Progressive tournament tests are `#[ignore]`d because candle 0.10.2 cannot
+seed the CPU RNG (`cpu_backend/mod.rs`: `bail!("cannot seed the CPU rng with
+set_seed")`), so neural weight init is nondeterministic. CI runs them non-blocking for
+signal only. The workable fix is to commit a fixed-weight safetensors fixture and load
+it via `NeuralLinUCBState::load`, trading a binary test fixture for determinism.
+
+### Crash harness measures the wrong side of the ack
+`scripts/crash_injection.sh` reads "committed" from the server's in-memory report,
+which updates just before the durability ack. A kill inside that window inflates the
+expected count for a reward the client was never told succeeded. No *acknowledged*
+write is lost, but the harness cannot distinguish the two. Tighten it to track
+client-confirmed rewards before its numbers back a contractual SLA.
+
+### Helm templates unrendered
+`auth.required` and `config.corsOrigins` were added to the chart but `helm` was
+unavailable in the environment where they were written. `values.yaml` parses as YAML;
+the template conditionals are unverified. Run `helm template` before relying on them.

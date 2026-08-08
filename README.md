@@ -429,6 +429,21 @@ Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and Rec
 
 **[https://banditdb.com/docs.html](https://banditdb.com/docs.html)**
 
+Operating BanditDB:
+
+| Document | Covers |
+|---|---|
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Every environment variable, every metric, and the alerts worth wiring up |
+| [`docs/HA_RUNBOOK.md`](docs/HA_RUNBOOK.md) | Durability guarantees per event type, failure modes, backup and restore |
+| [`docs/PRODUCTION_STAGE1.md`](docs/PRODUCTION_STAGE1.md) | Measured scale limits, the SLA they support, and known gaps |
+
+### Reward calls are durable
+
+`POST /reward` returns only once the record is fsynced — a 200 means it survives
+power loss. This costs ~3.4 ms per call at concurrency 1. Group commit amortises the
+fsync across concurrent callers (~4,400 rewards/s at concurrency 32), so submit
+rewards in parallel rather than serially if throughput matters.
+
 ---
 
 ## Benchmark

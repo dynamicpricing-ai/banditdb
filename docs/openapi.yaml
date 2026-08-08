@@ -184,6 +184,35 @@ paths:
         "503":
           description: WAL writer unavailable
 
+  /health/detail:
+    get:
+      summary: Per-campaign health detail
+      description: |
+        Entropy and status per campaign, scoped to the caller's tenant. Requires a
+        reader key: this data lives here rather than on the public `/health` because
+        campaign identifiers carry the tenant prefix and would otherwise expose the
+        tenant list to anonymous callers.
+      responses:
+        "200":
+          description: Health detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:  { type: string, enum: [ok, degraded] }
+                  version: { type: string }
+                  features: { type: array, items: { type: string } }
+                  campaigns:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        entropy: { type: number }
+                        status:  { type: string, enum: [ok, warning, critical] }
+        "401": { description: Missing or invalid API key }
+        "503": { description: WAL writer unavailable }
+
   /metrics:
     get:
       summary: Prometheus metrics
@@ -443,10 +472,65 @@ paths:
                     interaction_id: { type: string }
                     error:          { type: string }
 
+  /campaign/{id}/interact:
+    post:
+      summary: Ingest a historical prediction and its reward in one call
+      description: |
+        Records an (arm, context, reward) triple that was decided elsewhere — for
+        backfilling a model from existing logs. Requires writer role.
+
+        Both the prediction and the reward records are durable: the call returns only
+        once they are on disk. Validation matches `/predict` plus `/reward` — context
+        length, finite and bounded values, reward in [0, 1], and campaign existence
+        are all enforced.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [arm_id, context, reward]
+              properties:
+                arm_id:  { type: string }
+                context:
+                  type: array
+                  items: { type: number }
+                  description: Same constraints as /predict — L2-normalise before sending.
+                reward:  { type: number, minimum: 0, maximum: 1 }
+      responses:
+        "200":
+          description: Recorded and durable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arm_id:         { type: string }
+                  interaction_id: { type: string }
+        "400": { description: Invalid context, reward out of range, or unknown campaign }
+        "403": { description: Writer role required }
+        "503": { description: WAL unavailable — the record was not persisted }
+
   /reward:
     post:
       summary: Record the observed reward for a prediction
-      description: Requires writer role.
+      description: |
+        Requires writer role.
+
+        **Durable before returning.** The call does not respond until the record has
+        been written and covered by an fsync, so a 200 means it survives process
+        death, power loss, and VM preemption. That costs roughly 3.4 ms at
+        concurrency 1; group commit amortises the fsync across concurrent callers,
+        so parallel submission reaches far higher throughput than serial.
+
+        In tenant mode the interaction must belong to the caller's tenant. A
+        mismatch returns 404 — the same response as an unknown id, so this does not
+        reveal whether an id exists under another tenant.
       requestBody:
         required: true
         content:
