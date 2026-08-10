@@ -20,10 +20,43 @@ jobs:
       - run: cargo clippy --features neural --all-targets -- -D warnings
       - run: cargo test --features neural
 
+# ── Job 0b: Durability gate ──────────────────────────────────────────────────
+# `cargo test` cannot cover these: they drive the real binary, killing and
+# restarting it. Without this job a tag could publish a durability regression to
+# Docker Hub, where it is far more expensive to withdraw than to catch here.
+  durability:
+    name: Crash injection + restore drill
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --features neural
+
+      - name: Crash injection (strict — zero acknowledged-reward loss)
+        run: ./scripts/crash_injection.sh 25 --strict
+
+      - name: Backup / restore drill
+        run: |
+          set -euo pipefail
+          DIR=$(mktemp -d)
+          DATA_DIR="$DIR" PORT=18700 BANDITDB_API_KEY=ci \
+            ./target/release/banditdb & SRV=$!
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:18700/health >/dev/null && break || sleep 0.5
+          done
+          curl -sf -X POST http://127.0.0.1:18700/campaign \
+            -H 'X-Api-Key: ci' -H 'Content-Type: application/json' \
+            -d '{"campaign_id":"drill","arms":["A","B"],"feature_dim":2,"alpha":1.0}'
+          curl -sf -X POST http://127.0.0.1:18700/checkpoint -H 'X-Api-Key: ci' -d '{}'
+          kill $SRV; sleep 1
+          ./scripts/backup_restore.sh drill "$DIR"
+
 # ── Job 1: Docker image (linux/amd64 + linux/arm64) ──────────────────────────
   docker:
     name: Publish Docker image
-    needs: test
+    needs: [test, durability]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +96,7 @@ jobs:
 # ── Job 2: Native binaries ────────────────────────────────────────────────────
   binaries:
     name: Build binary (${{ matrix.target }})
-    needs: test
+    needs: [test, durability]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

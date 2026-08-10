@@ -326,14 +326,15 @@ Accepted rather than fixed. Each is a deliberate Stage 1 boundary, not an oversi
 | Helm templates unrendered | Chart changes are syntactically plausible but unverified | `helm` was unavailable in the working environment — run `helm template` before relying on them |
 | Single-AZ, single-writer | No HA; node loss means downtime until reschedule | Explicit Stage 1 scope |
 
-### Crash harness measurement caveat
+### Crash harness measurement — fixed in v2.0.0
 
-`crash_injection.sh` counts "committed" from the server's in-memory report, which is
-updated just before the durability ack. A kill inside that sub-millisecond window
-inflates the expected count for a reward the client was never told succeeded. No
-*acknowledged* write is lost, but the harness cannot distinguish the two — worth
-tightening to track client-confirmed rewards before these numbers back a contractual
-SLA.
+`crash_injection.sh` used to read "committed" from the server's in-memory report,
+which increments just *before* the durability ack is sent. A kill inside that window
+inflated the expected count for a reward the client was never told succeeded, so a
+correct system intermittently failed the check (~1 in 25 runs).
+
+It now counts only rewards the server confirmed with a 200 — the population the
+guarantee actually covers. 100 consecutive kills clean across four runs.
 
 ---
 

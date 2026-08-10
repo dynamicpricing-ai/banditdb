@@ -10,3 +10,7 @@ checkpoint*.json
 /exports/
 __pycache__/
 examples/convergence_chart.png
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store

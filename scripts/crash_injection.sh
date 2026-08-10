@@ -67,16 +67,26 @@ start_server() {
   return 1
 }
 
+# Counts only rewards the server *confirmed* with a 200, accumulating into
+# CONFIRMED. That is the number the durability guarantee actually covers.
+#
+# Reading the server's own total instead would be wrong: it increments just before
+# the durability ack is sent, so a kill inside that window inflates the expected
+# count for a reward the client was never told succeeded — a correct system then
+# looks like a failure. Only acknowledged writes are promised to survive.
 drive_traffic() {
   local n="$1"
   for i in $(seq 1 "$n"); do
-    local resp iid arm
+    local resp iid arm code
     resp=$(api -X POST "$URL/predict" -d "{\"campaign_id\":\"crash\",\"context\":[0.$((i%9)),0.$((i%7))]}")
     iid=$(printf '%s' "$resp" | sed -n 's/.*"interaction_id":"\([^"]*\)".*/\1/p')
     arm=$(printf '%s' "$resp" | sed -n 's/.*"arm_id":"\([^"]*\)".*/\1/p')
     [[ -n "$iid" ]] || continue
     local r=0.0; [[ "$arm" == "A" ]] && r=1.0
-    api -X POST "$URL/reward" -d "{\"interaction_id\":\"$iid\",\"reward\":$r}" >/dev/null
+    code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+             -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+             -X POST "$URL/reward" -d "{\"interaction_id\":\"$iid\",\"reward\":$r}" 2>/dev/null || echo 000)
+    [[ "$code" == "200" ]] && CONFIRMED=$((CONFIRMED+1))
   done
 }
 
@@ -88,15 +98,15 @@ echo "crash-injection: $ITERATIONS iterations, data dir $WORK"
 
 start_server || { echo "FAIL: server did not start on a clean data dir"; exit 1; }
 api -X POST "$URL/campaign" -d '{"campaign_id":"crash","arms":["A","B"],"feature_dim":2,"alpha":1.0}' >/dev/null
+CONFIRMED=0
 drive_traffic 30
 api -X POST "$URL/checkpoint" -d '{}' >/dev/null
-baseline=$(total_rewards)
-echo "baseline rewards after first checkpoint: $baseline"
+echo "confirmed rewards after first checkpoint: $CONFIRMED"
 
 failures=0; total_lost=0; worst_lost=0
 for iter in $(seq 1 "$ITERATIONS"); do
   drive_traffic 15
-  committed=$(total_rewards)
+  committed=$CONFIRMED   # client-confirmed only
 
   # Fire a checkpoint and SIGKILL mid-flight at a randomised offset.
   api -X POST "$URL/checkpoint" -d '{}' >/dev/null 2>&1 &
@@ -121,7 +131,8 @@ for iter in $(seq 1 "$ITERATIONS"); do
     failures=$((failures+1)); continue
   fi
 
-  # Reward loss: measured always, enforced only under --strict.
+  # Every acknowledged reward must have survived. Extra rewards in `after` are
+  # fine — those were applied but killed before their ack reached the client.
   if (( after < committed )); then
     lost=$(( committed - after ))
     total_lost=$(( total_lost + lost ))
@@ -131,7 +142,6 @@ for iter in $(seq 1 "$ITERATIONS"); do
       failures=$((failures+1)); continue
     fi
   fi
-  baseline="$after"
   printf '.'
   (( iter % 50 == 0 )) && printf ' %d\n' "$iter"
 done

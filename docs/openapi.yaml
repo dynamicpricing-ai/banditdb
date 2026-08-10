@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: BanditDB
-  version: "1.0.4"
+  version: "2.0.0"
   description: |
     Ultra-fast Contextual Bandit Database with LinUCB, Thompson Sampling, NeuralLinUCB,
     and an Autonomous Algorithm Tournament (Progressive). WAL-backed durability with
@@ -171,7 +171,7 @@ paths:
                     enum: [ok, degraded]
                   version:
                     type: string
-                    example: "1.0.4"
+                    example: "2.0.0"
                   features:
                     type: array
                     items: { type: string, enum: [neural, cuda, metal] }

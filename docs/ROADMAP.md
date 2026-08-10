@@ -61,13 +61,6 @@ set_seed")`), so neural weight init is nondeterministic. CI runs them non-blocki
 signal only. The workable fix is to commit a fixed-weight safetensors fixture and load
 it via `NeuralLinUCBState::load`, trading a binary test fixture for determinism.
 
-### Crash harness measures the wrong side of the ack
-`scripts/crash_injection.sh` reads "committed" from the server's in-memory report,
-which updates just before the durability ack. A kill inside that window inflates the
-expected count for a reward the client was never told succeeded. No *acknowledged*
-write is lost, but the harness cannot distinguish the two. Tighten it to track
-client-confirmed rewards before its numbers back a contractual SLA.
-
 ### Helm templates unrendered
 `auth.required` and `config.corsOrigins` were added to the chart but `helm` was
 unavailable in the environment where they were written. `values.yaml` parses as YAML;
