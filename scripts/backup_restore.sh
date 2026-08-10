@@ -81,7 +81,11 @@ do_verify() {
     local tmp port
     tmp="$(mktemp -d)"
     port=18500
-    trap 'pkill -f "$tmp" 2>/dev/null; rm -rf "$tmp"' RETURN
+    # `|| true` matters: pkill returns 1 when nothing matches, which is the
+    # normal case because the server is killed explicitly below. Under `set -e`
+    # that aborted the script *after* it had printed PASS, so the drill reported
+    # success and exited 1.
+    trap 'pkill -f "$tmp" 2>/dev/null || true; rm -rf "$tmp" 2>/dev/null || true' RETURN
 
     tar -xzf "$archive" -C "$tmp"
 
@@ -111,13 +115,14 @@ do_verify() {
     count=$(printf '%s' "$campaigns" | grep -o '"campaign_id"' | wc -l | tr -d ' ')
     echo "PASS: restored backup boots; $count campaign(s) recovered"
     [[ "$count" -gt 0 ]] || echo "  warning: zero campaigns — expected for a backup taken before any were created"
+    return 0
 }
 
 do_drill() {
     local data_dir="$1"
     local tmp out archive
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
+    trap 'rm -rf "$tmp" 2>/dev/null || true' RETURN
     # Capture whole output then take the first line. Piping to `head` closes the
     # pipe early, and under `set -o pipefail` the resulting SIGPIPE aborts the run.
     out=$(do_backup "$data_dir" "$tmp")
