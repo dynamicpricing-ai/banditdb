@@ -157,6 +157,13 @@ parallel submission still reaches ~4,400/s while a strictly serial client pays t
 full latency on every call. Batch or parallelise reward submission if throughput
 matters.
 
+### Toolchain
+
+Requires **Rust 1.97+** to build from source. `ethnum` 1.5.2 (reached via polars)
+fails to compile on recent rustc — `mem::transmute(())` into an 8-bit
+`TryFromIntError`, which newer transmute size checking rejects. Pinned to 1.5.3,
+which fixes it. Pre-built binaries and the Docker image are unaffected.
+
 ### Known gaps
 
 Documented rather than hidden — see `docs/ROADMAP.md`:
