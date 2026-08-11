@@ -176,10 +176,6 @@ paths:
                     type: array
                     items: { type: string, enum: [neural, cuda, metal] }
                     example: ["neural"]
-                  version: { type: string }
-                  features:
-                    type: array
-                    items: { type: string }
                     description: Cargo features compiled in; empty means neural is unavailable.
         "503":
           description: WAL writer unavailable
