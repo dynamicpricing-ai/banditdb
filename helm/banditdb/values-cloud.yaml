@@ -1,0 +1,122 @@
+# BanditDB Cloud — managed-fleet overlay.
+#
+#   helm install banditdb-acme ./helm/banditdb \
+#     --namespace cust-acme \
+#     -f helm/banditdb/values-cloud.yaml \
+#     -f /tmp/values-acme.yaml        # per-customer: keys, host, disk size
+#
+# This file holds what is identical for every customer. The per-customer file
+# supplies auth.apiKeys, ingress.hosts, persistence.size and any plan-specific
+# resource overrides. See docs/CLOUD_STAGE1.md §5 for the provisioning runbook.
+
+image:
+  repository: simeonlukov/banditdb
+  # Pin per customer in the per-customer values file. Never :latest — a fleet
+  # where every pod restart can pick up a new build has no rollback story.
+  tag: "2.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# ── Access control ────────────────────────────────────────────────────────────
+auth:
+  # apiKeys comes from the per-customer file.
+  required: true
+
+# One instance per customer, so tenant prefixes buy nothing here. Logical
+# isolation is for the pooled tier, which is blocked on quota work
+# (docs/CLOUD_STAGE1.md §9).
+tenantMode: false
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  # reclaimPolicy: Retain, so that deleting the release cannot destroy a paying
+  # customer's learned state. See docs/CLOUD_STAGE1.md §4.
+  storageClass: banditdb-ssd-retain
+  size: 10Gi
+
+# ── Server configuration ──────────────────────────────────────────────────────
+config:
+  logFormat: json
+  rustLog: "info"
+
+  # Deny cross-origin by default. Set per customer if they call from a browser;
+  # a key usable from any origin is a key usable by any site.
+  corsOrigins: ""
+
+  checkpointInterval: 5000
+  maxWalSizeMb: 100
+
+  maxPendingInteractions: 100000
+  rewardTtlSecs: 86400
+  exportRetainShards: 50
+
+  # Required for Prometheus: it cannot send the X-Api-Key header that /metrics
+  # otherwise demands. networkPolicy below is what keeps "public" meaning
+  # "reachable from monitoring and ingress", not "readable cluster-wide".
+  metricsPublic: true
+
+# ── Observability ─────────────────────────────────────────────────────────────
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels:
+      release: kube-prometheus-stack
+
+networkPolicy:
+  enabled: true
+  allowedNamespaces:
+    - name: ingress-nginx
+    - name: monitoring
+
+# ── Compute ───────────────────────────────────────────────────────────────────
+# Sized so roughly six customers fit on one e2-standard-4 (docs/CLOUD_STAGE1.md §11).
+# The memory limit must stay above maxPendingInteractions × ~1 KB plus matrices
+# and the neural replay buffer, or the pod is OOMKilled under a traffic spike
+# rather than shedding load.
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# ── Availability ──────────────────────────────────────────────────────────────
+# With one replica this blocks voluntary evictions rather than delaying them:
+# node drains and GKE autoupgrade will stall until an operator intervenes. That
+# is the intended trade at this scale — a surprise eviction is seconds of
+# downtime for a customer, and it should happen inside a maintenance window
+# with someone watching. Revisit when warm standby exists.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# BanditDB is single-writer; autoscaling cannot help and would fork state.
+autoscaling:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Rewards block on an fsync, so allow more than the nginx default of 60s
+    # before the proxy gives up on a slow disk.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  # hosts and tls come from the per-customer values file.
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  fsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: [ALL]

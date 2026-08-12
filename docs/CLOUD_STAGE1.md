@@ -50,25 +50,43 @@ reader key on `/metrics` (it names campaigns and arms). The chart exposes no
 `BANDITDB_METRICS_PUBLIC` value and no way to hand Prometheus a key, so a fleet scraper
 gets **401 from every pod** and the dashboards stay empty.
 
-Two options; take the second:
+**Handing Prometheus a reader key is not possible.** An earlier draft of this document
+recommended it; it does not work. `ServiceMonitor` supports basicAuth, bearer tokens,
+oauth2 and TLS — not arbitrary headers — and the server reads the key only from
+`X-Api-Key` (`main.rs:446`). There is no combination of the two that authenticates.
 
-- `BANDITDB_METRICS_PUBLIC=true` — simple, but `/metrics` is then anonymous to anything
-  that can reach the pod IP. Acceptable only because the Service is `ClusterIP`.
-- Give Prometheus a dedicated **reader** key per release and scrape with an
-  `Authorization`/`X-Api-Key` header. Keeps the metrics endpoint closed. Costs one extra
-  key in the provisioning script.
-
-Add to `values.yaml`:
+So scraping requires opening the endpoint:
 
 ```yaml
 config:
-  metricsPublic: false        # BANDITDB_METRICS_PUBLIC
+  metricsPublic: true         # BANDITDB_METRICS_PUBLIC
 metrics:
   serviceMonitor:
-    enabled: false            # true on the cloud cluster
+    enabled: true
     interval: 30s
-    readerKeySecret: ""       # Secret holding the scrape key
+networkPolicy:                # what makes "public" tolerable
+  enabled: true
+  allowedNamespaces:
+    - name: ingress-nginx
+    - name: monitoring
 ```
+
+`/metrics` is then unauthenticated *within the cluster*, which is why the NetworkPolicy
+is not optional: without it, any pod anywhere can read campaign and arm names, and in
+tenant mode that is the customer list. Note it only enforces on a CNI that implements
+NetworkPolicy — on GKE, Dataplane V2 or Calico. On a cluster without one the object is
+accepted and silently ignored, which is worse than not having it.
+
+The chart fails the render rather than letting either half be misconfigured: enabling
+`serviceMonitor` without `metricsPublic` aborts with an explanation, as does enabling it
+without the Prometheus Operator CRDs present. Both would otherwise present as a target
+that is simply never scraped.
+
+**If closed metrics become a requirement** (an enterprise security review is the likely
+trigger), the fix is ~10 lines in the auth middleware: accept
+`Authorization: Bearer <key>` as an alternative to `X-Api-Key`, after which
+`ServiceMonitor`'s `authorization.credentials` works directly. That is a server change
+with a release attached, deliberately out of scope here.
 
 ### 3.2 Nine supported settings are unreachable from the chart
 
@@ -451,9 +469,9 @@ that makes a $39 dedicated instance a loss leader.
 
 | # | Item | Size | Blocks |
 |---|---|---|---|
-| 1 | Chart: metrics scraping (`metricsPublic` + ServiceMonitor + scrape key) | S | Everything in §6 |
-| 2 | Chart: expose the 9 missing env vars | S | Per-customer tuning |
-| 3 | Chart: PDB default + cloud values file | XS | Node drains |
+| 1 | ~~Chart: metrics scraping (`metricsPublic` + ServiceMonitor + NetworkPolicy)~~ **done** | S | Everything in §6 |
+| 2 | ~~Chart: expose the 9 missing env vars~~ **done** | S | Per-customer tuning |
+| 3 | ~~Chart: PDB + `values-cloud.yaml` overlay~~ **done** | XS | Node drains |
 | 4 | StorageClass with `reclaimPolicy: Retain` | XS | Customer #1 |
 | 5 | Prometheus + the 8 alerts in §6.1 | M | Customer #2 |
 | 6 | Snapshot CronJob + weekly restore drill CronJob | M | Customer #2 |
@@ -462,4 +480,6 @@ that makes a $39 dedicated instance a loss leader.
 | 9 | `BANDITDB_MAX_CAMPAIGNS` | S | Free tier |
 | 10 | Per-tenant pending-cache quota | M | Free tier |
 
-Items 1–7 are the launch set: roughly one to two focused weeks.
+Items 1–3 shipped in chart 2.1.0 (`helm/banditdb`, `values-cloud.yaml`), verified with
+`helm lint` and `helm template` across five value combinations. Items 4–7 are the
+remainder of the launch set: roughly one focused week.

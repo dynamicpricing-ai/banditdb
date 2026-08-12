@@ -1,0 +1,46 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- /*
+  Requires the Prometheus Operator CRDs. Guarded so that enabling this on a
+  cluster without them fails at render time with a clear message, rather than
+  installing cleanly and silently never being scraped.
+*/}}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- fail "metrics.serviceMonitor.enabled=true but the monitoring.coreos.com/v1 CRDs are not installed. Install the Prometheus Operator, or set metrics.serviceMonitor.enabled=false." }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "banditdb.fullname" . }}
+  {{- with .Values.metrics.serviceMonitor.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "banditdb.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "banditdb.selectorLabels" . | nindent 6 }}
+  {{- if .Values.metrics.serviceMonitor.namespace }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  {{- end }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- if not .Values.config.metricsPublic }}
+      {{- /*
+        Without config.metricsPublic the server demands a reader key on
+        /metrics, and Prometheus has no way to send one: ServiceMonitor offers
+        basicAuth, bearer tokens, oauth2 and TLS, while the server reads only
+        the X-Api-Key header. Scraping would return 401 on every attempt, which
+        looks exactly like a down target.
+      */}}
+      {{- fail "metrics.serviceMonitor.enabled=true requires config.metricsPublic=true — Prometheus cannot send the X-Api-Key header that /metrics otherwise demands. Set config.metricsPublic=true and restrict access with networkPolicy." }}
+      {{- end }}
+{{- end }}

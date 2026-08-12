@@ -56,7 +56,44 @@ auth:
   required: true
 
 # ── Multi-tenancy ──────────────────────────────────────────────────────────────
+# Logical isolation only — a tenant prefix on campaign ids, enforced on every
+# route. It is not a hard boundary between mutually hostile tenants, and there is
+# no cap on how many campaigns one tenant may create. Pool only tenants you trust.
 tenantMode: false
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+metrics:
+  # /metrics requires a reader key by default, because its output names campaigns
+  # and arms — in tenant mode that is the customer list.
+  #
+  # Prometheus cannot send that key. ServiceMonitor supports basicAuth, bearer
+  # tokens, oauth2 and TLS, but not an arbitrary X-Api-Key header, and the server
+  # reads only that header. So scraping requires opening the endpoint:
+  #
+  #   config.metricsPublic: true
+  #
+  # Pair it with networkPolicy below so "public" means "reachable by the
+  # monitoring namespace", not "reachable by every pod in the cluster".
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels so a Prometheus configured with a selector picks this up.
+    additionalLabels: {}
+    # Namespace to create the ServiceMonitor in (default: the release namespace).
+    namespace: ""
+
+# ── Network policy ────────────────────────────────────────────────────────────
+# Restricts who may open a connection to the pod. Worth enabling whenever
+# config.metricsPublic is true. Requires a CNI that enforces NetworkPolicy —
+# on GKE that means Dataplane V2 or Calico; without one this renders but does
+# nothing, which is a false sense of security.
+networkPolicy:
+  enabled: false
+  # Namespaces allowed to reach the API port. Empty allows all namespaces.
+  allowedNamespaces: []
+    # - name: ingress-nginx
+    # - name: monitoring
 
 # ── Server configuration ──────────────────────────────────────────────────────
 config:
@@ -81,6 +118,51 @@ config:
 
   # Path inside the container for audit log (empty = disabled)
   auditLog: ""
+
+  # ── Resource bounds ─────────────────────────────────────────────────────────
+  # Predictions awaiting a reward, roughly 1 KB each. This is the real memory
+  # bound on the process: the TTL below does not cap it, so at 1,000 predictions
+  # per second a 24-hour window would otherwise accumulate 86 million records.
+  # Eviction permanently breaks reward matching, so alert on
+  # banditdb_interactions_evicted_total.
+  maxPendingInteractions: 100000
+
+  # How long a prediction waits for its reward. Raise it for slow outcomes
+  # (chargebacks, trials); rewards arriving later return 404 and are lost.
+  # Raising this holds proportionally more in memory — size the cap above to match.
+  rewardTtlSecs: 86400
+
+  # Parquet shards kept per campaign; older ones are deleted at checkpoint.
+  # 0 keeps everything, which grows until the volume fills and checkpointing
+  # starts failing. Recovery never reads these — they are an export, not an archive.
+  exportRetainShards: 50
+
+  # Largest absolute value accepted in a context vector. Guards the rank-one
+  # update: 1e155 is finite but squares to infinity, and the resulting NaN
+  # persists through the checkpoint and survives restart.
+  maxContextMagnitude: 1000000
+
+  # Group-commit window for WAL fsync. Measured to make almost no difference
+  # across a 20× range (the writer also syncs when it goes idle), so this is not
+  # a useful tuning lever. Left here for completeness; leave it alone.
+  fsyncIntervalMs: 200
+
+  # ── Neural (only meaningful with the `neural` image) ────────────────────────
+  # Background retrain cadence. 0 falls back to retraining only at checkpoint.
+  retrainPollSecs: 2
+  # Replay buffer entries per campaign: entries × context_dim × 8 bytes.
+  neuralBufferCap: 50000
+  # Minibatch per gradient step, so a large buffer does not slow every retrain.
+  neuralBatchSize: 4000
+
+# Deliberately not exposed as values:
+#   BANDITDB_SKIP_DATA_DIR_LOCK      — disables single-writer enforcement
+#   BANDITDB_ALLOW_CORRUPT_CHECKPOINT — boots from a checkpoint known to be bad
+# Both trade away a safety net and belong in a break-glass shell, not in a
+# values file where they can be set once and forgotten.
+#   BANDITDB_DEVICE — GPU selection also needs nodeSelector, tolerations and
+# GPU resource limits; exposing the variable alone would imply support that
+# the chart does not yet provide.
 
 # ── Compute resources ─────────────────────────────────────────────────────────
 resources:
