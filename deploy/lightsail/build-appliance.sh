@@ -112,12 +112,19 @@ install -o root -g root -m 0755 "$SRC_DIR/enable-tls.sh"              /usr/local
 cat > /etc/systemd/system/banditdb-firstboot.service <<'EOF'
 [Unit]
 Description=BanditDB first-boot provisioning
-After=network-online.target
+# cloud-final.service is where cloud-init executes the user-data script, and that
+# script is what writes /etc/banditdb/customer.conf. Ordering after it is the
+# whole reason this instance knows which customer it belongs to. Run earlier and
+# firstboot finds no config, falls back to a generated id and server_name "_",
+# and produces a working-but-anonymous instance — which is exactly what happened
+# when this unit was ordered Before=ssh.socket instead.
+After=network-online.target cloud-final.service
 Wants=network-online.target
 # Deliberately no ConditionPathExists on banditdb.env. The script exits early by
 # itself once provisioned, and it also repairs missing SSH host keys — which has
-# to keep working on every boot, not just the first one.
-Before=ssh.socket ssh.service
+# to keep working on every boot, not just the first one. That repair is now a
+# late backstop rather than the primary mechanism: regenerate-ssh-hostkeys runs
+# early, before sshd, and this cannot because it must wait for cloud-init.
 
 [Service]
 Type=oneshot

@@ -51,6 +51,18 @@ REWARD_TTL_SECS=86400; MAX_PENDING=100000; RATE_LIMIT=1000; CORS_ORIGINS=""
 # shellcheck disable=SC1091
 [[ -f "$CONF_DIR/customer.conf" ]] && . "$CONF_DIR/customer.conf"
 
+if [[ ! -f "$CONF_DIR/customer.conf" ]]; then
+  # Almost always means this unit ran before cloud-init executed the user-data
+  # script that writes customer.conf. The instance still comes up and serves,
+  # but anonymously — worth shouting about rather than logging in passing.
+  log "WARNING: $CONF_DIR/customer.conf not found."
+  log "WARNING: falling back to defaults. If you passed a launch script, this"
+  log "WARNING: unit ran too early — it must be ordered After=cloud-final.service."
+  log "WARNING: The instance will work but is not labelled for a customer, and"
+  log "WARNING: nginx will serve as a catch-all until banditdb-enable-tls sets"
+  log "WARNING: the real server_name."
+fi
+
 if [[ -z "$CUSTOMER_ID" ]]; then
   CUSTOMER_ID="unnamed-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   log "no CUSTOMER_ID given, using $CUSTOMER_ID"
