@@ -6,6 +6,16 @@
 #
 #   sudo BANDITDB_VERSION=v2.0.0 bash build-appliance.sh
 #
+# To put your own SSH key on every instance launched from this appliance —
+# rather than whichever key Lightsail attached to the build box:
+#
+#   sudo BANDITDB_VERSION=v2.0.0 BANDITDB_SSH_PUBKEY="$(cat ~/mykey.pub)" \
+#        bash build-appliance.sh
+#
+# That REPLACES ubuntu's authorized_keys, so the build box's original key stops
+# working on reconnect. Keep your current session open until you have confirmed
+# you can log in with the new key.
+#
 # The result is deliberately INERT: the binary is installed and the unit is
 # enabled, but there is no data, no API key, and no hostname. Those come from
 # firstboot.sh when a customer instance is launched. Snapshotting a machine that
@@ -17,6 +27,7 @@ set -euo pipefail
 # below, which sets VERSION="24.04.4 LTS (Noble Numbat)" — the download URL then
 # gets built from the Ubuntu version string and curl rejects it as malformed.
 BDB_VERSION="${BANDITDB_VERSION:-v2.0.0}"
+SSH_PUBKEY="${BANDITDB_SSH_PUBKEY:-}"
 REPO="dynamicpricing-ai/banditdb"
 DATA_DIR=/var/lib/banditdb
 CONF_DIR=/etc/banditdb
@@ -67,6 +78,31 @@ if ! id -u banditdb >/dev/null 2>&1; then
 fi
 install -d -o banditdb -g banditdb -m 0750 "$DATA_DIR"
 install -d -o root     -g root     -m 0755 "$CONF_DIR"
+
+# ── 2b. Fleet SSH key ────────────────────────────────────────────────────────
+# generalize.sh preserves authorized_keys, so whatever is here ends up on every
+# instance launched from the snapshot. Replacing it means the temporary key used
+# to reach this build box never leaves the build box.
+if [[ -n "$SSH_PUBKEY" ]]; then
+  log "Installing fleet SSH key"
+  if [[ ! "$SSH_PUBKEY" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+)\  ]]; then
+    echo "ERROR: BANDITDB_SSH_PUBKEY does not look like an OpenSSH public key." >&2
+    echo "       Expected it to start with ssh-rsa, ssh-ed25519 or ecdsa-sha2-*." >&2
+    echo "       Locking yourself out of every future instance is the failure mode" >&2
+    echo "       here, so this refuses rather than guessing." >&2
+    exit 1
+  fi
+  install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.ssh
+  printf '%s\n' "$SSH_PUBKEY" > /home/ubuntu/.ssh/authorized_keys
+  chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  chmod 0600 /home/ubuntu/.ssh/authorized_keys
+  echo "  installed: $(cut -d" " -f3 <<<"$SSH_PUBKEY" | head -c 60)"
+  echo "  NOTE: the key you used to reach this box no longer works on reconnect."
+else
+  log "No BANDITDB_SSH_PUBKEY given"
+  echo "  Keeping the existing authorized_keys, so instances launched from this"
+  echo "  snapshot will accept whichever key Lightsail attached to this build box."
+fi
 
 # ── 3. BanditDB binary, pinned ───────────────────────────────────────────────
 log "Installing BanditDB $BDB_VERSION"
