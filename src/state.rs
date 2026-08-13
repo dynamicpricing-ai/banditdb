@@ -304,13 +304,24 @@ pub struct ArmReportStats {
 
 /// Business-level campaign report returned by `GET /campaign/:id/report`.
 ///
-/// The `converged` field answers "is this campaign done?":
+/// `converged` tests for a **single globally best arm**:
 /// - `true`  → leading arm has a statistically significant advantage (95% CI).
 /// - `false` → the leading arm leads but CIs still overlap.
 /// - `null`  → not enough data to assess (< 30 rewards per arm).
 ///
-/// Validate convergence with the causal forest analysis in the Python SDK:
-/// if `arm_traffic_share` matches `causal_analysis()` arm assignment percentages,
+/// **It stays `false` on a healthy contextual campaign, by design.** When
+/// different arms win for different contexts — mobile prefers one, desktop
+/// another — no arm is globally best, so the confidence intervals overlap no
+/// matter how well the model routes. A campaign can be operating at the
+/// theoretical optimum and still report `converged: false`.
+///
+/// Read it as "is there one winner for everybody?", not "has this learned?".
+/// For contextual campaigns judge learning by the reward-rate trend and by
+/// `selection_entropy`; a per-context split of traffic is the signal that the
+/// model is using the context rather than picking a global favourite.
+///
+/// Validate with the causal forest analysis in the Python SDK: if
+/// `arm_traffic_share` matches `causal_analysis()` arm assignment percentages,
 /// the bandit has found the causally correct structure.
 #[derive(Serialize, Debug)]
 pub struct CampaignReport {

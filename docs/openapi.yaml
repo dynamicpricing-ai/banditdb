@@ -132,7 +132,7 @@ components:
         selection_entropy:      { type: number, description: "Normalised Shannon entropy of arm selection (0 = collapsed, 1 = uniform)." }
         entropy_status:         { type: string, enum: [ok, warning, critical], description: "ok if healthy or converged. warning < 0.4. critical < 0.2." }
         entropy_trend:          { type: string, enum: [stable, falling, recovering, unknown], description: "Change since last checkpoint. unknown until first checkpoint." }
-        converged:              { type: boolean, nullable: true, description: "Guard 1: true suppresses entropy alerts when one arm has statistically won." }
+        converged:              { type: boolean, nullable: true, description: "Guard 1: true suppresses entropy alerts when one arm has statistically won. Stays false on contextual campaigns where no single arm is globally best, even when the model is optimal." }
         likely_cause:           { type: string, nullable: true, description: "Present when entropy_status is warning or critical." }
         suggested_action:       { type: string, nullable: true, description: "Remediation hint. Present when entropy_status is warning or critical." }
 
@@ -332,10 +332,18 @@ paths:
         leading arm, and a `converged` flag indicating whether the leading arm has a
         statistically significant advantage.
 
-        Use `converged` to answer "is this campaign done?":
+        `converged` tests for a **single globally best arm**:
         - `true`  → leading arm's 95% CI lower bound exceeds second arm's upper bound
         - `false` → leading arm leads but CIs still overlap
         - `null`  → not enough data (< 30 rewards per arm)
+
+        **It stays `false` on a healthy contextual campaign, by design.** Where
+        different arms win for different contexts, no arm is globally best and the
+        intervals overlap however well the model routes — a campaign at the
+        theoretical optimum still reports `converged: false`. Read it as "is there
+        one winner for everybody?", not "has this learned?". Judge a contextual
+        campaign by its reward-rate trend and by traffic splitting across arms
+        rather than collapsing onto one.
 
         Per-arm `mean_reward`, `reward_lower_ci`, and `reward_upper_ci` are `null`
         until that arm has received **at least 10 rewards** — below the threshold the
