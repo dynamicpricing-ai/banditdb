@@ -1,12 +1,17 @@
 #!/bin/bash
 # BanditDB — single-file provisioning for a Lightsail instance.
 #
-# HOW TO USE
-#   1. Create a Lightsail instance: Ubuntu 24.04 LTS, 2 GB bundle or larger,
-#      with your own SSH key.
-#   2. Edit the CONFIGURE block below.
-#   3. Paste this whole file into "Add launch script" at creation time.
-#   4. Wait ~3 minutes, then:  curl http://<ip>/health
+# HOW TO USE — either way works, it is just a bash script run as root.
+#
+#   A. Upload and run (easier):
+#        scp cloud-init.sh ubuntu@<ip>:~/
+#        ssh ubuntu@<ip>
+#        sudo CUSTOMER_ID=acme SERVER_NAME=acme.api.banditdb.com bash cloud-init.sh
+#
+#   B. Paste into Lightsail's "Add launch script" box at instance creation, with
+#      the defaults below edited. Provisions unattended on first boot.
+#
+# Then: curl http://<ip>/health
 #
 # There is no golden image, no snapshot and no generalisation step. cloud-init
 # runs this as root on first boot and the instance comes up serving. That means
@@ -18,16 +23,21 @@
 set -euo pipefail
 
 # ─── CONFIGURE ───────────────────────────────────────────────────────────────
-CUSTOMER_ID="testco"                     # [a-z0-9-]; labels the instance
-SERVER_NAME="test.api.banditdb.com"      # hostname this instance will serve;
-                                         # "_" to accept any (IP access only)
-BDB_VERSION="v2.0.0"                     # pinned; never "latest"
+# Every value can be overridden from the environment, so uploading the file and
+# passing variables on the command line avoids editing it:
+#   sudo CUSTOMER_ID=acme SERVER_NAME=acme.api.banditdb.com bash cloud-init.sh
+CUSTOMER_ID="${CUSTOMER_ID:-testco}"                  # [a-z0-9-]; labels the instance
+SERVER_NAME="${SERVER_NAME:-_}"                       # hostname served; "_" = any (IP access)
+BDB_VERSION="${BDB_VERSION:-v2.0.0}"                  # pinned; never "latest"
 
-REWARD_TTL_SECS=86400                    # how long a prediction waits for its reward
-MAX_PENDING=100000                       # pending predictions; ~1 KB each
-RATE_LIMIT=1000                          # per-key requests/sec
-CORS_ORIGINS=""                          # empty = deny all cross-origin
+REWARD_TTL_SECS="${REWARD_TTL_SECS:-86400}"           # how long a prediction waits for its reward
+MAX_PENDING="${MAX_PENDING:-100000}"                  # pending predictions; ~1 KB each
+RATE_LIMIT="${RATE_LIMIT:-1000}"                      # per-key requests/sec
+CORS_ORIGINS="${CORS_ORIGINS:-}"                      # empty = deny all cross-origin
 # ─────────────────────────────────────────────────────────────────────────────
+
+[[ "$CUSTOMER_ID" =~ ^[a-z0-9-]+$ ]] || { echo "CUSTOMER_ID must match [a-z0-9-]+" >&2; exit 1; }
+[[ "$BDB_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "BDB_VERSION must look like vX.Y.Z" >&2; exit 1; }
 
 REPO="dynamicpricing-ai/banditdb"
 DATA_DIR=/var/lib/banditdb
