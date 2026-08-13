@@ -77,7 +77,7 @@ echo "Things that must BE in the image:"
   && ok "manifest present" \
   || bad "manifest missing"
 
-for unit in banditdb banditdb-firstboot nginx regenerate-ssh-hostkeys; do
+for unit in banditdb banditdb-firstboot nginx ssh; do
   if systemctl is-enabled "$unit" >/dev/null 2>&1; then
     ok "$unit is enabled"
   else
@@ -91,6 +91,28 @@ if systemctl is-active banditdb >/dev/null 2>&1; then
   bad "banditdb is RUNNING on the build box — it should be inert until firstboot"
 else
   ok "banditdb is not running (correct: no config yet)"
+fi
+
+# The image must carry a login key. Without one, every instance launched from
+# this snapshot is unreachable — and that is only discoverable after the fact.
+authkeys=/home/ubuntu/.ssh/authorized_keys
+if [[ -s "$authkeys" ]]; then
+  ok "authorized_keys present ($(grep -c . "$authkeys") key(s)) — you can log in to launched instances"
+else
+  bad "no /home/ubuntu/.ssh/authorized_keys — instances from this snapshot would be UNREACHABLE"
+  info "create the build instance with an SSH key you hold, then rebuild"
+fi
+
+if [[ -f /etc/systemd/system/ssh.service.d/10-hostkeys.conf ]]; then
+  ok "sshd regenerates host keys via ExecStartPre (cannot race)"
+else
+  bad "missing ssh.service.d/10-hostkeys.conf — launched instances may have no host keys"
+fi
+
+if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+  bad "ssh.socket is still enabled — socket activation reintroduces the startup race"
+else
+  ok "ssh.socket disabled (sshd runs as a plain service)"
 fi
 
 if ufw status 2>/dev/null | grep -q "Status: active"; then

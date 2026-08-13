@@ -20,16 +20,11 @@ CRED_FILE="$CONF_DIR/credentials.txt"
 log() { printf '[firstboot] %s\n' "$*"; }
 
 # ── SSH host keys, before anything else ──────────────────────────────────────
-# generalize.sh deletes these so instances do not share one SSH identity, and
-# regenerate-ssh-hostkeys.service is supposed to recreate them at boot. Do it
-# here as well, because that unit's ordering against a socket-activated sshd is
-# not reliable: if sshd starts first it dies for lack of keys, systemd trips the
-# socket's trigger limit after a few attempts, stops the socket, and every
-# subsequent connection is refused. The instance then serves traffic perfectly
-# while being impossible to administer.
-#
-# This runs unconditionally and before the provisioned-already check, so it also
-# repairs an instance that came up without keys for any other reason.
+# generalize.sh deletes these so instances do not share one SSH identity. The
+# primary mechanism that recreates them is an ExecStartPre hook on ssh.service,
+# which cannot race. This is a backstop only — it runs after cloud-init, so by
+# the time it executes sshd has normally sorted itself out. Kept because it costs
+# nothing and repairs an instance that somehow came up without keys.
 if ! compgen -G '/etc/ssh/ssh_host_*_key' >/dev/null; then
   log "no ssh host keys — generating"
   ssh-keygen -A

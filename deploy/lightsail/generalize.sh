@@ -13,8 +13,8 @@
 # stop, snapshot, never log in again. Folding this into build-appliance.sh meant
 # the verifier that runs afterwards could not be reached.
 #
-# If you do need back in, reboot: regenerate-ssh-hostkeys.service recreates the
-# keys on boot. You then have to generalise again before snapshotting.
+# If you do need back in, reboot: sshd regenerates the keys via ExecStartPre.
+# You then have to generalise again before snapshotting.
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
@@ -63,7 +63,7 @@ log "Removing machine identity"
 # Shared host keys would let anyone holding one instance impersonate every other
 # instance to an SSH client.
 rm -f /etc/ssh/ssh_host_*
-echo "  ssh host keys removed (regenerate-ssh-hostkeys.service recreates on boot)"
+echo "  ssh host keys removed (sshd recreates them via ExecStartPre on next start)"
 
 # Duplicate machine-ids confuse journald, DHCP leases and anything keyed on it.
 truncate -s 0 /etc/machine-id
@@ -96,10 +96,16 @@ if [[ -s /etc/machine-id ]]; then
 else
   echo "  PASS  machine-id empty"
 fi
-if systemctl is-enabled regenerate-ssh-hostkeys >/dev/null 2>&1; then
-  echo "  PASS  regenerate-ssh-hostkeys enabled"
+if [[ -f /etc/systemd/system/ssh.service.d/10-hostkeys.conf ]]; then
+  echo "  PASS  sshd will regenerate host keys on next start"
 else
-  echo "  FAIL  regenerate-ssh-hostkeys NOT enabled — launched instances will have no host keys"; fail=1
+  echo "  FAIL  no ExecStartPre hook — launched instances would have no host keys"; fail=1
+fi
+authkeys=/home/ubuntu/.ssh/authorized_keys
+if [[ -s "$authkeys" ]]; then
+  echo "  PASS  authorized_keys preserved ($(grep -c . "$authkeys") key(s))"
+else
+  echo "  FAIL  authorized_keys is empty — launched instances would be unreachable"; fail=1
 fi
 
 if (( fail )); then

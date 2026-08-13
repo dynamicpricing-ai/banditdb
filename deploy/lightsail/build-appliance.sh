@@ -123,8 +123,9 @@ Wants=network-online.target
 # Deliberately no ConditionPathExists on banditdb.env. The script exits early by
 # itself once provisioned, and it also repairs missing SSH host keys — which has
 # to keep working on every boot, not just the first one. That repair is now a
-# late backstop rather than the primary mechanism: regenerate-ssh-hostkeys runs
-# early, before sshd, and this cannot because it must wait for cloud-init.
+# late backstop rather than the primary mechanism: sshd regenerates its own host
+# keys via ExecStartPre, and this unit cannot do that job because it must wait
+# for cloud-init.
 
 [Service]
 Type=oneshot
@@ -137,33 +138,32 @@ StandardError=journal+console
 WantedBy=multi-user.target
 EOF
 
-# Recreates SSH host keys on the first boot of every launched instance.
+# ── SSH host keys: deterministic regeneration ────────────────────────────────
+# generalize.sh deletes the host keys so instances launched from one snapshot do
+# not share a single SSH identity. Something must recreate them, and doing that
+# from a separate boot-ordered unit proved unreliable: on Ubuntu 24.04 sshd is
+# socket-activated, so if a connection arrives before the keys exist the
+# per-connection sshd dies, systemd trips the socket's trigger limit, stops the
+# socket, and every later connection is refused outright. Observed exactly that.
 #
-# generalize.sh deletes the keys so that N instances from one snapshot do not
-# share a single SSH identity — anyone holding one box could otherwise
-# impersonate every other box to an SSH client. This unit is what makes that
-# safe to do: without it, launched instances come up with no host keys and no
-# way to generate them, and are simply unreachable.
-#
-# It belongs here rather than in generalize.sh because it is part of the image.
-# generalize.sh only removes state; it installs nothing.
-cat > /etc/systemd/system/regenerate-ssh-hostkeys.service <<'EOF'
+# So: take socket activation out of the picture and hang key generation off the
+# unit that actually starts sshd. ExecStartPre cannot race — it runs to
+# completion before sshd, every single start. `ssh-keygen -A` only creates keys
+# that are missing, so this is a no-op on an instance that already has them.
+systemctl disable --now ssh.socket 2>/dev/null || true
+systemctl enable ssh.service 2>/dev/null || true
+
+install -d -m 0755 /etc/systemd/system/ssh.service.d
+cat > /etc/systemd/system/ssh.service.d/10-hostkeys.conf <<'EOF'
 [Unit]
-Description=Regenerate SSH host keys on first boot
-Before=ssh.service ssh.socket
-ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
-
+# Socket activation is disabled on this appliance; sshd runs as a normal service
+# so that ExecStartPre below is guaranteed to run before it.
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/ssh-keygen -A
-RemainAfterExit=true
-
-[Install]
-WantedBy=multi-user.target
+ExecStartPre=/usr/bin/ssh-keygen -A
 EOF
 
 systemctl daemon-reload
-systemctl enable nginx banditdb-firstboot regenerate-ssh-hostkeys
+systemctl enable nginx banditdb-firstboot
 
 # banditdb itself is ENABLED but cannot start yet: the unit requires
 # /etc/banditdb/banditdb.env, which firstboot writes. Enabling it here means a

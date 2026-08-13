@@ -70,8 +70,8 @@ sshd — so from that moment every new SSH connection is refused with
 `kex_exchange_identification: Connection reset by peer`. An already-open session
 survives; a reconnect does not. This is why generalisation is the terminal step
 rather than part of the build: anything you still need to do on the box has to
-happen before it. If you must get back in, reboot — `regenerate-ssh-hostkeys`
-recreates the keys — then generalise again before snapshotting.
+happen before it. If you must get back in, reboot — sshd recreates the keys via
+its `ExecStartPre` hook — then generalise again before snapshotting.
 
 **The rule that matters:** the build box must never have served a customer.
 Snapshotting a working instance clones its API keys and its learned state onto
