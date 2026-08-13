@@ -152,48 +152,20 @@ ufw status verbose | sed 's/^/  /'
 # Port 8080 is intentionally NOT opened. BanditDB binds locally and is reached
 # only through nginx, so the API cannot be hit bypassing TLS and rate limits.
 
-# ── 6. Generalise the image ──────────────────────────────────────────────────
-# Everything below exists so that N instances launched from this snapshot are
-# distinct machines rather than N copies of one machine.
-log "Generalising for snapshot"
-
-# Identical SSH host keys across instances would let anyone with one box
-# impersonate every other box to an SSH client. Regenerated on next boot.
-rm -f /etc/ssh/ssh_host_*
-cat > /etc/systemd/system/regenerate-ssh-hostkeys.service <<'EOF'
-[Unit]
-Description=Regenerate SSH host keys on first boot
-Before=ssh.service
-ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/ssh-keygen -A
-RemainAfterExit=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable regenerate-ssh-hostkeys
-
-# Duplicate machine-ids confuse journald, DHCP and anything keyed on identity.
-truncate -s 0 /etc/machine-id
-rm -f /var/lib/dbus/machine-id
-ln -sf /etc/machine-id /var/lib/dbus/machine-id
-
-cloud-init clean --logs 2>/dev/null || true
-apt-get clean
-journalctl --rotate --vacuum-time=1s >/dev/null 2>&1 || true
-rm -rf /var/log/*.gz /var/log/*.[0-9] /tmp/* /var/tmp/*
-rm -f /root/.bash_history /home/*/.bash_history
-history -c 2>/dev/null || true
-
 log "Build complete"
 cat "$CONF_DIR/appliance-manifest.json"
 cat <<'EOF'
 
-Next:
-  1. sudo bash verify-appliance.sh      # must pass before you snapshot
-  2. Stop the instance, take a snapshot, name it banditdb-appliance-<version>
-  3. Never snapshot an instance that has served a customer into this lineage.
+Next, in this order:
+
+  1. sudo bash verify-appliance.sh     # gate — must pass
+  2. sudo bash generalize.sh           # LAST command you run on this box
+  3. Stop the instance and snapshot it as banditdb-appliance-<version>
+
+Step 2 deletes the SSH host keys. This host socket-activates sshd, so every
+NEW connection is refused the moment they are gone — an already-open session
+survives, a reconnect does not. That is intended: a generalised image is
+finished, and anything you still need to do must happen before step 2.
+
+Never snapshot an instance that has served a customer into this lineage.
 EOF

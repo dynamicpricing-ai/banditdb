@@ -9,6 +9,13 @@
 # credentials are on N boxes belonging to N different companies.
 set -uo pipefail
 
+# nullglob for the whole script, never toggled off. Every check below tests
+# "did this glob match anything", and without nullglob an unmatched pattern
+# survives as a literal one-element array — which reads as "files present" and
+# fails the check on a correctly-empty directory. dotglob so hidden files in the
+# data directory are not missed.
+shopt -s nullglob dotglob
+
 pass=0 fail=0
 ok()   { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
@@ -17,6 +24,10 @@ info() { printf '        %s\n' "$1"; }
 echo "BanditDB appliance verification"
 echo
 
+# Runs BEFORE generalize.sh, so machine identity (ssh host keys, machine-id,
+# shell history) is still present and is not checked here — generalize.sh
+# removes it and confirms its own work. What matters at this point is that no
+# CUSTOMER state exists, because that is what generalisation does not remove.
 # ── Must be empty ────────────────────────────────────────────────────────────
 echo "State that must NOT be in the image:"
 
@@ -27,33 +38,12 @@ else
   ok "no banditdb.env (keys are generated per instance)"
 fi
 
-shopt -s nullglob dotglob
 data=(/var/lib/banditdb/*)
 if (( ${#data[@]} )); then
   bad "/var/lib/banditdb is not empty — this image carries a customer's data"
   info "contains: ${data[*]}"
 else
   ok "/var/lib/banditdb is empty"
-fi
-shopt -u nullglob dotglob
-
-hostkeys=(/etc/ssh/ssh_host_*)
-if (( ${#hostkeys[@]} )); then
-  bad "SSH host keys present — every instance would share one identity"
-else
-  ok "SSH host keys removed (regenerated on boot)"
-fi
-
-if [[ -s /etc/machine-id ]]; then
-  bad "/etc/machine-id is populated — instances would share a machine identity"
-else
-  ok "/etc/machine-id is empty"
-fi
-
-if [[ -s /root/.bash_history ]]; then
-  bad "/root/.bash_history is non-empty"
-else
-  ok "no root shell history"
 fi
 
 enabled=(/etc/nginx/sites-enabled/*)

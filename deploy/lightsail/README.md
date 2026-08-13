@@ -6,7 +6,8 @@ One Ubuntu image, snapshotted once, launched per customer. Companion to
 ```
 build box (never serves a customer)
     │  build-appliance.sh          binary pinned, unit installed, NO keys, NO data
-    │  verify-appliance.sh         gate: refuses if any state is present
+    │  verify-appliance.sh         gate: refuses if customer state is present
+    │  generalize.sh               strips identity; SSH stops accepting after this
     ▼
 snapshot: banditdb-appliance-v2.0.0
     │  provision.sh acme acme.api.banditdb.com
@@ -21,7 +22,8 @@ live
 | File | Runs where | When |
 |---|---|---|
 | `build-appliance.sh` | build box, as root | once per BanditDB release |
-| `verify-appliance.sh` | build box, as root | before every snapshot |
+| `verify-appliance.sh` | build box, as root | after build, before generalize |
+| `generalize.sh` | build box, as root | **last command on that box** |
 | `provision.sh` | your laptop | per customer |
 | `firstboot.sh` | customer instance | automatically, first boot |
 | `enable-tls.sh` | customer instance | after DNS resolves |
@@ -58,9 +60,18 @@ git clone https://github.com/dynamicpricing-ai/banditdb
 cd banditdb/deploy/lightsail
 sudo BANDITDB_VERSION=v2.0.0 bash build-appliance.sh
 sudo bash verify-appliance.sh          # must pass
+sudo bash generalize.sh                # LAST command on this box
 ```
 
 Then stop the instance and snapshot it as `banditdb-appliance-v2.0.0`.
+
+`generalize.sh` deletes the SSH host keys, and Ubuntu 22.10+ socket-activates
+sshd — so from that moment every new SSH connection is refused with
+`kex_exchange_identification: Connection reset by peer`. An already-open session
+survives; a reconnect does not. This is why generalisation is the terminal step
+rather than part of the build: anything you still need to do on the box has to
+happen before it. If you must get back in, reboot — `regenerate-ssh-hostkeys`
+recreates the keys — then generalise again before snapshotting.
 
 **The rule that matters:** the build box must never have served a customer.
 Snapshotting a working instance clones its API keys and its learned state onto
