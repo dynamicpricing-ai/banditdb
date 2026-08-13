@@ -82,6 +82,20 @@ keys are present, or if `machine-id` is populated.
 Rebuild the appliance per release; never mutate a snapshot in place. Keep the
 previous one until every customer has moved off it — it is your rollback.
 
+## SSH access
+
+Create the **build** instance with the SSH key you intend to use for the whole
+fleet. `generalize.sh` preserves `~ubuntu/.ssh/authorized_keys`, so that key is
+baked into the snapshot and works on every instance launched from it — no
+dependency on cloud-init re-injecting a key at launch time.
+
+Host keys are the opposite: removed by `generalize.sh` and regenerated per
+instance by `firstboot.sh`, so instances cannot impersonate one another. Expect
+your client to warn about an unknown host on each new instance.
+
+Customers never get shell access, only the HTTPS API, so the operator key being
+common across the fleet is the intended design rather than a compromise.
+
 ## Provision a customer
 
 ```bash

@@ -45,6 +45,19 @@ read -rp "  Generalize now? [y/N] " reply
 [[ "$reply" == "y" ]] || { echo "aborted"; exit 1; }
 
 # ── Identity ─────────────────────────────────────────────────────────────────
+# Two different things share the name "SSH key", and only one is removed here.
+#
+#   host keys (/etc/ssh/ssh_host_*)  — the SERVER's identity. Removed: if every
+#     instance shared one, anyone holding a single box could impersonate all the
+#     others to an SSH client. firstboot.sh regenerates them per instance.
+#
+#   authorized_keys (~ubuntu/.ssh/)  — WHO may log in. Deliberately PRESERVED, so
+#     whichever key you gave the build instance works on every instance launched
+#     from this snapshot. Customers never receive SSH access — they get an API
+#     endpoint — so the only account here is yours, and baking it in avoids
+#     depending on cloud-init re-injecting a key at launch.
+#
+# If you ever grant a customer shell access, this decision has to be revisited.
 log "Removing machine identity"
 
 # Shared host keys would let anyone holding one instance impersonate every other
