@@ -17,12 +17,14 @@ AZ="${LIGHTSAIL_AZ:-${REGION}a}"
 SNAPSHOT="${BANDITDB_SNAPSHOT:-}"
 BUNDLE="small_3_0"     # 2 GB RAM / 2 vCPU — the Starter plan
 TIER="starter"
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --bundle)   BUNDLE="$2";   shift 2 ;;
     --tier)     TIER="$2";     shift 2 ;;
     --snapshot) SNAPSHOT="$2"; shift 2 ;;
+    --dry-run)  DRY_RUN=1;     shift   ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -35,6 +37,10 @@ usage: provision.sh <customer-id> <domain> [--bundle small_3_0] [--tier starter]
   domain        the hostname this instance will serve
 
   bundles: nano_3_0 (512MB) small_3_0 (2GB) medium_3_0 (4GB) large_3_0 (8GB)
+           the bundle disk must be >= the snapshot's, so a 40GB appliance
+           snapshot cannot launch onto nano_3_0 (20GB)
+
+  --dry-run  print the AWS calls and the generated user-data, change nothing
 EOF
   exit 1
 fi
@@ -71,8 +77,22 @@ Provisioning
   bundle     $BUNDLE  (tier: $TIER)
   region/az  $REGION / $AZ
 EOF
-read -rp "Proceed? [y/N] " reply
-[[ "$reply" == "y" ]] || exit 1
+if (( DRY_RUN )); then
+  echo
+  echo "DRY RUN — no AWS calls will be made."
+else
+  read -rp "Proceed? [y/N] " reply
+  [[ "$reply" == "y" ]] || exit 1
+fi
+
+# Every mutating call goes through this, so --dry-run cannot miss one.
+aws_do() {
+  if (( DRY_RUN )); then
+    printf '  would run: aws %s\n' "$*"
+    return 0
+  fi
+  aws "$@"
+}
 
 USER_DATA="$(cat <<EOF
 #!/bin/bash
@@ -90,8 +110,15 @@ chmod 0600 /etc/banditdb/customer.conf
 EOF
 )"
 
+if (( DRY_RUN )); then
+  echo
+  echo "==> user-data that firstboot would consume:"
+  printf '%s\n' "$USER_DATA" | sed 's/^/    /'
+  echo
+fi
+
 echo "==> Creating instance"
-aws lightsail create-instances-from-snapshot --region "$REGION" \
+aws_do lightsail create-instances-from-snapshot --region "$REGION" \
   --instance-snapshot-name "$SNAPSHOT" \
   --instance-names "$INSTANCE" \
   --availability-zone "$AZ" \
@@ -101,27 +128,35 @@ aws lightsail create-instances-from-snapshot --region "$REGION" \
   --output text >/dev/null
 
 echo "==> Waiting for running state"
+if (( DRY_RUN )); then
+  state=running
+else
 for _ in $(seq 1 60); do
   state="$(aws lightsail get-instance --region "$REGION" --instance-name "$INSTANCE" \
     --query 'instance.state.name' --output text 2>/dev/null || echo pending)"
   [[ "$state" == "running" ]] && break
   sleep 5
 done
+fi
 [[ "$state" == "running" ]] || { echo "instance did not reach running state" >&2; exit 1; }
 
 echo "==> Allocating static IP"
 # Without a static IP the address changes on every stop/start, silently breaking
 # the customer's DNS record.
-aws lightsail allocate-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
+aws_do lightsail allocate-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
   --output text >/dev/null 2>&1 || true
-aws lightsail attach-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
+aws_do lightsail attach-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
   --instance-name "$INSTANCE" --output text >/dev/null
 
-IP="$(aws lightsail get-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
-  --query 'staticIp.ipAddress' --output text)"
+if (( DRY_RUN )); then
+  IP="<static-ip>"
+else
+  IP="$(aws lightsail get-static-ip --region "$REGION" --static-ip-name "$INSTANCE-ip" \
+    --query 'staticIp.ipAddress' --output text)"
+fi
 
 echo "==> Enabling automatic snapshots"
-aws lightsail enable-add-on --region "$REGION" --resource-name "$INSTANCE" \
+aws_do lightsail enable-add-on --region "$REGION" --resource-name "$INSTANCE" \
   --add-on-request 'addOnType=AutoSnapshot,autoSnapshotAddOnRequest={snapshotTimeOfDay=03:00}' \
   --output text >/dev/null
 
