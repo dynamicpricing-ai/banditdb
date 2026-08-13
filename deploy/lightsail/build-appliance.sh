@@ -13,7 +13,10 @@
 # next customer's box — see verify-appliance.sh, which checks exactly that.
 set -euo pipefail
 
-VERSION="${BANDITDB_VERSION:-v2.0.0}"
+# Namespaced deliberately. A plain VERSION would be clobbered by /etc/os-release
+# below, which sets VERSION="24.04.4 LTS (Noble Numbat)" — the download URL then
+# gets built from the Ubuntu version string and curl rejects it as malformed.
+BDB_VERSION="${BANDITDB_VERSION:-v2.0.0}"
 REPO="dynamicpricing-ai/banditdb"
 DATA_DIR=/var/lib/banditdb
 CONF_DIR=/etc/banditdb
@@ -25,10 +28,20 @@ log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
 # ── 0. Record what we are building on ────────────────────────────────────────
 log "Base image"
-. /etc/os-release
-echo "  $PRETTY_NAME ($VERSION_CODENAME), kernel $(uname -r), arch $(uname -m)"
-if [[ "${ID:-}" != "ubuntu" ]]; then
-  echo "  WARNING: this script targets Ubuntu; $ID may behave differently." >&2
+# Subshells, not a bare `.` — /etc/os-release defines NAME, VERSION, ID and
+# friends, and sourcing it into this shell silently overwrites any of ours that
+# share a name.
+os_pretty="$(. /etc/os-release && echo "${PRETTY_NAME:-unknown}")"
+os_id="$(. /etc/os-release && echo "${ID:-unknown}")"
+echo "  $os_pretty, kernel $(uname -r), arch $(uname -m)"
+if [[ "$os_id" != "ubuntu" ]]; then
+  echo "  WARNING: this script targets Ubuntu; $os_id may behave differently." >&2
+fi
+
+# Fail here rather than at a malformed URL 60 seconds later.
+if [[ ! "$BDB_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  echo "ERROR: BANDITDB_VERSION='$BDB_VERSION' is not a release tag (expected vX.Y.Z)." >&2
+  exit 1
 fi
 
 # ── 1. Base packages ─────────────────────────────────────────────────────────
@@ -56,7 +69,7 @@ install -d -o banditdb -g banditdb -m 0750 "$DATA_DIR"
 install -d -o root     -g root     -m 0755 "$CONF_DIR"
 
 # ── 3. BanditDB binary, pinned ───────────────────────────────────────────────
-log "Installing BanditDB $VERSION"
+log "Installing BanditDB $BDB_VERSION"
 case "$(uname -m)" in
   x86_64)        target=x86_64-unknown-linux-gnu  ;;
   aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
@@ -64,7 +77,7 @@ case "$(uname -m)" in
 esac
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-url="https://github.com/$REPO/releases/download/$VERSION/banditdb-$VERSION-$target.tar.gz"
+url="https://github.com/$REPO/releases/download/$BDB_VERSION/banditdb-$BDB_VERSION-$target.tar.gz"
 echo "  $url"
 curl -fsSL --retry 3 "$url" -o "$tmp/bdb.tar.gz"
 
@@ -79,10 +92,10 @@ install -o root -g root -m 0755 "$tmp/banditdb" /usr/local/bin/banditdb
 
 cat > "$CONF_DIR/appliance-manifest.json" <<EOF
 {
-  "banditdb_version": "$VERSION",
+  "banditdb_version": "$BDB_VERSION",
   "target": "$target",
   "artifact_sha256": "$sha",
-  "base_image": "$PRETTY_NAME",
+  "base_image": "$os_pretty",
   "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF

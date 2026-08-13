@@ -44,6 +44,12 @@ aws lightsail get-blueprints --region eu-central-1 \
 Lightsail lags Canonical's release date, so the newest LTS may not be offered
 for some months after it ships. Take the newest that is listed.
 
+Verified build, 2026-08-13, eu-central-1: **Ubuntu 24.04.4 LTS**, x86_64,
+BanditDB v2.0.0, artifact sha256 `16f7f2fb683e6d13cac20be34518a81f32f77bac5329fcfb155de6c16a362e43`.
+The binary reports `banditdb 2.0.0 (neural)`, so the published release does
+include the neural algorithms — no custom build needed for NeuralLinUCB or
+NeuralTS campaigns.
+
 ## Build the appliance
 
 ```bash
