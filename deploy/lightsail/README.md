@@ -1,213 +1,161 @@
-# BanditDB on Lightsail — golden appliance
+# BanditDB on Lightsail
 
-One Ubuntu image, snapshotted once, launched per customer. Companion to
-[`../../docs/CLOUD_STAGE1.md`](../../docs/CLOUD_STAGE1.md).
+One script. Create a stock Ubuntu instance, run it, done — no golden image, no
+snapshot lifecycle. Companion to [`../../docs/CLOUD_STAGE1.md`](../../docs/CLOUD_STAGE1.md).
 
-```
-build box (never serves a customer)
-    │  build-appliance.sh          binary pinned, unit installed, NO keys, NO data
-    │  verify-appliance.sh         gate: refuses if customer state is present
-    │  generalize.sh               strips identity; SSH stops accepting after this
-    ▼
-snapshot: banditdb-appliance-v2.0.0
-    │  provision.sh acme acme.api.banditdb.com
-    ▼
-customer instance
-    │  firstboot.sh                generates keys, renders vhost, starts service
-    │  banditdb-enable-tls         once DNS resolves
-    ▼
-live
-```
-
-| File | Runs where | When |
-|---|---|---|
-| `build-appliance.sh` | build box, as root | once per BanditDB release |
-| `verify-appliance.sh` | build box, as root | after build, before generalize |
-| `generalize.sh` | build box, as root | **last command on that box** |
-| `provision.sh` | your laptop | per customer |
-| `firstboot.sh` | customer instance | automatically, first boot |
-| `enable-tls.sh` | customer instance | after DNS resolves |
-| `banditdb.service` | installed by build | — |
-| `nginx-vhost.conf.template` | rendered by firstboot | — |
-
-## Ubuntu version
-
-The scripts depend only on `apt`, `systemd`, `nginx` and `ufw`, so any current
-Ubuntu LTS works. `build-appliance.sh` prints the base image it ran on and
-records it in `/etc/banditdb/appliance-manifest.json` rather than assuming.
-
-Pick the newest LTS blueprint Lightsail offers in your region:
-
-```bash
-aws lightsail get-blueprints --region eu-central-1 \
-  --query "blueprints[?contains(name,'Ubuntu')].[blueprintId,name]" --output table
-```
-
-Lightsail lags Canonical's release date, so the newest LTS may not be offered
-for some months after it ships. Take the newest that is listed.
-
-Verified build, 2026-08-13, eu-central-1: **Ubuntu 24.04.4 LTS**, x86_64,
-BanditDB v2.0.0, artifact sha256 `16f7f2fb683e6d13cac20be34518a81f32f77bac5329fcfb155de6c16a362e43`.
-The binary reports `banditdb 2.0.0 (neural)`, so the published release does
-include the neural algorithms — no custom build needed for NeuralLinUCB or
-NeuralTS campaigns.
-
-## Build the appliance
-
-```bash
-# Launch a throwaway instance from the Ubuntu blueprint, then on it:
-git clone https://github.com/dynamicpricing-ai/banditdb
-cd banditdb/deploy/lightsail
-sudo BANDITDB_VERSION=v2.0.0 bash build-appliance.sh
-sudo bash verify-appliance.sh          # must pass
-sudo bash generalize.sh                # LAST command on this box
-```
-
-Then stop the instance and snapshot it as `banditdb-appliance-v2.0.0`.
-
-`generalize.sh` deletes the SSH host keys, and Ubuntu 22.10+ socket-activates
-sshd — so from that moment every new SSH connection is refused with
-`kex_exchange_identification: Connection reset by peer`. An already-open session
-survives; a reconnect does not. This is why generalisation is the terminal step
-rather than part of the build: anything you still need to do on the box has to
-happen before it. If you must get back in, reboot — sshd recreates the keys via
-its `ExecStartPre` hook — then generalise again before snapshotting.
-
-**The rule that matters:** the build box must never have served a customer.
-Snapshotting a working instance clones its API keys and its learned state onto
-whoever launches next. `verify-appliance.sh` exists to catch exactly that — it
-fails if `banditdb.env` exists, if `/var/lib/banditdb` is non-empty, if SSH host
-keys are present, or if `machine-id` is populated.
-
-Rebuild the appliance per release; never mutate a snapshot in place. Keep the
-previous one until every customer has moved off it — it is your rollback.
-
-## SSH access
-
-Create the **build** instance with the SSH key you intend to use for the whole
-fleet. `generalize.sh` preserves `~ubuntu/.ssh/authorized_keys`, so that key is
-baked into the snapshot and works on every instance launched from it — no
-dependency on cloud-init re-injecting a key at launch time.
-
-Host keys are the opposite: removed by `generalize.sh` and regenerated per
-instance by `firstboot.sh`, so instances cannot impersonate one another. Expect
-your client to warn about an unknown host on each new instance.
-
-Customers never get shell access, only the HTTPS API, so the operator key being
-common across the fleet is the intended design rather than a compromise.
+| File | Purpose |
+|---|---|
+| `cloud-init.sh` | Provisions a complete instance. Upload and run, or paste as a launch script. |
+| `provision.sh` | Creates the instance and feeds it `cloud-init.sh` as user-data. Needs the AWS CLI. |
 
 ## Provision a customer
 
+**By hand** (no AWS CLI needed):
+
+1. Lightsail → create instance → Ubuntu 24.04 LTS → **2 GB (`small_3_0`)** → your SSH key
+2. Either paste `cloud-init.sh` into **Add launch script**, or upload it after boot:
+
+```bash
+scp deploy/lightsail/cloud-init.sh ubuntu@<ip>:~/
+ssh ubuntu@<ip>
+sudo CUSTOMER_ID=acme SERVER_NAME=acme.api.banditdb.com bash cloud-init.sh
+```
+
+**Or scripted:**
+
 ```bash
 export AWS_REGION=eu-central-1
+./provision.sh acme acme.api.banditdb.com --tier starter --dry-run   # inspect first
 ./provision.sh acme acme.api.banditdb.com --tier starter
 ```
 
-Bundles: `nano_3_0` 512 MB · `small_3_0` 2 GB (Starter) · `medium_3_0` 4 GB
-(Growth) · `large_3_0` 8 GB.
+Takes about three minutes, mostly `apt`. Then `curl http://<ip>/health`.
 
-512 MB is too small for anything real — pending interactions alone are budgeted
-at ~100 MB, before matrices and the neural replay buffer.
+Bundles: `small_3_0` 2 GB (Starter) · `medium_3_0` 4 GB (Growth) · `large_3_0` 8 GB.
+`nano_3_0` is too small — pending interactions alone are budgeted at ~100 MB
+before matrices and the neural replay buffer.
 
-Then, in order: DNS record → `banditdb-enable-tls` → durability check →
-deliver credentials → shred the credentials file.
+## TLS
+
+Two prerequisites, both of which fail confusingly if skipped:
+
+- **Open 443 in the Lightsail firewall** (Networking tab). `ufw` inside the
+  instance already allows it, but the Lightsail layer drops the packet first, and
+  the symptom is certbot failing for no visible reason. `provision.sh` does this
+  for you.
+- **DNS must resolve first.** Certbot proves control by answering a challenge on
+  that hostname, so the record has to exist before you run it. Repeated failures
+  count against Let's Encrypt's limit of 5 per hostname per hour.
+
+```bash
+dig +short acme.api.banditdb.com        # must return the instance IP
+sudo certbot --nginx -d acme.api.banditdb.com --agree-tos -m ops@banditdb.com --redirect
+sudo certbot renew --dry-run            # confirm renewal works; it fails silently otherwise
+```
 
 ## Verify before handing over
 
-Do not skip this. It is the only step that proves *this instance's* disk
-actually persists an acknowledged write, and it takes about ninety seconds.
+Not optional. It proves *this instance's disk* persists an acknowledged write,
+and it takes about a minute. Reads the keys from the env file so no secrets get
+copied around.
 
 ```bash
-DOMAIN=acme.api.banditdb.com
-ADMIN=...; WRITER=...; READER=...
+sudo bash <<'EOF'
+KEYS=$(sed -n 's/^BANDITDB_API_KEYS="\(.*\)"$/\1/p' /etc/banditdb/banditdb.env)
+ADMIN=${KEYS%%=admin*}
+WRITER=$(echo "$KEYS" | sed 's/.*=admin;//;s/=writer.*//')
+READER=$(echo "$KEYS" | sed 's/.*=writer;//;s/=reader.*//')
+B=http://localhost
 
-curl -sf https://$DOMAIN/health | jq .        # expect version 2.0.0
+curl -sf -X POST $B/campaign -H "X-Api-Key: $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"campaign_id":"provision-check","arms":["a","b"],"feature_dim":2}' >/dev/null
 
-curl -sf -X POST https://$DOMAIN/campaign -H "X-Api-Key: $ADMIN" \
-  -H 'Content-Type: application/json' \
-  -d '{"campaign_id":"provision-check","arms":["a","b"],"feature_dim":2}'
-
-IID=$(curl -sf -X POST https://$DOMAIN/predict -H "X-Api-Key: $WRITER" \
-  -H 'Content-Type: application/json' \
+IID=$(curl -sf -X POST $B/predict -H "X-Api-Key: $WRITER" -H 'Content-Type: application/json' \
   -d '{"campaign_id":"provision-check","context":[0.6,0.8]}' | jq -r .interaction_id)
 
-curl -sf -X POST https://$DOMAIN/reward -H "X-Api-Key: $WRITER" \
-  -H 'Content-Type: application/json' \
-  -d "{\"interaction_id\":\"$IID\",\"reward\":1.0}"
+curl -sf -X POST $B/reward -H "X-Api-Key: $WRITER" -H 'Content-Type: application/json' \
+  -d "{\"interaction_id\":\"$IID\",\"reward\":1.0}" >/dev/null
 
-# Kill it. An acknowledged reward is fsynced, so it must survive.
-ssh ubuntu@$IP 'sudo systemctl restart banditdb'
-sleep 5
+# SIGKILL: no graceful shutdown, no final checkpoint. Recovery must replay the
+# WAL. An acknowledged reward is fsynced, so it has to survive this.
+systemctl kill -s SIGKILL banditdb
+sleep 8
 
-curl -sf https://$DOMAIN/campaign/provision-check -H "X-Api-Key: $READER" \
-  | jq '.total_rewards'      # MUST be 1
-
-curl -sf -X DELETE https://$DOMAIN/campaign/provision-check -H "X-Api-Key: $ADMIN"
+echo -n "total_rewards after SIGKILL (must be 1): "
+curl -sf $B/campaign/provision-check -H "X-Api-Key: $READER" | jq '.total_rewards'
+echo -n "reader DELETE (must be 403): "
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE $B/campaign/provision-check -H "X-Api-Key: $READER"
+curl -sf -X DELETE $B/campaign/provision-check -H "X-Api-Key: $ADMIN" >/dev/null
+EOF
 ```
 
-If `total_rewards` is `0`, stop and investigate. Do not hand the instance over.
+`total_rewards` must be `1`. If it is `0`, an acknowledged write was lost — stop
+and investigate before anyone depends on this instance. The `403` confirms the
+three roles parsed distinctly rather than everyone getting admin.
 
-Also confirm role separation, since a mis-parsed key string would silently grant
-everyone admin:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
-  https://$DOMAIN/campaign/provision-check -H "X-Api-Key: $READER"   # expect 403
-```
+Then deliver `/etc/banditdb/credentials.txt` over a one-time secret link — never
+plain email — and `shred -u` it.
 
 ## Operating
 
-**Backups.** `provision.sh` enables Lightsail automatic snapshots at 03:00.
-Those are crash-consistent, and BanditDB is crash-safe — fsynced checkpoint,
+**Logs.** `journalctl -u banditdb -f` (JSON) and `/var/log/cloud-init-output.log`
+for provisioning.
+
+**Backups.** `provision.sh` enables daily Lightsail snapshots at 03:00. Those are
+crash-consistent, and BanditDB is crash-safe — fsynced checkpoint,
 `checkpoint.prev` fallback, WAL replay — so restoring one is sound. Checkpoint
 first when you can, so replay is near zero:
 
 ```bash
-curl -sf -X POST https://$DOMAIN/checkpoint -H "X-Api-Key: $ADMIN"
+curl -sf -X POST https://<domain>/checkpoint -H "X-Api-Key: $ADMIN"
 ```
 
-A snapshot nobody has restored is a hypothesis. Run the drill weekly against a
-rotating customer, into a throwaway instance:
+A snapshot nobody has restored is a hypothesis. Restore one into a throwaway
+instance monthly and run the check above against it.
+
+**Upgrades.**
 
 ```bash
-sudo /opt/banditdb/scripts/backup_restore.sh drill /var/lib/banditdb
-```
-
-Note its warning about `neural/`: a neural campaign restored without those
-sidecars comes back with random weights. It serves, but it has forgotten
-everything.
-
-**Upgrades.** Build a new appliance for the new release. For existing customers,
-replace the binary in place:
-
-```bash
-curl -fsSL https://github.com/dynamicpricing-ai/banditdb/releases/download/v2.1.0/banditdb-v2.1.0-aarch64-unknown-linux-gnu.tar.gz | tar xz
+V=v2.1.0
+curl -fsSL "https://github.com/dynamicpricing-ai/banditdb/releases/download/$V/banditdb-$V-x86_64-unknown-linux-gnu.tar.gz" | tar xz
 sudo install -m0755 banditdb /usr/local/bin/banditdb
-sudo systemctl restart banditdb    # SIGTERM checkpoints, then replay on start
+sudo systemctl restart banditdb     # SIGTERM checkpoints, then replays on start
 ```
 
-Downtime is seconds. Roll one canary customer, wait 24 hours, then the rest.
+Downtime is seconds — recovery replays 100k events in ~0.6 s. Roll one canary
+customer, wait 24 hours, then the rest.
 
-**Logs.** `journalctl -u banditdb -f`. JSON, since `LOG_FORMAT=json`.
-
-**Metrics.** `/metrics` needs the reader key. Unlike the Kubernetes path — where
-ServiceMonitor cannot send a custom header — plain Prometheus can, if your
-version supports `http_headers` in `scrape_configs`. Verify against your version;
-if it works, keep `/metrics` closed and scrape with the reader key.
-
-The alerts worth wiring are in `docs/CLOUD_STAGE1.md` §6.1. The one that earns
-its keep is `banditdb_interactions_evicted_total`: when it climbs, the customer's
-rewards are 404ing and their model has quietly stopped learning. They cannot see
-that. You can.
+**Metrics.** `/metrics` needs the reader key. Plain Prometheus can send it via
+`http_headers` in `scrape_configs` (check your version supports it), so unlike the
+Kubernetes path there is no need to open the endpoint. Alerts worth wiring are in
+`docs/CLOUD_STAGE1.md` §6.1 — the one that earns its keep is
+`banditdb_interactions_evicted_total`: when it climbs, the customer's rewards are
+404ing and their model has quietly stopped learning. They cannot see that.
 
 ## Deliberate limitations
 
 - **No self-healing beyond the process.** `Restart=always` covers a crash; nothing
-  covers instance loss. Recovery is restore-from-snapshot, roughly 15 minutes.
-  Say so in the SLA rather than discovering it during an incident.
-- **No live vertical scaling.** Growing 2 GB → 4 GB is snapshot, restore to a
-  bigger bundle, repoint DNS. Schedule it.
-- **Single AZ.** The instance and its disk live in one availability zone. An AZ
-  outage is a restore, not a failover.
-- **TLS is a second step.** Certbot must prove control of a name that resolves
-  here, which cannot be true before the instance exists.
+  covers instance loss. Recovery is restore-from-snapshot, ~15 minutes. Put that
+  in the SLA rather than discovering it during an incident.
+- **No live vertical scaling.** 2 GB → 4 GB is snapshot, restore to a bigger
+  bundle, repoint DNS. Schedule it.
+- **Single AZ.** Instance and disk live in one availability zone. An AZ outage is
+  a restore, not a failover.
+
+## Why there is no golden image
+
+An earlier version of this directory built an appliance, snapshotted it, and
+launched customers from the snapshot. It was removed. Nearly every problem it
+caused was image hygiene rather than BanditDB: stripping SSH host keys made
+launched instances unreachable when regeneration lost a race with socket-activated
+sshd; `machine-id` had to be cleared; generalisation had to be the terminal step
+because it destroyed its own access path; and the snapshot lifecycle needed its
+own verification gate.
+
+Provisioning from a script at boot removes all of it. The cost is roughly two
+extra minutes per instance and a dependency on GitHub being reachable at
+provision time. At this scale that is a good trade — and the thing under version
+control is now the thing that actually runs, rather than a snapshot built from it
+weeks ago.
+
+The old scripts remain in git history if the trade ever reverses.
