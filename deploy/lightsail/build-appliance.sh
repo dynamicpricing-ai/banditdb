@@ -114,7 +114,10 @@ cat > /etc/systemd/system/banditdb-firstboot.service <<'EOF'
 Description=BanditDB first-boot provisioning
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=!/etc/banditdb/banditdb.env
+# Deliberately no ConditionPathExists on banditdb.env. The script exits early by
+# itself once provisioned, and it also repairs missing SSH host keys — which has
+# to keep working on every boot, not just the first one.
+Before=ssh.socket ssh.service
 
 [Service]
 Type=oneshot

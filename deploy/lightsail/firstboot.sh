@@ -19,6 +19,27 @@ CRED_FILE="$CONF_DIR/credentials.txt"
 
 log() { printf '[firstboot] %s\n' "$*"; }
 
+# ── SSH host keys, before anything else ──────────────────────────────────────
+# generalize.sh deletes these so instances do not share one SSH identity, and
+# regenerate-ssh-hostkeys.service is supposed to recreate them at boot. Do it
+# here as well, because that unit's ordering against a socket-activated sshd is
+# not reliable: if sshd starts first it dies for lack of keys, systemd trips the
+# socket's trigger limit after a few attempts, stops the socket, and every
+# subsequent connection is refused. The instance then serves traffic perfectly
+# while being impossible to administer.
+#
+# This runs unconditionally and before the provisioned-already check, so it also
+# repairs an instance that came up without keys for any other reason.
+if ! compgen -G '/etc/ssh/ssh_host_*_key' >/dev/null; then
+  log "no ssh host keys — generating"
+  ssh-keygen -A
+  # Clear any failure state from sshd having already died, then restart whichever
+  # unit this release uses (socket-activated on 22.10+, plain service before).
+  systemctl reset-failed ssh.socket ssh.service 2>/dev/null || true
+  systemctl restart ssh.socket 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+  log "ssh host keys generated"
+fi
+
 if [[ -f "$ENV_FILE" ]]; then
   log "already provisioned; nothing to do"
   exit 0
