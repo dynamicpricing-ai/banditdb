@@ -127,8 +127,33 @@ StandardError=journal+console
 WantedBy=multi-user.target
 EOF
 
+# Recreates SSH host keys on the first boot of every launched instance.
+#
+# generalize.sh deletes the keys so that N instances from one snapshot do not
+# share a single SSH identity — anyone holding one box could otherwise
+# impersonate every other box to an SSH client. This unit is what makes that
+# safe to do: without it, launched instances come up with no host keys and no
+# way to generate them, and are simply unreachable.
+#
+# It belongs here rather than in generalize.sh because it is part of the image.
+# generalize.sh only removes state; it installs nothing.
+cat > /etc/systemd/system/regenerate-ssh-hostkeys.service <<'EOF'
+[Unit]
+Description=Regenerate SSH host keys on first boot
+Before=ssh.service ssh.socket
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-systemctl enable nginx banditdb-firstboot
+systemctl enable nginx banditdb-firstboot regenerate-ssh-hostkeys
 
 # banditdb itself is ENABLED but cannot start yet: the unit requires
 # /etc/banditdb/banditdb.env, which firstboot writes. Enabling it here means a
