@@ -4,6 +4,41 @@ version = "2.0.0"
 edition = "2021"
 description = "An ultra-fast Contextual Bandit Database"
 license = "Apache-2.0"
+readme = "README.md"
+homepage = "https://banditdb.com"
+repository = "https://github.com/dynamicpricing-ai/banditdb"
+documentation = "https://banditdb.com/docs/"
+
+# ethnum 1.5.2, reached via polars, fails to compile on recent rustc — it
+# transmutes () into an 8-bit TryFromIntError, which newer transmute size
+# checking rejects. 1.5.3 fixes it. Declaring the floor here makes an
+# unsupported toolchain a clear message rather than a confusing build error.
+rust-version = "1.97"
+
+# crates.io allows 5 of each.
+keywords = ["bandit", "contextual-bandit", "reinforcement", "personalization", "linucb"]
+categories = ["algorithms", "database-implementations", "science", "web-programming::http-server"]
+
+# An allow-list rather than an exclude-list. The repo carries 156 MB of benchmark
+# datasets that would blow past the registry limit, but blocklisting is the wrong
+# tool: excluding `docs/` wholesale produced a crate that would not compile,
+# because main.rs serves the OpenAPI spec via include_str!("../docs/openapi.yaml").
+# Whitelisting makes that dependency explicit and fails loudly if it moves.
+#
+# `tests/` ships deliberately — it documents the concurrency and durability
+# contracts better than prose does.
+# Leading slashes matter: these are gitignore-style globs, so a bare "README.md"
+# matches at every depth and quietly pulled in README files from benchmark/,
+# deploy/ and a stray directory. Anchor everything to the package root.
+include = [
+    "/src/**/*.rs",
+    "/tests/**/*.rs",
+    "/docs/openapi.yaml",   # compiled into the binary; see main.rs
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/Cargo.toml",
+]
 
 [dependencies]
 ndarray = { version = "0.15", features = ["serde"] }
