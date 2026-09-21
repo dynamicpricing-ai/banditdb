@@ -78,6 +78,41 @@ components:
         prediction_count: { type: integer }
         reward_count:     { type: integer }
         avg_reward:       { type: number, nullable: true }
+        status:           { $ref: "#/components/schemas/ArmStatus" }
+        group:            { type: string, nullable: true }
+
+    ArmStatus:
+      type: string
+      enum: [active, paused, retired]
+      description: |
+        Selection eligibility. Exclusion is always soft — a paused or retired arm
+        keeps its matrices and keeps learning from rewards for predictions that
+        were already in flight. `paused` is reversible by intent (out of stock,
+        creative paused); `retired` is permanent by intent but still restorable.
+
+    WarmStart:
+      type: object
+      description: |
+        How a new arm borrows from arms that already exist. The prior is ridge
+        regression centred on the borrowed mean instead of on zero:
+        `A_inv = I/strength`, `b = strength*mean`, so `theta = mean`.
+        `strength` is in pseudo-observations — at 1.0 the arm carries a cold arm's
+        uncertainty (so it is still explored) but starts from a sensible estimate.
+      required: [from]
+      properties:
+        from:
+          type: string
+          enum: [none, population, group, arms]
+          description: |
+            none — cold start (theta = 0), the default.
+            population — mean theta over all active arms.
+            group — mean theta over active arms sharing the new arm's group.
+            arms — mean theta over an explicit list, whatever their status.
+        strength: { type: number, default: 1.0, description: "Prior strength in pseudo-observations. (0, 1e6]." }
+        arms:
+          type: array
+          items: { type: string }
+          description: "Required when from = arms."
 
     ArmDiagnostics:
       type: object
@@ -88,6 +123,8 @@ components:
         theta_norm:     { type: number }
         a_inv_diag_min: { type: number }
         a_inv_diag_max: { type: number }
+        status:         { $ref: "#/components/schemas/ArmStatus" }
+        group:          { type: string, nullable: true }
 
     CampaignSummary:
       type: object
@@ -120,6 +157,7 @@ components:
         archived:             { type: boolean }
         algorithm:            { $ref: "#/components/schemas/Algorithm" }
         arm_count:            { type: integer }
+        active_arm_count:     { type: integer, description: "Arms eligible for selection. selection_entropy and converged are computed over these only." }
         total_predictions:    { type: integer }
         total_rewards:        { type: integer }
         overall_avg_reward:   { type: number, nullable: true }
@@ -328,6 +366,80 @@ paths:
         "200": { description: Restored }
         "404": { description: Not found }
 
+  /campaign/{id}/arms:
+    post:
+      summary: Add an arm to a live campaign
+      description: |
+        Adds an arm to a running campaign without disturbing what the other arms
+        have learned. Requires admin role.
+
+        The new arm starts cold by default. `warm_start` instead centres its ridge
+        prior on the mean theta of arms that already exist — the whole population,
+        the arms in its `group`, or an explicit list. This is cold-start relief,
+        not a hierarchical model: the prior is resolved once, at the moment the arm
+        is added, and real rewards outweigh it as they arrive.
+
+        For Progressive campaigns the arm is added to the base and the challenger
+        together, each with a prior resolved against its own model's theta.
+
+        Note for neural campaigns: a warm-start prior lives in the current embedding
+        space, so the next retrain (which rebuilds arm matrices in the new space)
+        effectively discards it. Lifecycle status and group survive retraining.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [arm_id]
+              properties:
+                arm_id: { type: string, description: "1–128 chars of [a-zA-Z0-9_-]." }
+                group:  { type: string, description: "Optional hierarchy label, e.g. a product category." }
+                warm_start: { $ref: "#/components/schemas/WarmStart" }
+      responses:
+        "200": { description: Arm added }
+        "400": { description: Validation error, BANDITDB_MAX_ARMS reached, or an unusable warm_start }
+        "404": { description: Campaign not found, or a named warm_start source arm does not exist }
+        "409": { description: An arm with that id already exists }
+        "503": { description: WAL unavailable }
+
+  /campaign/{id}/arms/{arm_id}/status:
+    post:
+      summary: Pause, retire, or reactivate an arm
+      description: |
+        Soft exclusion. The arm's matrices are untouched: it stops being selectable
+        but keeps absorbing rewards for predictions already in flight, and
+        reactivating it restores everything it learned. Requires admin role.
+
+        Pausing the last active arm is refused — it would make every prediction on
+        the campaign fail. Archive the campaign instead.
+
+        If the campaign sets `decay_half_life_hours`, a paused arm's posterior keeps
+        widening while it is out of rotation, so a reactivated arm gets explored
+        again rather than returning on stale confidence.
+
+        For a per-request exclusion (out of stock for this shopper, already seen by
+        this user) use `exclude_arms` on /predict instead — it changes no state.
+      parameters:
+        - { name: id,     in: path, required: true, schema: { type: string } }
+        - { name: arm_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/ArmStatus" }
+      responses:
+        "200": { description: Status updated }
+        "400": { description: Validation error, or the arm is the last active one }
+        "404": { description: Campaign or arm not found }
+        "503": { description: WAL unavailable }
+
   /campaign/{id}/report:
     get:
       summary: Business-level convergence report
@@ -376,7 +488,9 @@ paths:
                         mean_reward:     { type: number, nullable: true, description: "Observed mean reward. null until the arm has ≥10 rewards." }
                         reward_lower_ci: { type: number, nullable: true, description: "95% CI lower bound. null until ≥10 rewards." }
                         reward_upper_ci: { type: number, nullable: true, description: "95% CI upper bound. null until ≥10 rewards." }
-                  leading_arm:     { type: string, nullable: true }
+                        status:          { $ref: "#/components/schemas/ArmStatus" }
+                        group:           { type: string, nullable: true }
+                  leading_arm:     { type: string, nullable: true, description: "Active arms only — a paused arm is never named as the leader, though its history stays in `arms`." }
                   converged:       { type: boolean, nullable: true, description: "true=done, false=keep going, null=insufficient data" }
                   challenger_traffic_pct: { type: number, nullable: true }
                   tournament_win_streak:  { type: integer, nullable: true }
@@ -423,6 +537,23 @@ paths:
                     heavy-tailed features let rare high-norm rows dominate arm
                     selection. On the UCI shuttle benchmark this single change moved
                     cumulative regret from 2,026 to 709 with no code change.
+                eligible_arms:
+                  type: array
+                  items: { type: string }
+                  description: >
+                    Restrict this request to these arms. Absent means every active
+                    arm. A filter can only narrow the active set — it never makes a
+                    paused or retired arm selectable.
+                exclude_arms:
+                  type: array
+                  items: { type: string }
+                  description: >
+                    Drop these arms from this request, applied after eligible_arms.
+                    Use for per-request constraints — out of stock, already shown,
+                    not permitted in this region — that should change no state.
+                    Filtering happens before propensities are computed, so the
+                    logged propensity describes the policy that actually ran and
+                    off-policy evaluation stays valid.
       responses:
         "200":
           description: Selected arm
@@ -456,8 +587,10 @@ paths:
                     type: object
                     required: [campaign_id, context]
                     properties:
-                      campaign_id: { type: string }
-                      context:     { type: array, items: { type: number } }
+                      campaign_id:   { type: string }
+                      context:       { type: array, items: { type: number } }
+                      eligible_arms: { type: array, items: { type: string }, description: "Per-item allow-list. See /predict." }
+                      exclude_arms:  { type: array, items: { type: string }, description: "Per-item deny-list. See /predict." }
       responses:
         "200":
           description: Per-item results (partial failures included inline)

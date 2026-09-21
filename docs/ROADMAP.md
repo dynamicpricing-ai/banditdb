@@ -14,6 +14,15 @@ comes from one small file per checkpoint. Merging them into larger periodic file
 help analytical read performance. Not urgent — the disk-fill risk, which was the actual
 hazard, is closed.
 
+### Upgrade polars (0.41 → 0.55)
+
+Two advisories are ignored in `deny.toml`, and both are transitive through polars:
+RUSTSEC-2025-0003 (fast-float segfault, unreachable — the Parquet path is write-only)
+and RUSTSEC-2026-0249 (smartstring unmaintained, repo archived 2026-05-03). Neither
+has a fix at polars 0.41; upgrading clears both. It spans 14 minor versions and will
+break `write_campaign_parquet` against the current DataFrame/ParquetWriter API, so it
+wants its own branch and its own testing. Both ignores are dated REVIEW BY 2026-12-31.
+
 ## Scale / availability (the #2 ceiling)
 
 ### Horizontal write scale — campaign sharding
@@ -42,6 +51,39 @@ bites under load.
 
 > Binary WAL was on this list but is **implemented**: `BANDITDB_WAL_FORMAT=msgpack`
 > with a `BDMP` magic header for backward-compat detection.
+
+## Dynamic arms — what was deliberately left out
+
+Shipped: arm add, soft exclusion (paused/retired plus per-request filters), and
+warm-start priors from the population, a group, or a named list.
+
+### Arm features and similarity-weighted priors
+Warm start borrows from arms the caller names or groups. It cannot say "this new arm
+resembles those two" on its own, because arms carry no feature vector. Adding
+`features: Vec<f64>` to an arm would let the prior be a similarity-weighted mean over
+the k nearest arms. Build it when a customer has real arm embeddings; explicit groups
+cover the catalogue case without it.
+
+### Continuously re-estimated population prior
+The prior is resolved once, at add time. A true hierarchical model keeps shrinking
+every arm toward a hyper-mean that is itself re-estimated. Mechanically feasible —
+`b` is additive, so a checkpoint could apply `b += λ(μ_new − μ_old)` — but it needs
+the prior term stored separately from the data term, and decay rescales both. Not
+worth the state complexity until something demands it.
+
+### Hybrid LinUCB (Li et al. 2010, Algorithm 2)
+The textbook answer for sharing strength across arms: a shared coefficient block over
+context × arm features. Rejected for now — the shared block is k×k with k = d·m, the
+scoring path gains block-inverse terms, and it fits neither the neural embedding path
+nor the tournament. The warm-start prior gets most of the cold-start benefit for
+almost none of the surface area.
+
+### Warm-start priors do not survive a neural retrain
+`reaccumulate` rebuilds arm matrices in the new embedding space by replaying the
+buffer from a cold start, so a prior injected in the old space is gone. Status and
+group are preserved. Fixing it means re-deriving the prior from the other arms' θ in
+the new space after reaccumulation — worth doing only if neural campaigns turn out to
+add arms often.
 
 ## Known gaps after Stage 1 hardening
 

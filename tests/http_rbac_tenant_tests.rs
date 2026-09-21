@@ -304,3 +304,68 @@ fn require_auth_refuses_to_start_without_keys() {
         Err(_) => eprintln!("SKIPPED require_auth: could not spawn binary"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Arm lifecycle over HTTP
+// ---------------------------------------------------------------------------
+
+/// The arm routes exist, are admin-only, and speak the documented JSON. The engine
+/// tests cover the semantics; this covers the wiring — routing, role, and the
+/// tagged `warm_start` shape, none of which the engine tests can see.
+#[test]
+fn arm_lifecycle_routes_are_wired_and_admin_only() {
+    let srv = server_or_skip!(18309, &[]);
+    assert_eq!(srv.create_campaign(ADMIN_A, "arms"), 200);
+
+    // Structural changes need admin; a writer key must not reshape a campaign.
+    assert_eq!(
+        srv.post("/campaign/arms/arms", Some(WRITER_A), r#"{"arm_id":"C"}"#).unwrap().0,
+        403, "adding an arm must require admin"
+    );
+
+    let (status, _) = srv.post(
+        "/campaign/arms/arms", Some(ADMIN_A),
+        r#"{"arm_id":"C","group":"grp","warm_start":{"from":"population","strength":1.0}}"#,
+    ).unwrap();
+    assert_eq!(status, 200, "admin must be able to add a warm-started arm");
+
+    assert_eq!(
+        srv.post("/campaign/arms/arms", Some(ADMIN_A), r#"{"arm_id":"C"}"#).unwrap().0,
+        409, "a duplicate arm must conflict"
+    );
+
+    // The new arm shows up with its status and group.
+    let (_, body) = srv.get("/campaign/arms", Some(READER_A)).unwrap();
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info["arms"]["C"]["status"], "active");
+    assert_eq!(info["arms"]["C"]["group"], "grp");
+
+    // Pause it, then confirm a per-request filter cannot bring it back.
+    assert_eq!(
+        srv.post("/campaign/arms/arms/C/status", Some(ADMIN_A), r#"{"status":"paused"}"#).unwrap().0,
+        200
+    );
+    let (_, body) = srv.get("/campaign/arms", Some(READER_A)).unwrap();
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info["arms"]["C"]["status"], "paused");
+
+    assert_eq!(
+        srv.post("/predict", Some(WRITER_A),
+            r#"{"campaign_id":"arms","context":[0.5,0.5],"eligible_arms":["C"]}"#).unwrap().0,
+        400, "a filter must not resurrect a paused arm"
+    );
+
+    // Per-request exclusion is a writer-level operation on /predict, not a state change.
+    let (status, body) = srv.post("/predict", Some(WRITER_A),
+        r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A"]}"#).unwrap();
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["arm_id"], "B", "with A excluded and C paused, only B is eligible");
+
+    // Excluding everything left is a client bug, not a reason to serve a paused arm.
+    assert_eq!(
+        srv.post("/predict", Some(WRITER_A),
+            r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A","B"]}"#).unwrap().0,
+        400
+    );
+}

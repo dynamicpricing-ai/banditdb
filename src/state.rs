@@ -2,7 +2,7 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 fn default_none_map() -> Option<HashMap<String, f64>> { None }
 
@@ -127,11 +127,104 @@ pub enum TournamentOutcome {
     Inconclusive,
 }
 
+/// Lifecycle state of a single arm.
+///
+/// Exclusion is always soft: a paused or retired arm keeps its matrices and keeps
+/// learning from rewards. Predictions made before the pause are still in flight and
+/// their rewards still arrive; dropping them would throw away data the arm paid for.
+/// It also matters for the neural path, where `retrain` looks every buffered
+/// interaction's arm up by id — hard-deleting an arm would strand those entries.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArmStatus {
+    /// Eligible for selection.
+    #[default]
+    Active,
+    /// Not selectable, still learns. Reversible; the intended state for
+    /// "out of stock", "creative paused", "seasonal".
+    Paused,
+    /// Not selectable, still absorbs in-flight rewards. Semantically permanent,
+    /// but restorable — nothing is deleted.
+    Retired,
+}
+
+impl ArmStatus {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            ArmStatus::Active  => 0,
+            ArmStatus::Paused  => 1,
+            ArmStatus::Retired => 2,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => ArmStatus::Paused,
+            2 => ArmStatus::Retired,
+            _ => ArmStatus::Active,
+        }
+    }
+}
+
+/// A materialised warm-start prior for a new arm: ridge regression centred on
+/// `mean` instead of on zero, with `strength` pseudo-observations of pull.
+///
+/// The mean is resolved **when the arm is added** and written into the WAL, never
+/// recomputed at replay. Replay starts from a checkpoint, so the source arms' θ at
+/// that point in the log are not the θ the original call saw — re-resolving would
+/// make recovery diverge from the live state.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ArmPrior {
+    pub mean:     Vec<f64>,
+    pub strength: f64,
+}
+
+/// How a newly added arm should borrow from the arms that already exist.
+///
+/// Request-level input, resolved to an [`ArmPrior`] by the engine. `strength` is in
+/// pseudo-observations: 1.0 leaves the new arm exactly as uncertain as a cold one
+/// (so it still gets explored) while starting its estimate at the borrowed mean.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum WarmStart {
+    /// Cold start: θ = 0, A⁻¹ = I. The historical behaviour.
+    #[default]
+    None,
+    /// Mean θ over every active arm in the campaign.
+    Population {
+        #[serde(default = "default_warm_start_strength")]
+        strength: f64,
+    },
+    /// Mean θ over the active arms sharing the new arm's `group`.
+    Group {
+        #[serde(default = "default_warm_start_strength")]
+        strength: f64,
+    },
+    /// Mean θ over an explicit list of arms, whatever their status.
+    Arms {
+        arms: Vec<String>,
+        #[serde(default = "default_warm_start_strength")]
+        strength: f64,
+    },
+}
+
+pub fn default_warm_start_strength() -> f64 { 1.0 }
+
+/// Upper bound on prior strength. Past this the prior is numerically
+/// indistinguishable from a frozen arm: A⁻¹ = I/λ leaves no exploration bonus.
+pub const MAX_WARM_START_STRENGTH: f64 = 1e6;
+
 #[derive(Debug)]
 pub struct ArmState {
     pub a_inv: Array2<f64>,
     pub b: Array1<f64>,
     pub theta: Array1<f64>,
+    /// Selection eligibility. Atomic so pausing an arm needs only a read lock on
+    /// the arms map, never a write lock that would block the prediction path.
+    pub status: AtomicU8,
+    /// Optional hierarchy label. Arms in a group lend their θ to new arms in the
+    /// same group via `WarmStart::Group`.
+    pub group: Option<String>,
     /// Cached Cholesky factor L (A_inv = L·Lᵀ) for Thompson Sampling.
     /// Computed lazily on the first `score_ts` call after each `update`, then
     /// reused until the next update invalidates it. LinUCB never touches this.
@@ -147,6 +240,8 @@ impl Clone for ArmState {
             a_inv:             self.a_inv.clone(),
             b:                 self.b.clone(),
             theta:             self.theta.clone(),
+            status:            AtomicU8::new(self.status.load(Ordering::Relaxed)),
+            group:             self.group.clone(),
             chol_cache:        parking_lot::Mutex::new(None), // don't copy stale cache
             prediction_count:  AtomicU64::new(self.prediction_count.load(Ordering::Relaxed)),
             reward_count:      AtomicU64::new(self.reward_count.load(Ordering::Relaxed)),
@@ -165,6 +260,9 @@ impl Serialize for ArmState {
             a_inv: Array2<f64>,
             b: Array1<f64>,
             theta: Array1<f64>,
+            status: ArmStatus,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            group: Option<String>,
             prediction_count: u64,
             reward_count: u64,
             total_reward: f64,
@@ -173,6 +271,8 @@ impl Serialize for ArmState {
             a_inv: self.a_inv.clone(),
             b: self.b.clone(),
             theta: self.theta.clone(),
+            status: ArmStatus::from_u8(self.status.load(Ordering::Relaxed)),
+            group: self.group.clone(),
             prediction_count: self.prediction_count.load(Ordering::Relaxed),
             reward_count: self.reward_count.load(Ordering::Relaxed),
             total_reward: f64::from_bits(self.total_reward.load(Ordering::Relaxed)),
@@ -192,6 +292,12 @@ impl<'de> Deserialize<'de> for ArmState {
             b: Array1<f64>,
             #[allow(dead_code)] // stored value is intentionally ignored; theta is recomputed from a_inv·b
             theta: Array1<f64>,
+            // Checkpoints written before arm lifecycle existed have neither field;
+            // those arms load as active and ungrouped, which is what they were.
+            #[serde(default)]
+            status: ArmStatus,
+            #[serde(default)]
+            group: Option<String>,
             #[serde(default)]
             prediction_count: u64,
             #[serde(default)]
@@ -205,6 +311,8 @@ impl<'de> Deserialize<'de> for ArmState {
             a_inv:            shadow.a_inv,
             b:                shadow.b,
             theta,
+            status:           AtomicU8::new(shadow.status.as_u8()),
+            group:            shadow.group,
             chol_cache:       parking_lot::Mutex::new(None), // recomputed lazily on first score_ts
             prediction_count: AtomicU64::new(shadow.prediction_count),
             reward_count:     AtomicU64::new(shadow.reward_count),
@@ -219,11 +327,49 @@ impl ArmState {
             a_inv:            Array2::eye(dim),
             b:                Array1::zeros(dim),
             theta:            Array1::zeros(dim),
+            status:           AtomicU8::new(ArmStatus::Active.as_u8()),
+            group:            None,
             chol_cache:       parking_lot::Mutex::new(None),
             prediction_count: AtomicU64::new(0),
             reward_count:     AtomicU64::new(0),
             total_reward:     AtomicU64::new(0.0f64.to_bits()),
         }
+    }
+
+    /// Cold start with the ridge prior centred on `mean` instead of on zero.
+    ///
+    /// The default state is already a prior — ridge regression with precision
+    /// A = I and mean 0. Shifting the centre needs no new math, only a different
+    /// starting point:
+    ///
+    /// ```text
+    /// A⁻¹ = I / λ     b = λ·μ₀     ⇒  θ = A⁻¹b = μ₀
+    /// ```
+    ///
+    /// Sherman-Morrison, scoring, Thompson sampling and checkpoint decay all keep
+    /// working unchanged — the prior is just λ pseudo-observations that real data
+    /// outweighs as it arrives. At λ = 1 the new arm carries a cold arm's
+    /// uncertainty, so it is still explored; it merely starts from a sensible guess
+    /// rather than from zero.
+    pub fn with_prior(dim: usize, mean: &Array1<f64>, strength: f64) -> Self {
+        let mut state = Self::new(dim);
+        state.a_inv = Array2::eye(dim) / strength;
+        state.b     = mean * strength;
+        state.theta = mean.clone();
+        state
+    }
+
+    pub fn status(&self) -> ArmStatus {
+        ArmStatus::from_u8(self.status.load(Ordering::Relaxed))
+    }
+
+    pub fn set_status(&self, status: ArmStatus) {
+        self.status.store(status.as_u8(), Ordering::Relaxed);
+    }
+
+    /// Eligible for selection. Paused and retired arms keep learning either way.
+    pub fn is_active(&self) -> bool {
+        self.status() == ArmStatus::Active
     }
 }
 
@@ -300,6 +446,11 @@ pub struct ArmReportStats {
     pub reward_lower_ci: Option<f64>,
     /// Upper bound of the 95% confidence interval on mean reward.
     pub reward_upper_ci: Option<f64>,
+    /// Selection eligibility. Non-active arms keep their history in this report —
+    /// traffic shares are shares of everything the campaign ever served.
+    pub status:          ArmStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group:           Option<String>,
 }
 
 /// Business-level campaign report returned by `GET /campaign/:id/report`.
@@ -356,6 +507,9 @@ pub struct ArmDiagnostics {
     pub a_inv_diag_min: f64,
     /// Largest diagonal entry of A_inv.
     pub a_inv_diag_max: f64,
+    pub status:         ArmStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group:          Option<String>,
 }
 
 /// Full campaign diagnostics snapshot returned by `GET /campaign/:id/diagnostics`.
@@ -366,6 +520,10 @@ pub struct CampaignDiagnosticsData {
     pub algorithm:            Algorithm,
     pub alpha:                f64,
     pub arm_count:            usize,
+    /// Arms eligible for selection right now. Entropy and the convergence signal
+    /// below are computed over these only — a paused arm's historical traffic would
+    /// otherwise make a collapsed campaign look healthy.
+    pub active_arm_count:     usize,
     pub total_predictions:    u64,
     pub total_rewards:        u64,
     pub overall_avg_reward:   Option<f64>,
@@ -456,6 +614,35 @@ pub enum DbEvent {
     Rewarded {
         interaction_id: String,
         reward:         f64,
+        #[serde(default)]
+        timestamp_secs: u64,
+    },
+    /// A new arm joined a live campaign.
+    ///
+    /// Both priors are already resolved to concrete vectors — see [`ArmPrior`] for
+    /// why they cannot be recomputed at replay. `challenger_*` is present only for
+    /// Progressive campaigns, whose challenger arms may live in a different
+    /// (embedding) space than the base arms.
+    ArmAdded {
+        campaign_id:     String,
+        arm_id:          String,
+        base_dim:        usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group:           Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prior:           Option<ArmPrior>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenger_dim:  Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenger_prior: Option<ArmPrior>,
+        #[serde(default)]
+        timestamp_secs:  u64,
+    },
+    /// An arm was paused, retired, or brought back. Matrices are untouched.
+    ArmStatusChanged {
+        campaign_id:    String,
+        arm_id:         String,
+        status:         ArmStatus,
         #[serde(default)]
         timestamp_secs: u64,
     },

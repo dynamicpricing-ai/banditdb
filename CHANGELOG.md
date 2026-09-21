@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — Dynamic arms
+
+Arms are no longer fixed at campaign creation.
+
+- **`POST /campaign/:id/arms`** (admin) adds an arm to a live campaign. Optional
+  `warm_start` centres the new arm's ridge prior on the mean θ of the arms that
+  already exist — the population, the arms in its `group`, or an explicit list —
+  so it starts from a sensible estimate instead of from zero. `strength` is in
+  pseudo-observations; at the default 1.0 the arm keeps a cold arm's uncertainty
+  and is still explored.
+- **`POST /campaign/:id/arms/:arm_id/status`** (admin) pauses, retires, or
+  reactivates an arm. Exclusion is soft: matrices are untouched and the arm keeps
+  learning from rewards for predictions already in flight. Pausing the last active
+  arm is refused.
+- **`eligible_arms` / `exclude_arms`** on `/predict` and `/batch_predict` narrow the
+  candidate set for one request without changing any state. Filtering happens before
+  propensities are computed, so logged propensities still describe the policy that
+  ran and off-policy evaluation stays valid.
+
+Behaviour changes worth noting on upgrade:
+
+- `selection_entropy`, `converged`, and `leading_arm` now cover **active arms only**.
+  Campaigns with no paused arms are unaffected.
+- `/campaign/:id`, `/report`, and `/diagnostics` gained per-arm `status` and `group`;
+  `/diagnostics` gained `active_arm_count`.
+- Checkpoints written by older versions load unchanged — arms without a stored status
+  load as active, which is what they were.
+- Neural campaigns: a warm-start prior lives in the current embedding space, so the
+  next retrain effectively discards it. Status and group survive retraining.
+
 ## v2.0.0 — Production hardening
 
 Closes the durability, isolation, and operational gaps found by three independent

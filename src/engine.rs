@@ -1,4 +1,4 @@
-use crate::state::{Algorithm, ArmDiagnostics, ArmReportStats, ArmState, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord};
+use crate::state::{Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord, WarmStart, MAX_WARM_START_STRENGTH};
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
 #[cfg(feature = "neural")]
@@ -149,6 +149,41 @@ fn read_wal_slice(
 /// Monotonic Unix timestamp in whole seconds. Returns 0 on the (impossible) pre-epoch case.
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+/// Per-request arm eligibility, on top of each arm's own status.
+///
+/// This is the exclusion that matters operationally: out of stock for *this*
+/// shopper, already shown to *this* user, not permitted in *this* region. It never
+/// touches stored state — it only narrows the candidate set for one prediction.
+///
+/// The filter is applied **before** propensities are computed, so the logged
+/// propensity is the probability of the chosen arm under the policy that actually
+/// ran. Filtering after the fact would leave the SNIPS tournament and every
+/// exported row reasoning about a policy that was never used.
+#[derive(Default, Clone, Debug)]
+pub struct ArmFilter {
+    /// Allow-list. `None` = every arm is a candidate.
+    pub include: Option<HashSet<String>>,
+    /// Deny-list, applied after `include`.
+    pub exclude: HashSet<String>,
+}
+
+impl ArmFilter {
+    pub fn include(arms: impl IntoIterator<Item = String>) -> Self {
+        Self { include: Some(arms.into_iter().collect()), exclude: HashSet::new() }
+    }
+
+    pub fn exclude(arms: impl IntoIterator<Item = String>) -> Self {
+        Self { include: None, exclude: arms.into_iter().collect() }
+    }
+
+    pub fn allows(&self, arm_id: &str) -> bool {
+        if let Some(inc) = &self.include {
+            if !inc.contains(arm_id) { return false; }
+        }
+        !self.exclude.contains(arm_id)
+    }
 }
 
 pub struct Campaign {
@@ -1404,6 +1439,37 @@ impl BanditDB {
                     self.interactions.invalidate(interaction_id.as_str());
                 }
             }
+            DbEvent::ArmAdded {
+                campaign_id, arm_id, base_dim, group, prior, challenger_dim, challenger_prior, ..
+            } => {
+                let campaigns = self.campaigns.read();
+                let Some(campaign) = campaigns.get(campaign_id.as_str()) else { return };
+                // or_insert: replaying an ArmAdded that is already in the checkpoint
+                // must not reset a trained arm back to its prior.
+                campaign.arms.write()
+                    .entry(arm_id.clone())
+                    .or_insert_with(|| new_arm_state(*base_dim, prior.as_ref(), group.clone()));
+                if let Some(c_arms) = &campaign.challenger_arms {
+                    let dim = challenger_dim.unwrap_or(*base_dim);
+                    c_arms.write()
+                        .entry(arm_id.clone())
+                        .or_insert_with(|| new_arm_state(dim, challenger_prior.as_ref(), group.clone()));
+                }
+            }
+            DbEvent::ArmStatusChanged { campaign_id, arm_id, status, .. } => {
+                let campaigns = self.campaigns.read();
+                let Some(campaign) = campaigns.get(campaign_id.as_str()) else { return };
+                // Status is atomic, so a read lock on the arms map is enough — a
+                // pause never blocks an in-flight prediction.
+                if let Some(arm) = campaign.arms.read().get(arm_id.as_str()) {
+                    arm.set_status(*status);
+                }
+                if let Some(c_arms) = &campaign.challenger_arms {
+                    if let Some(arm) = c_arms.read().get(arm_id.as_str()) {
+                        arm.set_status(*status);
+                    }
+                }
+            }
             DbEvent::CampaignDeleted { campaign_id } => {
                 self.campaigns.write().remove(campaign_id.as_str());
             }
@@ -1556,6 +1622,20 @@ impl BanditDB {
         }
     }
 
+    /// Same rule the HTTP layer enforces for ids, applied at the engine boundary so
+    /// SDK and embedded callers cannot create an arm the API could never name.
+    fn validate_arm_id(id: &str) -> Result<(), EngineError> {
+        if id.is_empty() || id.len() > 128 {
+            return Err(EngineError::BadRequest("arm_id must be 1–128 characters".into()));
+        }
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(EngineError::BadRequest(
+                "arm_id may only contain ASCII letters, digits, '-', and '_'".into()
+            ));
+        }
+        Ok(())
+    }
+
     /// Rewards must be finite and within [0, 1]; the confidence bounds and the
     /// SNIPS tournament estimator both assume that range.
     fn validate_reward(reward: f64) -> Result<(), EngineError> {
@@ -1614,7 +1694,143 @@ impl BanditDB {
         Self::await_ack(ack).await
     }
 
+    /// Add an arm to a live campaign. Returns once the record is durable.
+    ///
+    /// The new arm's matrices are built from `warm_start`: cold by default, or
+    /// centred on the mean θ of arms that already exist (see [`ArmState::with_prior`]).
+    /// The prior is resolved here, against the θ the campaign has right now, and the
+    /// resolved vector goes into the WAL — replay never recomputes it.
+    pub async fn add_arm(
+        &self,
+        campaign_id: &str,
+        arm_id:      &str,
+        group:       Option<String>,
+        warm_start:  &WarmStart,
+    ) -> Result<(), EngineError> {
+        Self::validate_arm_id(arm_id)?;
+        if let Some(g) = &group { Self::validate_arm_id(g)?; }
+
+        let event = {
+            let campaigns = self.campaigns.read();
+            let campaign  = campaigns.get(campaign_id)
+                .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+            if campaign.archived.load(Ordering::Relaxed) {
+                return Err(EngineError::Archived(format!(
+                    "Campaign '{campaign_id}' is archived — restore it before adding arms"
+                )));
+            }
+
+            let arms = campaign.arms.read();
+            if arms.contains_key(arm_id) {
+                return Err(EngineError::AlreadyExists(format!(
+                    "Arm '{arm_id}' already exists in campaign '{campaign_id}'"
+                )));
+            }
+            if arms.len() >= self.max_arms {
+                return Err(EngineError::BadRequest(format!(
+                    "campaign '{campaign_id}' already has {} arms — BANDITDB_MAX_ARMS={}",
+                    arms.len(), self.max_arms
+                )));
+            }
+            // Every arm in a map shares its dimension; an empty map leaves nothing
+            // to infer it from, and the campaign is unusable anyway.
+            let base_dim = arms.values().next().map(|a| a.theta.len()).ok_or_else(|| {
+                EngineError::BadRequest(format!("campaign '{campaign_id}' has no arms to infer the feature dimension from"))
+            })?;
+            let prior = resolve_prior(&arms, warm_start, group.as_deref(), base_dim)?;
+
+            // Progressive: the challenger's arms may live in a different space, so
+            // its prior is resolved separately against its own θ.
+            let (challenger_dim, challenger_prior) = match &campaign.challenger_arms {
+                Some(c_arms) => {
+                    let guard = c_arms.read();
+                    let dim   = guard.values().next().map(|a| a.theta.len()).unwrap_or(base_dim);
+                    let p     = resolve_prior(&guard, warm_start, group.as_deref(), dim)?;
+                    (Some(dim), p)
+                }
+                None => (None, None),
+            };
+
+            Arc::new(DbEvent::ArmAdded {
+                campaign_id: campaign_id.to_string(),
+                arm_id:      arm_id.to_string(),
+                base_dim,
+                group,
+                prior,
+                challenger_dim,
+                challenger_prior,
+                timestamp_secs: now_secs(),
+            })
+        };
+
+        // WAL before memory. See BanditDB consistency-model doc comment.
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
+        self.apply_event_to_memory(&event);
+        self.audit("arm_add", campaign_id, Some(arm_id));
+        Self::await_ack(ack).await
+    }
+
+    /// Pause, retire, or reactivate an arm. Returns once the record is durable.
+    ///
+    /// Exclusion is soft in every direction: the arm's matrices are untouched, it
+    /// keeps absorbing rewards for predictions already in flight, and reactivating
+    /// it brings back everything it learned. If the campaign also sets
+    /// `decay_half_life_hours`, a long pause widens the arm's posterior, so a
+    /// reactivated arm is explored again instead of returning on stale confidence.
+    pub async fn set_arm_status(
+        &self,
+        campaign_id: &str,
+        arm_id:      &str,
+        status:      ArmStatus,
+    ) -> Result<(), EngineError> {
+        {
+            let campaigns = self.campaigns.read();
+            let campaign  = campaigns.get(campaign_id)
+                .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+            let arms = campaign.arms.read();
+            let arm  = arms.get(arm_id).ok_or_else(|| EngineError::NotFound(
+                format!("Arm '{arm_id}' not found in campaign '{campaign_id}'")
+            ))?;
+
+            // Refuse to strand the campaign: with no active arm left every
+            // prediction would fail, and the only way back is another API call.
+            if status != ArmStatus::Active && arm.is_active() {
+                let remaining = arms.values().filter(|a| a.is_active()).count();
+                if remaining <= 1 {
+                    return Err(EngineError::BadRequest(format!(
+                        "Arm '{arm_id}' is the last active arm in campaign '{campaign_id}' — \
+                         add or reactivate another arm first, or archive the campaign"
+                    )));
+                }
+            }
+        }
+
+        let event = Arc::new(DbEvent::ArmStatusChanged {
+            campaign_id:    campaign_id.to_string(),
+            arm_id:         arm_id.to_string(),
+            status,
+            timestamp_secs: now_secs(),
+        });
+        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
+        self.apply_event_to_memory(&event);
+        self.audit("arm_status", campaign_id, Some(&format!("{arm_id}={status:?}")));
+        Self::await_ack(ack).await
+    }
+
     pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Result<(String, String), EngineError> {
+        self.predict_filtered(campaign_id, context, &ArmFilter::default())
+    }
+
+    /// `predict`, restricted to the arms `filter` allows.
+    ///
+    /// Arms that are paused or retired are excluded here too — a request-level
+    /// filter narrows the active set, it cannot widen it.
+    pub fn predict_filtered(
+        &self,
+        campaign_id: &str,
+        context:     Vec<f64>,
+        filter:      &ArmFilter,
+    ) -> Result<(String, String), EngineError> {
         self.validate_context(&context)?;
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
@@ -1658,12 +1874,25 @@ impl BanditDB {
                 _ => context_arr,
             };
 
-            let scores: Vec<(String, f64)> = arms_guard.iter().map(|(arm_id, state)| {
+            // Candidate set for this one request: active arms the filter allows.
+            // Everything downstream — scores, argmax, propensities — sees only these,
+            // so the logged propensities describe the policy that actually ran.
+            let eligible: Vec<(&String, &ArmState)> = arms_guard.iter()
+                .filter(|(arm_id, state)| state.is_active() && filter.allows(arm_id))
+                .collect();
+            if eligible.is_empty() {
+                return Err(EngineError::BadRequest(format!(
+                    "campaign '{campaign_id}' has no eligible arms for this request — \
+                     every arm is paused, retired, or excluded by the request filter"
+                )));
+            }
+
+            let scores: Vec<(String, f64)> = eligible.iter().map(|(arm_id, state)| {
                 let score = match active_algo {
                     Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => state.score_ts(&features, campaign.alpha),
                     _ => state.score(&features, campaign.alpha),
                 };
-                (arm_id.clone(), score)
+                ((*arm_id).clone(), score)
             }).collect();
 
             let best_arm = scores.iter()
@@ -1682,14 +1911,14 @@ impl BanditDB {
                     // N scales with posterior spread (A_inv diagonal) — large near cold-start
                     // where many samples are needed; small once the posterior concentrates.
                     // The first trial's winner is already known (best_arm from initial scores draw).
-                    let n = ts_propensity_samples(&arms_guard);
-                    let mut counts: HashMap<String, u32> = arms_guard.keys()
-                        .map(|id| (id.clone(), 0u32))
+                    let n = ts_propensity_samples(&eligible);
+                    let mut counts: HashMap<String, u32> = eligible.iter()
+                        .map(|(id, _)| ((*id).clone(), 0u32))
                         .collect();
                     *counts.entry(best_arm.clone()).or_insert(0) += 1;
                     for _ in 1..n {
-                        if let Some((winner, _)) = arms_guard.iter()
-                            .map(|(id, state)| (id.clone(), state.score_ts(&features, campaign.alpha)))
+                        if let Some((winner, _)) = eligible.iter()
+                            .map(|(id, state)| ((*id).clone(), state.score_ts(&features, campaign.alpha)))
                             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                         {
                             *counts.entry(winner).or_insert(0) += 1;
@@ -1904,8 +2133,12 @@ impl BanditDB {
                 theta_norm:     state.theta.dot(&state.theta).sqrt(),
                 a_inv_diag_min,
                 a_inv_diag_max,
+                status:         state.status(),
+                group:          state.group.clone(),
             });
         }
+
+        let active_arms: Vec<&ArmState> = arms_guard.values().filter(|a| a.is_active()).collect();
 
         let (challenger_traffic_pct, tournament_win_streak) =
             if matches!(&campaign.algorithm, Algorithm::Progressive(_)) {
@@ -1934,7 +2167,11 @@ impl BanditDB {
         // --- Entropy alerting ---
 
         // Guard 2: compare current entropy against the snapshot written at last checkpoint.
-        let pred_counts: Vec<u64> = arm_stats.values().map(|s| s.predictions).collect();
+        // Only active arms count: a paused arm's historical traffic would otherwise
+        // keep reporting spread that the live policy no longer has.
+        let pred_counts: Vec<u64> = active_arms.iter()
+            .map(|s| s.prediction_count.load(Ordering::Relaxed))
+            .collect();
         let entropy = selection_entropy(&pred_counts);
 
         let prior_raw = campaign.last_checkpoint_entropy.load(Ordering::Relaxed);
@@ -1950,14 +2187,14 @@ impl BanditDB {
         };
 
         // Guard 1: suppress alert when the campaign has statistically converged.
-        let converged = convergence_signal(&arms_guard);
+        let converged = convergence_signal(&active_arms);
 
         let entropy_status = classify_entropy_status(entropy, total_predictions, converged);
 
         let (likely_cause, suggested_action) = if matches!(entropy_status, EntropyStatus::Ok) {
             (None, None)
         } else {
-            let min_arm_preds = arm_stats.values().map(|s| s.predictions).min().unwrap_or(0);
+            let min_arm_preds = pred_counts.iter().copied().min().unwrap_or(0);
             let (cause, action): (&str, &str) = if matches!(entropy_trend, EntropyTrend::Falling) {
                 ("recent_collapse",
                  "Entropy dropped since last checkpoint. Check reward pipeline for bugs or recent config changes.")
@@ -1988,6 +2225,7 @@ impl BanditDB {
             algorithm:            campaign.algorithm.clone(),
             alpha:                campaign.alpha,
             arm_count:            arms_guard.len(),
+            active_arm_count:     active_arms.len(),
             total_predictions,
             total_rewards,
             overall_avg_reward:   if total_rewards > 0 { Some(total_reward_sum / total_rewards as f64) } else { None },
@@ -2061,11 +2299,16 @@ impl BanditDB {
                 mean_reward,
                 reward_lower_ci: lower_ci,
                 reward_upper_ci: upper_ci,
+                status:          state.status(),
+                group:           state.group.clone(),
             });
         }
 
-        // Rank arms by mean_reward descending.
+        // Rank arms by mean_reward descending. Only arms that can still be served:
+        // naming a paused arm as the leader would recommend something the policy is
+        // no longer allowed to pick.
         let mut ranked: Vec<(&String, f64, Option<f64>, Option<f64>)> = arm_stats.iter()
+            .filter(|(_, s)| s.status == ArmStatus::Active)
             .filter_map(|(id, s)| s.mean_reward.map(|m| (id, m, s.reward_lower_ci, s.reward_upper_ci)))
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2216,10 +2459,13 @@ impl BanditDB {
             let total_preds: u64 = arms_guard.values()
                 .map(|s| s.prediction_count.load(Ordering::Relaxed))
                 .sum();
-            let pred_counts: Vec<u64> = arms_guard.values()
+            // Active arms only, matching campaign_diagnostics: entropy describes the
+            // spread of the policy that is running now.
+            let active_arms: Vec<&ArmState> = arms_guard.values().filter(|a| a.is_active()).collect();
+            let pred_counts: Vec<u64> = active_arms.iter()
                 .map(|s| s.prediction_count.load(Ordering::Relaxed))
                 .collect();
-            let converged = convergence_signal(&arms_guard);
+            let converged = convergence_signal(&active_arms);
             drop(arms_guard);
             let entropy = selection_entropy(&pred_counts);
             let status  = classify_entropy_status(entropy, total_preds, converged);
@@ -2480,6 +2726,120 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
 
 /// Normalised Shannon entropy of an arm selection distribution (0 = collapsed, 1 = uniform).
 /// Returns 1.0 when there are fewer than two arms or no predictions yet.
+/// Turn a [`WarmStart`] request into the concrete prior stored in the WAL.
+///
+/// The borrowed mean is the arithmetic mean of the source arms' θ. Arms that have
+/// learned nothing contribute θ = 0, which pulls the mean toward zero — that is the
+/// honest answer, not a bug: a group whose members know nothing has nothing to lend.
+fn resolve_prior(
+    arms:       &HashMap<String, ArmState>,
+    warm_start: &WarmStart,
+    group:      Option<&str>,
+    dim:        usize,
+) -> Result<Option<ArmPrior>, EngineError> {
+    let (sources, strength): (Vec<&ArmState>, f64) = match warm_start {
+        WarmStart::None => return Ok(None),
+        WarmStart::Population { strength } => (
+            arms.values().filter(|a| a.is_active()).collect(),
+            *strength,
+        ),
+        WarmStart::Group { strength } => {
+            let Some(group) = group else {
+                return Err(EngineError::BadRequest(
+                    "warm_start from \"group\" requires the new arm to declare a group".into()
+                ));
+            };
+            let members: Vec<&ArmState> = arms.values()
+                .filter(|a| a.is_active() && a.group.as_deref() == Some(group))
+                .collect();
+            if members.is_empty() {
+                return Err(EngineError::BadRequest(format!(
+                    "warm_start from \"group\": no active arms in group '{group}'"
+                )));
+            }
+            (members, *strength)
+        }
+        WarmStart::Arms { arms: names, strength } => {
+            if names.is_empty() {
+                return Err(EngineError::BadRequest(
+                    "warm_start from \"arms\" requires at least one source arm".into()
+                ));
+            }
+            let mut sources = Vec::with_capacity(names.len());
+            for name in names {
+                // Status is deliberately ignored here: warm-starting from an arm the
+                // caller named explicitly — including one just paused and replaced —
+                // is the point.
+                sources.push(arms.get(name).ok_or_else(|| EngineError::NotFound(
+                    format!("warm_start source arm '{name}' not found")
+                ))?);
+            }
+            (sources, *strength)
+        }
+    };
+
+    if !strength.is_finite() || strength <= 0.0 || strength > MAX_WARM_START_STRENGTH {
+        return Err(EngineError::BadRequest(format!(
+            "warm_start strength must be finite and in (0, {MAX_WARM_START_STRENGTH}], got {strength}"
+        )));
+    }
+    if sources.is_empty() {
+        return Err(EngineError::BadRequest(
+            "warm_start has no source arms to borrow from".into()
+        ));
+    }
+
+    let mut mean = Array1::<f64>::zeros(dim);
+    for state in &sources {
+        // Guard against a dimension mismatch that a mid-flight neural retrain could
+        // otherwise slip in between reading the arms and building the prior.
+        if state.theta.len() != dim {
+            return Err(EngineError::Internal(format!(
+                "warm_start source has dimension {} but the campaign uses {dim}", state.theta.len()
+            )));
+        }
+        mean += &state.theta;
+    }
+    mean /= sources.len() as f64;
+
+    if !mean.iter().all(|v| v.is_finite()) {
+        return Err(EngineError::Internal(
+            "warm_start mean is not finite — refusing to seed an arm with NaN".into()
+        ));
+    }
+
+    Ok(Some(ArmPrior { mean: mean.to_vec(), strength }))
+}
+
+/// Build the arm an `ArmAdded` event describes: warm-started when the event
+/// carries a usable prior, cold otherwise.
+///
+/// A prior whose length disagrees with the arm dimension is ignored rather than
+/// rejected — this runs on the replay path, where returning an error would abort
+/// recovery over a record that is already durable. The arm starts cold instead,
+/// which is a worse estimate, not a corrupt one.
+fn new_arm_state(dim: usize, prior: Option<&ArmPrior>, group: Option<String>) -> ArmState {
+    let mut state = match prior {
+        Some(p) if p.mean.len() == dim
+            && p.strength.is_finite()
+            && p.strength > 0.0
+            && p.mean.iter().all(|v| v.is_finite()) =>
+        {
+            ArmState::with_prior(dim, &Array1::from_vec(p.mean.clone()), p.strength)
+        }
+        Some(p) => {
+            tracing::warn!(
+                dim, prior_len = p.mean.len(), strength = p.strength,
+                "arm: unusable warm-start prior — starting the arm cold"
+            );
+            ArmState::new(dim)
+        }
+        None => ArmState::new(dim),
+    };
+    state.group = group;
+    state
+}
+
 fn selection_entropy(counts: &[u64]) -> f64 {
     let total: u64 = counts.iter().sum();
     if total == 0 || counts.len() < 2 { return 1.0; }
@@ -2492,8 +2852,8 @@ fn selection_entropy(counts: &[u64]) -> f64 {
 
 /// Wilson-score convergence signal: true if the leading arm's 95% CI lower bound
 /// exceeds the second arm's upper bound (requires ≥ 30 rewards on both arms).
-fn convergence_signal(arms: &HashMap<String, ArmState>) -> Option<bool> {
-    let mut ranked: Vec<(f64, f64, f64, u64)> = arms.values()
+fn convergence_signal(arms: &[&ArmState]) -> Option<bool> {
+    let mut ranked: Vec<(f64, f64, f64, u64)> = arms.iter()
         .filter_map(|s| {
             let r = s.reward_count.load(Ordering::Relaxed);
             if r < 10 { return None; }
@@ -2534,9 +2894,9 @@ fn classify_entropy_status(entropy: f64, total_preds: u64, converged: Option<boo
 ///
 /// This gives the ideal cost profile for production: high N when traffic is low (cold start),
 /// low N when traffic is high (converged) — the sample budget scales inversely with load.
-fn ts_propensity_samples(arms: &HashMap<String, ArmState>) -> usize {
-    let max_diag = arms.values()
-        .map(|s| s.a_inv.diag().iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+fn ts_propensity_samples(arms: &[(&String, &ArmState)]) -> usize {
+    let max_diag = arms.iter()
+        .map(|(_, s)| s.a_inv.diag().iter().cloned().fold(f64::NEG_INFINITY, f64::max))
         .fold(0.0f64, f64::max);
     if max_diag > 0.7 { 64 }
     else if max_diag > 0.3 { 32 }

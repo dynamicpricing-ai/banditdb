@@ -228,15 +228,52 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 | `DELETE` | `/campaign/:id` | admin | Permanently delete a campaign. Irreversible — use `/archive` for soft-delete. |
 | `POST` | `/campaign/:id/archive` | admin | Soft-delete. Frozen campaign preserves all data; recoverable via `/restore`. |
 | `POST` | `/campaign/:id/restore` | admin | Restore an archived campaign to active status. |
+| `POST` | `/campaign/:id/arms` | admin | Add an arm to a live campaign. Body: `{arm_id, group?, warm_start?}`. See [Dynamic arms](#dynamic-arms). |
+| `POST` | `/campaign/:id/arms/:arm_id/status` | admin | Pause, retire, or reactivate an arm. Body: `{status: "active"\|"paused"\|"retired"}`. |
 | `GET` | `/campaign/:id/report` | reader | Convergence report: mean reward per arm with 95% CI, leading arm, `converged` flag. |
 | `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size, **selection entropy with collapse detection**. |
-| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. |
+| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. Accepts optional `eligible_arms` / `exclude_arms` for per-request exclusion. |
 | `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
 | `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
 | `POST` | `/checkpoint` | admin | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. |
 | `GET` | `/export` | reader | List per-campaign Parquet files in the `exports/` directory. |
 
 Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
+
+### Dynamic Arms
+
+Catalogues change. Arms can be added to a running campaign, and taken out of rotation, without disturbing what the other arms have learned.
+
+**Adding an arm.** A new arm starts cold — θ = 0, everything to learn. `warm_start` instead centres its ridge prior on the mean θ of the arms that already exist:
+
+```bash
+curl -X POST localhost:8080/campaign/catalog/arms \
+  -H "X-Api-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"arm_id":"sneaker_42","group":"shoes","warm_start":{"from":"group","strength":1.0}}'
+```
+
+`from` is one of `none` (default), `population` (all active arms), `group` (active arms sharing this arm's `group`), or `arms` (an explicit list, whatever their status — the "replace this creative with a fresh one" case).
+
+The math is the prior that was always there, moved off zero. Ridge regression starts every arm at `A⁻¹ = I`, `b = 0`; a warm start uses `A⁻¹ = I/λ`, `b = λ·μ₀`, so `θ = μ₀`. `strength` (λ) is in pseudo-observations: at 1.0 the arm keeps a cold arm's uncertainty — it is still explored — but starts from a sensible guess instead of from nothing. Raise λ to trust the prior more and explore less. Real rewards outweigh the prior as they arrive.
+
+This is cold-start relief, not a hierarchical model. The prior is resolved once, when the arm is added. Nothing shrinks toward a group mean afterwards.
+
+**Taking an arm out.** Exclusion is soft at every level:
+
+| Level | How | Effect |
+|-------|-----|--------|
+| Per request | `exclude_arms` / `eligible_arms` on `/predict` | Narrows candidates for this call only. No state change. Out of stock for this shopper, already shown to this user, not permitted in this region. |
+| Per arm | `POST /campaign/:id/arms/:arm_id/status` → `paused` | Not selectable anywhere. Reversible; the arm keeps everything it learned. |
+| Per arm | …→ `retired` | Same, meant as permanent. Still restorable — nothing is deleted. |
+
+A paused arm **keeps learning**. Predictions made before the pause are still in flight and their rewards still arrive; dropping them would throw away data the arm already paid for.
+
+Two consequences worth knowing:
+
+- **Propensities follow the filter.** Arms are filtered *before* propensities are computed, so the logged propensity is the probability of the chosen arm under the policy that actually ran. Off-policy evaluation and the Progressive tournament stay valid.
+- **`selection_entropy` and `converged` cover active arms only.** A paused arm's historical traffic would otherwise make a collapsed campaign look healthy. Its history stays visible in `/report` and `/diagnostics`, tagged with its status.
+
+Pausing the last active arm is refused — every prediction would fail. Archive the campaign instead. With `decay_half_life_hours` set, a paused arm's posterior keeps widening while it is out of rotation, so reactivating it gets it explored again rather than trusted on stale confidence.
 
 ### Normalise Your Contexts
 
