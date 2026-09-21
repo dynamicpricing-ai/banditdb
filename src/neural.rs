@@ -329,12 +329,16 @@ impl NeuralLinUCBState {
             .map(|k| (k.clone(), ArmState::new(self.embed_dim)))
             .collect();
 
-        // Preserve counters from old states (they are stats, not algorithm state)
+        // Preserve counters from old states (they are stats, not algorithm state),
+        // plus lifecycle metadata: rebuilding the matrices must not quietly
+        // reactivate a paused arm or drop its group.
         for (arm_id, new_state) in new_arms.iter_mut() {
             if let Some(old) = old_arms.get(arm_id) {
                 new_state.prediction_count.store(old.prediction_count.load(Ordering::Relaxed), Ordering::Relaxed);
                 new_state.reward_count.store(old.reward_count.load(Ordering::Relaxed), Ordering::Relaxed);
                 new_state.total_reward.store(old.total_reward.load(Ordering::Relaxed), Ordering::Relaxed);
+                new_state.status.store(old.status.load(Ordering::Relaxed), Ordering::Relaxed);
+                new_state.group = old.group.clone();
             }
         }
 

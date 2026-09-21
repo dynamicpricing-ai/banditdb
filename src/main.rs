@@ -8,7 +8,8 @@ use axum::{
     Router,
 };
 use tower_http::cors::{CorsLayer, Any};
-use banditdb::state::{Algorithm, CampaignReport, EngineError, EntropyStatus, DEFAULT_ALPHA};
+use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, WarmStart, DEFAULT_ALPHA};
+use banditdb::engine::ArmFilter;
 use banditdb::BanditDB;
 use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
 use serde::{Deserialize, Serialize};
@@ -324,16 +325,43 @@ struct CreateCampaignRequest {
 fn default_alpha() -> f64 { DEFAULT_ALPHA }
 
 #[derive(Deserialize)]
+struct AddArmRequest {
+    arm_id: String,
+    /// Hierarchy label. Arms sharing a group lend their θ to new members through
+    /// `warm_start: {"from": "group"}`.
+    #[serde(default)]
+    group:  Option<String>,
+    #[serde(default)]
+    warm_start: WarmStart,
+}
+
+#[derive(Deserialize)]
+struct ArmStatusRequest { status: ArmStatus }
+
+#[derive(Deserialize)]
 struct PredictRequest {
     campaign_id: String,
     context:     Vec<f64>,
+    /// Restrict this request to these arms. Absent = every active arm.
+    #[serde(default)]
+    eligible_arms: Option<Vec<String>>,
+    /// Drop these arms from this request. Applied after `eligible_arms`.
+    #[serde(default)]
+    exclude_arms:  Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
 struct PredictResponse { arm_id: String, interaction_id: String }
 
 #[derive(Deserialize)]
-struct BatchPredictItem { campaign_id: String, context: Vec<f64> }
+struct BatchPredictItem {
+    campaign_id: String,
+    context: Vec<f64>,
+    #[serde(default)]
+    eligible_arms: Option<Vec<String>>,
+    #[serde(default)]
+    exclude_arms:  Option<Vec<String>>,
+}
 
 #[derive(Deserialize)]
 struct BatchPredictRequest { predictions: Vec<BatchPredictItem> }
@@ -419,6 +447,9 @@ struct CampaignSummary {
 struct ArmInfo {
     theta: Vec<f64>, theta_norm: f64,
     prediction_count: u64, reward_count: u64, avg_reward: Option<f64>,
+    status: ArmStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -628,6 +659,59 @@ async fn handle_restore_campaign(
         .map_err(map_engine_err)
 }
 
+async fn handle_add_arm(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(campaign_id): Path<String>,
+    Json(payload): Json<AddArmRequest>,
+) -> Result<Json<&'static str>, AppError> {
+    validate_id(&campaign_id, "campaign_id")?;
+    validate_id(&payload.arm_id, "arm_id")?;
+    if let Some(group) = &payload.group { validate_id(group, "group")?; }
+    if let WarmStart::Arms { arms, .. } = &payload.warm_start {
+        for arm in arms { validate_id(arm, "warm_start.arms")?; }
+    }
+
+    state.db.add_arm(
+        &ns(&auth, &campaign_id),
+        &payload.arm_id,
+        payload.group,
+        &payload.warm_start,
+    )
+    .await
+    .map(|_| Json("Arm Added"))
+    .map_err(map_engine_err)
+}
+
+async fn handle_set_arm_status(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path((campaign_id, arm_id)): Path<(String, String)>,
+    Json(payload): Json<ArmStatusRequest>,
+) -> Result<Json<&'static str>, AppError> {
+    validate_id(&campaign_id, "campaign_id")?;
+    validate_id(&arm_id, "arm_id")?;
+
+    state.db.set_arm_status(&ns(&auth, &campaign_id), &arm_id, payload.status)
+        .await
+        .map(|_| Json("Arm Status Updated"))
+        .map_err(map_engine_err)
+}
+
+/// Build the per-request candidate filter. Ids are validated so a typo surfaces as
+/// a 400 rather than as a silently narrower candidate set.
+fn arm_filter(
+    eligible: Option<Vec<String>>,
+    exclude:  Option<Vec<String>>,
+) -> Result<ArmFilter, AppError> {
+    for arm in eligible.iter().flatten() { validate_id(arm, "eligible_arms")?; }
+    for arm in exclude.iter().flatten()  { validate_id(arm, "exclude_arms")?; }
+    Ok(ArmFilter {
+        include: eligible.map(|v| v.into_iter().collect()),
+        exclude: exclude.unwrap_or_default().into_iter().collect(),
+    })
+}
+
 async fn handle_predict(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -637,9 +721,10 @@ async fn handle_predict(
         return Err(AppError(StatusCode::BAD_REQUEST,
             format!("context length {} exceeds BANDITDB_MAX_FEATURE_DIM={}", payload.context.len(), state.db.max_feature_dim)));
     }
+    let filter = arm_filter(payload.eligible_arms, payload.exclude_arms)?;
     let db  = Arc::clone(&state.db);
     let cid = ns(&auth, &payload.campaign_id);
-    tokio::task::spawn_blocking(move || db.predict(&cid, payload.context))
+    tokio::task::spawn_blocking(move || db.predict_filtered(&cid, payload.context, &filter))
         .await
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("scoring task failed: {e}")))?
         .map(|(arm_id, interaction_id)| Json(PredictResponse { arm_id, interaction_id }))
@@ -659,17 +744,19 @@ async fn handle_batch_predict(
     let db      = Arc::clone(&state.db);
     let max_dim = state.db.max_feature_dim;
     // Namespace campaign IDs upfront before moving into spawn_blocking.
-    let namespaced: Vec<(String, Vec<f64>)> = payload.predictions.into_iter()
-        .map(|item| (ns(&auth, &item.campaign_id), item.context))
-        .collect();
+    let mut namespaced: Vec<(String, Vec<f64>, ArmFilter)> = Vec::with_capacity(payload.predictions.len());
+    for item in payload.predictions {
+        let filter = arm_filter(item.eligible_arms, item.exclude_arms)?;
+        namespaced.push((ns(&auth, &item.campaign_id), item.context, filter));
+    }
 
     let results = tokio::task::spawn_blocking(move || {
-        namespaced.into_iter().map(|(cid, context)| {
+        namespaced.into_iter().map(|(cid, context, filter)| {
             if context.len() > max_dim {
                 return BatchPredictResult { arm_id: None, interaction_id: None,
                     error: Some(format!("context length {} exceeds limit", context.len())) };
             }
-            match db.predict(&cid, context) {
+            match db.predict_filtered(&cid, context, &filter) {
                 Ok((arm_id, iid)) => BatchPredictResult { arm_id: Some(arm_id), interaction_id: Some(iid), error: None },
                 Err(e)            => BatchPredictResult { arm_id: None, interaction_id: None, error: Some(e.to_string()) },
             }
@@ -758,6 +845,7 @@ async fn handle_campaign_info(
             theta: s.theta.to_vec(), theta_norm: s.theta.dot(&s.theta).sqrt(),
             prediction_count: p, reward_count: r,
             avg_reward: if r > 0 { Some(tr / r as f64) } else { None },
+            status: s.status(), group: s.group.clone(),
         });
     }
 
@@ -1146,6 +1234,11 @@ async fn main() {
         .route("/campaign/:id",           delete(handle_delete_campaign))
         .route("/campaign/:id/archive",   post(handle_archive_campaign))
         .route("/campaign/:id/restore",   post(handle_restore_campaign))
+        // Arm lifecycle changes the shape of a campaign, so it sits with the other
+        // structural routes. Per-request exclusion needs no privilege — it is a
+        // field on /predict.
+        .route("/campaign/:id/arms",              post(handle_add_arm))
+        .route("/campaign/:id/arms/:arm/status",  post(handle_set_arm_status))
         .route("/checkpoint",             post(handle_checkpoint))
         .layer(middleware::from_fn(|ext: Extension<AuthContext>, req: Request, next: Next| {
             require_role(Role::Admin, ext, req, next)
