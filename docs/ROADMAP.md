@@ -14,6 +14,15 @@ comes from one small file per checkpoint. Merging them into larger periodic file
 help analytical read performance. Not urgent — the disk-fill risk, which was the actual
 hazard, is closed.
 
+### Upgrade polars (0.41 → 0.55)
+
+Two advisories are ignored in `deny.toml`, and both are transitive through polars:
+RUSTSEC-2025-0003 (fast-float segfault, unreachable — the Parquet path is write-only)
+and RUSTSEC-2026-0249 (smartstring unmaintained, repo archived 2026-05-03). Neither
+has a fix at polars 0.41; upgrading clears both. It spans 14 minor versions and will
+break `write_campaign_parquet` against the current DataFrame/ParquetWriter API, so it
+wants its own branch and its own testing. Both ignores are dated REVIEW BY 2026-12-31.
+
 ## Scale / availability (the #2 ceiling)
 
 ### Horizontal write scale — campaign sharding

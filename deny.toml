@@ -19,6 +19,19 @@ ignore = [
     #
     # Exit: upgrade polars past the versions that depend on fast-float.
     { id = "RUSTSEC-2025-0003", reason = "fast-float via polars-arrow; write-only Parquet path, no untrusted text parsing. REVIEW BY 2026-12-31." },
+
+    # smartstring is unmaintained — the repository was archived on 2026-05-03.
+    # Reached only through polars-core and its siblings; nothing in BanditDB
+    # depends on it directly.
+    #
+    # Unmaintained, not vulnerable: no defect is filed against it, and the
+    # advisory itself offers no upgrade ("No safe upgrade is available"). polars
+    # 0.41 has no release that drops it.
+    #
+    # Exit: upgrade polars (0.41 → 0.55), which clears this and RUSTSEC-2025-0003
+    # together. Deferred because it spans 14 minor versions and breaks the
+    # Parquet export API — see docs/ROADMAP.md.
+    { id = "RUSTSEC-2026-0249", reason = "smartstring unmaintained, via polars; no vulnerability filed and no upgrade path at polars 0.41. REVIEW BY 2026-12-31." },
 ]
 
 [licenses]
