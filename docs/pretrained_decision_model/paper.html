@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BanditDB as a Pretrained Decision Model</title>
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['\\(', '\\)']], displayMath: [['$$', '$$']], tags: 'none'},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script id="MathJax-script" async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-svg.js"></script>
+<style>
+  @page { size: A4; margin: 20mm 18mm 20mm 18mm; }
+  html { font-size: 10.5pt; }
+  body {
+    font-family: "Palatino Linotype", "Book Antiqua", Palatino, "Iowan Old Style", Georgia, serif;
+    color: #111; line-height: 1.48; margin: 0; text-align: justify;
+    hyphens: auto; -webkit-hyphens: auto;
+  }
+  h1 { font-size: 20pt; line-height: 1.2; margin: 0 0 6pt; text-align: center; font-weight: 600; letter-spacing: -0.2pt; }
+  .subtitle { text-align: center; font-size: 11.5pt; color: #333; margin: 0 0 14pt; font-style: italic; }
+  .authors { text-align: center; font-size: 11pt; margin: 0 0 2pt; }
+  .affil { text-align: center; font-size: 9.5pt; color: #444; margin: 0 0 4pt; }
+  .date { text-align: center; font-size: 9.5pt; color: #444; margin-bottom: 18pt; }
+  h2 { font-size: 12.5pt; margin: 20pt 0 6pt; font-weight: 600; page-break-after: avoid; }
+  h3 { font-size: 11pt; margin: 14pt 0 4pt; font-weight: 600; page-break-after: avoid; }
+  p { margin: 0 0 7pt; }
+  .abstract { background: #f6f6f4; border-left: 3px solid #999; padding: 10pt 12pt; margin: 0 0 14pt; font-size: 10pt; text-align: justify; }
+  .abstract h2 { margin: 0 0 5pt; font-size: 10.5pt; }
+  .keywords { font-size: 9.5pt; color: #333; margin-bottom: 16pt; }
+  .thm { margin: 9pt 0; padding: 8pt 10pt; background: #f4f6fb; border-left: 3px solid #2f5fd0; page-break-inside: avoid; }
+  .thm .lab { font-weight: 700; }
+  .defn { margin: 9pt 0; padding: 8pt 10pt; background: #f7f7f5; border-left: 3px solid #777; page-break-inside: avoid; }
+  .proof { margin: 7pt 0 10pt; padding-left: 10pt; border-left: 1.5px solid #ccc; font-size: 10pt; }
+  .proof .lab { font-style: italic; }
+  .qed { float: right; }
+  figure { margin: 12pt 0; text-align: center; page-break-inside: avoid; }
+  figure img { max-width: 100%; }
+  figcaption { font-size: 9pt; color: #333; text-align: left; margin-top: 5pt; line-height: 1.4; }
+  table { border-collapse: collapse; width: 100%; font-size: 9.2pt; margin: 10pt 0; page-break-inside: avoid; }
+  th, td { border-bottom: 0.6pt solid #ccc; padding: 3.5pt 5pt; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { border-bottom: 1pt solid #555; font-weight: 600; }
+  caption { caption-side: top; font-size: 9pt; text-align: left; color: #333; padding-bottom: 5pt; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt; background: #f2f2f0; padding: 0.5pt 2.5pt; border-radius: 2px; }
+  .refs { font-size: 9.3pt; }
+  .refs p { margin: 0 0 5pt; padding-left: 16pt; text-indent: -16pt; }
+  .note { font-size: 9.2pt; color: #444; background: #fffbe9; border-left: 3px solid #d0a72f; padding: 7pt 10pt; margin: 9pt 0; }
+  .pagebreak { page-break-before: always; }
+  .small { font-size: 9.2pt; }
+  ul, ol { margin: 0 0 7pt; padding-left: 18pt; }
+  li { margin-bottom: 3pt; }
+  .arch { margin: 10pt auto; display: block; }
+</style>
+</head>
+<body>
+
+<h1>BanditDB as a Pretrained Decision Model</h1>
+<p class="subtitle">Prior-shaped contextual bandits, eligibility-aware off-policy evaluation,<br>and capacity-constrained serving under one roof</p>
+<p class="authors">Simeon Lukov</p>
+<p class="affil">dynamicpricing.ai</p>
+<p class="date">21 September 2026 &middot; Technical Report</p>
+
+<div class="abstract">
+<h2>Abstract</h2>
+<p>Contextual bandit services treat every new decision problem as a blank slate: a new arm starts with no estimate, is explored at random, and pays for that ignorance in regret. We ask whether a decision <em>database</em> holding many campaigns can instead ship with a <em>prior</em>, in the same way a language model ships with pretrained weights. We give a precise answer to the part of that question that admits one. We prove that a warm-started ridge bandit on parameter \(\theta^*\) is exactly a cold-started bandit on \(\theta^* - \mu_0\) (Theorem 1), so the value of any pretrained prior is governed by a single scalar, the prior error \(\varepsilon = \|\theta^* - \mu_0\|_2\), and a prior helps if and only if it lies within a ball of radius \(\|\theta^*\|\) around the truth (Corollary 2). We show prior strength \(\lambda\) is denominated in pseudo-observations and washes out at rate \(O(\lambda/n)\) (Proposition 4), which converts "how much should we trust the pretrained model?" into a measurable constant. On the serving side we prove that per-request eligibility filtering must precede propensity computation: filtering afterwards inflates inverse-propensity weights by exactly \(1/(1-q_t)\) and biases the estimator by \(\mathbb{E}[(1-q_t)^{-1}] \ge (1-\mathbb{E} q_t)^{-1}\) (Theorem 5), which we measure at <strong>+106%</strong>. We also show self-normalisation silently absorbs most of this error (−0.93%), which makes the bug invisible to exactly the estimator a production tournament is most likely to use. Finally we place capacity constraints in the same framework: the allocation LP is totally unimodular, shadow-price serving is optimal given optimal duals (Theorem 7), and per-request exclusion is the zero-capacity special case. Experiments span a reference implementation validated against the shipped engine to \(1.3\times10^{-15}\), a 20-seed prior sweep, a 10-seed off-policy study, a 10-seed allocation study, and a 12,000-step live-engine catalogue simulation. A well-specified prior at \(\lambda = 25\) cuts regret by <strong>64%</strong>; the same prior mechanism at \(\lambda = 1\) cuts it by <strong>nothing at all</strong>, a null result we report because it is the one most likely to be over-claimed.</p>
+</div>
+
+<p class="keywords"><strong>Keywords:</strong> contextual bandits, LinUCB, Thompson sampling, meta-learning, prior-fitted networks, off-policy evaluation, inverse propensity scoring, online allocation, bandits with knapsacks, sentence embeddings.</p>
+
+<h2>1. Introduction</h2>
+
+<p>A contextual bandit service answers one question repeatedly: given what I know about this request, which action should I take? Systems that answer it well in production &mdash; LinUCB <span class="small">[1]</span>, Thompson sampling <span class="small">[3,4]</span>, and their neural variants <span class="small">[5,6,7]</span> &mdash; share an assumption that is invisible until it bites: each arm's parameter vector is estimated from that arm's own data and from nothing else. Adding the 400th product to a catalogue teaches the system nothing that the previous 399 could have told it. Every new arm begins at \(\hat\theta = 0\).</p>
+
+<p>This is strange, because the surrounding industry has spent a decade demonstrating the opposite arrangement. A language model does not learn English from your prompt; it arrives knowing English, and your prompt supplies the specifics. The question this report examines is whether a decision system can be arranged the same way: a large corpus of decision problems used once, offline, to produce a model that supplies a prior for problems it has never seen, with the live system supplying the likelihood.</p>
+
+<p>The question splits cleanly into three, and the three have very different levels of difficulty.</p>
+
+<ol>
+<li><strong>What is a pretrained prior worth, and when is it worth less than nothing?</strong> This part is fully analysable, and Sections 3&ndash;4 answer it with a theorem and a 20-seed experiment. The answer is sharper than we expected: value is controlled by prior error alone, and the crossover from help to harm sits at a specific, checkable radius.</li>
+<li><strong>What breaks in a live system when decisions become conditional?</strong> Pretrained or not, production decisions are filtered &mdash; out of stock, already seen, not permitted here. Section 5 shows that the order of filtering and propensity computation determines whether a system's own off-policy evaluation is trustworthy, and that getting it wrong is <em>hard to notice</em> because self-normalisation hides it.</li>
+<li><strong>How do scarce resources enter?</strong> Section 6 treats capacity as a constraint on allocation rather than a property of the bandit, proves the resulting programme is integral, and shows dual prices recover 84% of the loss a greedy policy suffers.</li>
+</ol>
+
+<p>Section 7 assembles these into an architecture in which sentence embeddings supply a shared representation over arms and contexts, a pretraining corpus supplies \(\mu_0\), and the existing linear machinery supplies calibrated uncertainty. We argue &mdash; and this is the report's main engineering claim &mdash; that a transformer should <em>not</em> replace the final scoring layer, because the exploration guarantee lives in that layer and nothing in a transformer's output is calibrated to replace it.</p>
+
+<p>Throughout, we separate what is proved from what is measured from what is speculated, and we report a null result and two failed experimental designs rather than the polished subset. The reason is stated in Section 9: the failure mode of this research direction is not that the idea is wrong, it is that synthetic self-evaluation makes every version of it look right.</p>
+
+<h3>1.1 Contributions</h3>
+<ul>
+<li>A reparameterisation theorem (Thm. 1) reducing the value of an arbitrary pretrained prior to a single scalar, with an exact help/harm criterion (Cor. 2) and a wash-out rate (Prop. 4) that calibrates trust in pseudo-observations.</li>
+<li>A proof that exploration is unchanged by a unit-strength prior (Prop. 3), explaining a null result we measure twice and which we believe is the most commonly over-claimed aspect of warm starting.</li>
+<li>An exact characterisation of propensity bias under per-request eligibility (Thm. 5), the Jensen bound on it, and the observation that SNIPS masks it (Prop. 6) &mdash; verified at +106% and −0.93% respectively.</li>
+<li>An integrality and optimality result for capacity-constrained serving (Thm. 7) which subsumes per-request exclusion as the \(c_k = 0\) case.</li>
+<li>Five experiments, including a reference implementation validated against the production engine to machine precision, and a live 12,000-step simulation exercising arm launches, pauses, reactivation and retirement.</li>
+</ul>
+
+<h2>2. Related work</h2>
+
+<p><strong>Linear contextual bandits.</strong> LinUCB <span class="small">[1]</span> and its self-normalised analysis <span class="small">[2]</span> give the confidence ellipsoid we use throughout; Theorem 1 is a statement about where the prior enters that ellipsoid. Thompson sampling for linear payoffs <span class="small">[3]</span> and its empirical evaluation <span class="small">[4]</span> supply the stochastic logging policy that makes Section 5's estimators well defined. Neural-linear methods <span class="small">[5]</span>, NeuralUCB <span class="small">[6]</span> and Neural Thompson Sampling <span class="small">[7]</span> keep a linear head on a learned representation, which is precisely the structure we argue a pretrained system should preserve.</p>
+
+<p><strong>Meta-learning the prior.</strong> The idea that a prior should itself be learned across tasks is established: meta-Thompson sampling <span class="small">[8]</span>, regret bounds for learning the prior <span class="small">[9]</span>, and meta-learning for stochastic linear bandits <span class="small">[10]</span> all study a bandit family sharing a hyper-prior. Our Theorem 1 is complementary and deliberately weaker in scope: it does not learn the prior, it prices one, whatever its provenance.</p>
+
+<p><strong>In-context decision making.</strong> Algorithm Distillation <span class="small">[11]</span> and the Decision-Pretrained Transformer <span class="small">[12]</span> show a sequence model trained on interaction histories can implement an exploration algorithm in-context, with <span class="small">[12]</span> establishing a posterior-sampling equivalence. Prior-fitted networks <span class="small">[13]</span> give the cleanest statement of the underlying mechanism &mdash; train on tasks drawn from a prior, obtain the posterior predictive &mdash; which we restate as Proposition 9 to connect the pretraining corpus to the \(\mu_0\) of Theorem 1.</p>
+
+<p><strong>Off-policy evaluation.</strong> Inverse propensity scoring <span class="small">[14]</span>, its self-normalised form <span class="small">[15]</span>, and doubly robust estimation <span class="small">[16]</span> are standard; the Open Bandit Dataset <span class="small">[17]</span> provides the real logged data we argue in Section 9 is mandatory before any of this ships. Section 5's contribution is not a new estimator but a precise account of a systems-level failure: <em>where</em> in the request path the propensity is computed.</p>
+
+<p><strong>Allocation under constraints.</strong> Bandits with knapsacks <span class="small">[18,19]</span> and dual mirror descent for online allocation <span class="small">[20]</span> give the regret theory for the constrained setting; we use only the LP structure and the shadow-price policy, and cite the rest.</p>
+
+<p><strong>Representations.</strong> Sentence-BERT <span class="small">[21]</span> supplies the shared arm/context embedding space that makes cross-campaign transfer possible at all; without arm features, there is nothing for a prior to be a function of.</p>
+
+<h2>3. Setting and notation</h2>
+
+<div class="defn">
+<p><strong>Model.</strong> At step \(t\) a context \(x_t \in \mathbb{R}^d\), \(\|x_t\|_2 \le 1\), arrives. An eligible set \(S_t \subseteq \mathcal{A}\) of arms is determined by the environment (inventory, permission, policy). The system selects \(a_t \in S_t\) and observes reward \(r_t = \theta_{a_t}^{*\top} x_t + \eta_t\) with \(\eta_t\) conditionally \(\sigma\)-sub-Gaussian and mean zero. Each arm \(a\) maintains</p>
+$$A_a = \lambda_a I + \sum_{s : a_s = a} x_s x_s^\top, \qquad b_a = \lambda_a \mu_{0,a} + \sum_{s : a_s = a} r_s x_s, \qquad \hat\theta_a = A_a^{-1} b_a,$$
+<p>and scores \(\mathrm{UCB}_a(x) = \hat\theta_a^\top x + \alpha \sqrt{x^\top A_a^{-1} x}\). Cold start is the special case \(\mu_{0,a} = 0\), \(\lambda_a = 1\).</p>
+</div>
+
+<p>This is exactly the arithmetic the system under study implements: \(A^{-1}\) is maintained directly by the Sherman&ndash;Morrison identity with a symmetry projection \(A^{-1} \leftarrow \tfrac12 (A^{-1} + A^{-\top})\) after each update to suppress drift, and a warm start is installed as \(A^{-1} = I/\lambda\), \(b = \lambda\mu_0\), which yields \(\hat\theta = \mu_0\) before any data. The experiments in Section 8 use a reference implementation of these rules, validated against the running engine in Section 8.1.</p>
+
+<h2>4. What a pretrained prior is worth</h2>
+
+<p>The central question of a "pretrained decision model" is not architectural, it is quantitative: what does a prior buy, and when does it cost? The following reduction answers both at once by showing that a warm start is not a new algorithm but a change of origin.</p>
+
+<div class="thm">
+<p><span class="lab">Theorem 1 (Prior reparameterisation).</span> Fix an arm with prior \((\mu_0, \lambda)\) and true parameter \(\theta^*\). Let \(\hat\theta_n\) be its ridge estimate after \(n\) observations. Define the shifted problem with parameter \(\theta' = \theta^* - \mu_0\) and rewards \(r'_s = r_s - \mu_0^\top x_s\), estimated with a zero-centred prior of the same strength \(\lambda\), giving \(\hat\theta'_n\). Then for every realisation of contexts and noise,</p>
+$$\hat\theta_n = \mu_0 + \hat\theta'_n, \qquad\text{and}\qquad A_n \text{ is identical in both problems.}$$
+<p>Consequently the confidence width \(\sqrt{x^\top A_n^{-1} x}\) is identical, and the standard self-normalised bound <span class="small">[2]</span> applies to the warm-started arm with the norm \(\|\theta^*\|_2\) replaced by the <em>prior error</em> \(\varepsilon := \|\theta^* - \mu_0\|_2\):</p>
+$$\|\hat\theta_n - \theta^*\|_{A_n} \;\le\; \sqrt{\lambda}\,\varepsilon \;+\; \sigma\sqrt{2\log\!\big(\tfrac{1}{\delta}\big) + \log\!\big(\tfrac{\det A_n}{\lambda^d}\big)} \quad \text{w.p. } \ge 1-\delta .$$
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> The design matrix \(A_n = \lambda I + \sum_s x_s x_s^\top\) does not involve rewards or \(\mu_0\), so it is literally the same object in both problems; this gives the second claim. For the first, expand the shifted target vector:</p>
+$$b'_n = \lambda\cdot 0 + \sum_s r'_s x_s = \sum_s (r_s - \mu_0^\top x_s)x_s = \sum_s r_s x_s - \Big(\sum_s x_s x_s^\top\Big)\mu_0 = (b_n - \lambda\mu_0) - (A_n - \lambda I)\mu_0,$$
+<p>using \(b_n = \lambda\mu_0 + \sum_s r_s x_s\). Hence \(b'_n = b_n - A_n \mu_0\), and therefore</p>
+$$\hat\theta'_n = A_n^{-1} b'_n = A_n^{-1} b_n - \mu_0 = \hat\theta_n - \mu_0 ,$$
+<p>which is the claim. For the bound, note the shifted problem is a standard ridge problem with regularisation \(\lambda\), true parameter \(\theta'\), and \(\sigma\)-sub-Gaussian noise (the shift is deterministic given \(x_s\), so it changes no noise property). Theorem 2 of <span class="small">[2]</span> gives \(\|\hat\theta'_n - \theta'\|_{A_n} \le \sqrt{\lambda}\|\theta'\|_2 + \sigma\sqrt{2\log(1/\delta) + \log(\det A_n/\lambda^d)}\). Substituting \(\hat\theta'_n - \theta' = \hat\theta_n - \theta^*\) and \(\|\theta'\|_2 = \varepsilon\) completes the proof. <span class="qed">□</span></p>
+</div>
+
+<p>The theorem says something stronger than "a good prior helps". It says the <em>entire</em> effect of pretraining on this family of algorithms is compressed into one number. Two pretrained models that produce different \(\mu_0\) vectors with the same prior error are worth exactly the same, whatever their architectures, parameter counts, or training corpora.</p>
+
+<div class="thm">
+<p><span class="lab">Corollary 2 (Help/harm criterion).</span> Compare a warm start \((\mu_0, \lambda=1)\) against cold start \((0, \lambda=1)\) through the bound of Theorem 1. The warm start has the smaller bias term if and only if</p>
+$$\|\theta^* - \mu_0\|_2 < \|\theta^*\|_2 \iff \|\mu_0\|_2^2 < 2\langle \mu_0, \theta^*\rangle .$$
+<p>Geometrically, \(\mu_0\) must lie strictly inside the open ball of radius \(\|\theta^*\|\) centred at \(\theta^*\) &mdash; equivalently, inside the sphere having the segment from the origin to \(2\theta^*\) as a diameter.</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> Immediate from Theorem 1: cold start is the case \(\mu_0 = 0\), whose bias term is \(\sqrt\lambda\|\theta^*\|_2\); the noise terms and \(A_n\) coincide. Expanding \(\|\theta^*-\mu_0\|^2 < \|\theta^*\|^2\) gives \(\|\theta^*\|^2 - 2\langle\mu_0,\theta^*\rangle + \|\mu_0\|^2 < \|\theta^*\|^2\), i.e. \(\|\mu_0\|^2 < 2\langle\mu_0,\theta^*\rangle\). The locus \(\|\mu_0\|^2 = 2\langle \mu_0,\theta^*\rangle\) is the sphere \(\|\mu_0 - \theta^*\| = \|\theta^*\|\). <span class="qed">□</span></p>
+</div>
+
+<p>A useful consequence for practitioners: a prior that points in the right direction but overshoots by more than a factor of two is <em>worse than knowing nothing</em>. An LLM-generated prior that exaggerates effect sizes &mdash; a documented tendency &mdash; can fail this test while being directionally correct.</p>
+
+<div class="thm">
+<p><span class="lab">Proposition 3 (Exploration invariance at unit strength).</span> At \(\lambda = 1\) a warm-started arm has \(A_0^{-1} = I\), identical to a cold arm. Hence at every step the exploration bonus \(\alpha\sqrt{x^\top A^{-1}x}\) is a function of the observation history alone and is unaffected by \(\mu_0\). A unit-strength prior therefore cannot reduce the amount of exploration performed; it can only re-centre estimates.</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> \(A_0 = \lambda I = I\) is the cold initialisation, and subsequent updates \(A \leftarrow A + xx^\top\) depend only on selected contexts. The bonus is a function of \(A^{-1}\) alone. <span class="qed">□</span></p>
+</div>
+
+<p>Proposition 3 predicts a null result, and Sections 8.2 and 8.5 measure it twice. This matters for expectation-setting: the intuitive pitch for warm starting &mdash; "the new arm won't waste traffic being explored" &mdash; is <em>false at \(\lambda=1\)</em>. Reduced exploration must be purchased explicitly with \(\lambda > 1\), and Corollary 2 prices that purchase.</p>
+
+<div class="thm">
+<p><span class="lab">Proposition 4 (Pseudo-observations and wash-out).</span> Let \(\Sigma_n = \sum_{s\le n} x_s x_s^\top\) have smallest eigenvalue \(\nu_n\). The prior's contribution to the estimate satisfies</p>
+$$\big\|\mathbb{E}[\hat\theta_n] - \theta^*\big\|_2 \;\le\; \frac{\lambda\,\varepsilon}{\lambda + \nu_n}.$$
+<p>Hence the prior acts as \(\lambda\) pseudo-observations, and its influence halves once \(\nu_n \approx \lambda\).</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> With \(r_s = \theta^{*\top}x_s + \eta_s\), \(b_n = \lambda\mu_0 + \Sigma_n\theta^* + \sum_s \eta_s x_s\). Taking expectations, \(\mathbb{E}[b_n] = \lambda\mu_0 + \Sigma_n\theta^*\), so</p>
+$$\mathbb{E}[\hat\theta_n] - \theta^* = A_n^{-1}\big(\lambda\mu_0 + \Sigma_n\theta^*\big) - \theta^* = A_n^{-1}\big(\lambda\mu_0 + \Sigma_n\theta^* - (\lambda I + \Sigma_n)\theta^*\big) = \lambda A_n^{-1}(\mu_0 - \theta^*).$$
+<p>Taking norms and using \(\|A_n^{-1}\|_2 = (\lambda + \nu_n)^{-1}\) gives the bound. <span class="qed">□</span></p>
+</div>
+
+<p>Proposition 4 is the operational rule this framework contributes: <em>trust in a pretrained model is denominated in observations</em>. A team can state "our prior is worth 25 observations", test that claim by measuring how quickly a contradicted prior is overcome, and re-calibrate. It converts a vague question about model quality into a single tunable scalar with a unit.</p>
+
+<h2>5. Eligibility, propensities, and the bug that hides itself</h2>
+
+<p>Production decisions are conditional. An arm may be out of stock for this shopper, already shown to this user, or impermissible in this jurisdiction. The system studied here exposes this as a per-request filter, and the design question is where the filter is applied relative to the computation of propensities &mdash; the logged action probabilities on which all later off-policy evaluation depends.</p>
+
+<div class="thm">
+<p><span class="lab">Theorem 5 (Eligibility-aware propensities and the inflation factor).</span> Let \(S_t\) be the eligible set, chosen conditionally independently of the reward noise given the history. Let \(\pi\) be a target policy with \(\mathrm{supp}\,\pi(\cdot|x_t) \subseteq S_t\), and let the logging policy be \(p_t\) supported on \(S_t\).</p>
+<p><em>(i)</em> If the logged propensity is \(p_t(a)\), the IPS estimator \(\hat V = \frac1T\sum_t \frac{\pi(a_t|x_t)}{p_t(a_t)} r_t\) is unbiased for \(V(\pi)\).</p>
+<p><em>(ii)</em> Suppose instead propensities are computed from the unrestricted score vector over all arms, \(\tilde p(a)\), while the action is still drawn from the restricted policy. If the restricted policy is the renormalisation \(p_t(a) = \tilde p(a)/(1-q_t)\) with \(q_t := \sum_{a\notin S_t}\tilde p(a)\) &mdash; which holds exactly for softmax scoring &mdash; then every weight is inflated by \(1/(1-q_t)\) and</p>
+$$\mathbb{E}[\hat V_{\text{naive}}] = \mathbb{E}\Big[\tfrac{1}{1-q_t}\,v_t\Big] \;\ge\; \frac{V(\pi)}{1-\mathbb{E}[q_t]},$$
+<p>where \(v_t\) is the per-step contribution with correct weights and the inequality is Jensen's, strict unless \(q_t\) is a.s. constant.</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> (i) Condition on \(x_t, S_t\) and the history. Then \(\mathbb{E}\big[\frac{\pi(a_t)}{p_t(a_t)}r_t\big] = \sum_{a\in S_t} p_t(a)\frac{\pi(a)}{p_t(a)}\mathbb{E}[r_t|a] = \sum_{a\in S_t}\pi(a)\,\theta_a^{*\top}x_t = v_t\), the target value at that context; averaging over \(t\) and applying the tower rule gives unbiasedness. Support of \(\pi\) inside \(S_t\) guarantees no term is dropped, and \(p_t(a)>0\) on \(S_t\) guarantees the ratio is defined.</p>
+<p>(ii) By hypothesis \(\tilde p(a) = (1-q_t)p_t(a)\) for \(a\in S_t\). Therefore the logged weight is \(\frac{\pi(a_t)}{\tilde p(a_t)} = \frac{1}{1-q_t}\cdot\frac{\pi(a_t)}{p_t(a_t)}\). Taking conditional expectations as in (i) yields \(\mathbb{E}[\hat V_{\text{naive}}] = \mathbb{E}[(1-q_t)^{-1}v_t]\). If \(q_t \perp v_t\) this factors as \(\mathbb{E}[(1-q_t)^{-1}]\,V(\pi)\), and convexity of \(u\mapsto (1-u)^{-1}\) on \([0,1)\) gives \(\mathbb{E}[(1-q_t)^{-1}]\ge (1-\mathbb{E} q_t)^{-1}\). <span class="qed">□</span></p>
+</div>
+
+<p>The magnitude is not subtle. With eligibility probability 0.6 per arm over six arms, we measure \(\bar q = 0.399\), a Jensen lower bound of \(1.66\times\), and an actual inflation of \(2.06\times\) &mdash; a <strong>+106%</strong> overstatement of policy value (Section 8.3). A team using such an estimator to choose between algorithms would conclude that its candidate policy doubles revenue.</p>
+
+<div class="thm">
+<p><span class="lab">Proposition 6 (Self-normalisation masks the defect).</span> The self-normalised estimator \(\hat V_{\text{SNIPS}} = \sum_t w_t r_t / \sum_t w_t\) is invariant to any multiplicative distortion \(w_t \mapsto c\,w_t\) with \(c\) constant. Under the distortion of Theorem 5(ii), \(c_t = (1-q_t)^{-1}\) varies with \(t\), and the residual bias is governed by \(\mathrm{Cov}(c_t, v_t)\) rather than by \(\mathbb{E}[c_t]\).</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> Invariance is immediate since \(c\) cancels between numerator and denominator. For varying \(c_t\), write numerator and denominator as \(\sum_t c_t w_t r_t\) and \(\sum_t c_t w_t\); dividing, the first-order term in the deviation of \(c_t\) about its mean is \(\mathrm{Cov}(c_t, v_t)/\mathbb{E}[c_t]\), which vanishes when \(c_t\) is independent of the per-step value. <span class="qed">□</span></p>
+</div>
+
+<p>This is the uncomfortable finding of the report. We measure SNIPS under the naive propensities at <strong>−0.93%</strong> error, against IPS at +106% on identical logs. A system that evaluates its algorithm tournament with SNIPS &mdash; as the system under study does &mdash; would therefore pass its own internal checks while its logged propensities were wrong, and the defect would surface only when someone asked for an absolute value estimate. Correct ordering of filter and propensity is thus not a refinement; it is the difference between a log that is reusable and one that is silently specific to the estimator that happened to hide the error.</p>
+
+<h2>6. Capacity as allocation, not as bandit</h2>
+
+<p>Scarcity is a property of the world, not of the estimator: an arm can be the best choice for a request and still be unavailable to it because 500 others took it first. We treat this as a constrained allocation problem layered over the bandit's scores.</p>
+
+<p>For a batch of \(T\) requests with estimated payoffs \(\hat r_{tk}\) and per-arm capacities \(c_k\) satisfying \(\sum_k c_k \ge T\):</p>
+$$\max_{x \ge 0} \sum_{t,k} \hat r_{tk} x_{tk} \quad \text{s.t.} \quad \sum_k x_{tk} = 1\ \ \forall t, \qquad \sum_t x_{tk} \le c_k\ \ \forall k. \tag{P}$$
+
+<div class="thm">
+<p><span class="lab">Theorem 7 (Integrality and shadow-price optimality).</span> (i) The constraint matrix of (P) is totally unimodular, so with integral \(c_k\) the LP has an integral optimal solution: fractional serving is never required. (ii) Let \(\lambda^\star \ge 0\) be optimal duals for the capacity constraints. Then serving each request by \(a_t \in \arg\max_k (\hat r_{tk} - \lambda^\star_k)\) is optimal for (P), provided ties are broken so that capacities are met with equality where \(\lambda^\star_k > 0\).</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> (i) (P) is a transportation problem: its constraint matrix is the incidence matrix of a bipartite graph between requests and arms, which is totally unimodular; the right-hand side is integral, so every basic feasible solution is integral (Hoffman&ndash;Kruskal).</p>
+<p>(ii) The Lagrangian of (P) with capacity multipliers \(\lambda\) is \(L(x,\lambda) = \sum_{t,k}(\hat r_{tk}-\lambda_k)x_{tk} + \sum_k \lambda_k c_k\), which decouples across requests subject to \(\sum_k x_{tk}=1\); its maximiser assigns each request to an arm maximising \(\hat r_{tk}-\lambda_k\). At \(\lambda^\star\), strong duality holds (finite LP) and complementary slackness requires \(\lambda^\star_k(c_k - \sum_t x_{tk}) = 0\), which is exactly the stated tie-breaking condition. Hence the shadow-price greedy solution attains the dual bound and is primal optimal. <span class="qed">□</span></p>
+</div>
+
+<div class="thm">
+<p><span class="lab">Proposition 8 (Per-request exclusion is the degenerate case).</span> Restricting request \(t\) to \(S_t\) is (P) with per-request capacities \(c_{tk} = 0\) for \(k \notin S_t\); equivalently \(\lambda_k = +\infty\) for those arms. Eligibility filtering and capacity pricing are therefore the same mechanism at different strengths.</p>
+</div>
+
+<p>In practice \(\lambda^\star\) is unknown online and is estimated by dual mirror descent <span class="small">[20]</span>: \(\lambda \leftarrow [\lambda + \eta(\mathbb{1}_{a_t} - c/T)]_+\). Section 8.4 measures the resulting gap at 0.16% of the hindsight optimum against 1.02% for greedy-with-availability-check. The exploration/constraint interaction is genuinely harder and we do not address it: the correct frame is bandits with knapsacks <span class="small">[18,19]</span>, whose regret guarantees assume the constrained policy's own randomisation is logged &mdash; which, by Theorem 5, means the shadow price must enter the propensity.</p>
+
+<h2>7. Architecture: where pretraining actually goes</h2>
+
+<p>We now assemble the pieces. The claim of this section is architectural rather than mathematical: given Theorems 1 and 5, there is a natural place for a pretrained model in a bandit service, and an unnatural one.</p>
+
+<div class="thm">
+<p><span class="lab">Proposition 9 (Pretraining yields the posterior predictive under the training prior).</span> Let tasks \(\tau\) be drawn from a distribution \(P\), and histories \(D\) from tasks. Let \(q_\phi(y\mid x, D)\) be trained to minimise the expected log loss \(\mathbb{E}_{\tau\sim P}\mathbb{E}_{D,x,y}[-\log q_\phi(y\mid x,D)]\). Then the unique minimiser over all measurable \(q\) is the posterior predictive \(p(y \mid x, D)\) induced by \(P\).</p>
+</div>
+
+<div class="proof">
+<p><span class="lab">Proof.</span> For fixed \((x, D)\), the objective is \(\mathbb{E}_{y\sim p(\cdot|x,D)}[-\log q(y)] = H(p) + \mathrm{KL}(p\,\|\,q)\), minimised uniquely at \(q = p\) since KL is non-negative and zero only at equality. Taking expectation over \((x,D)\) preserves the pointwise minimiser. <span class="qed">□</span></p>
+</div>
+
+<p>Proposition 9 is the formal content of "pretraining on a corpus of campaigns gives you a prior" <span class="small">[13]</span>, and it comes with an immediate warning: the object obtained is the posterior predictive <em>under the training distribution \(P\)</em>. If \(P\) is generated by an LLM asked to imagine plausible campaigns, then \(P\) is a model of an LLM's beliefs, and by Theorem 1 the deployment cost of that mismatch is exactly \(\varepsilon = \|\theta^* - \mu_0\|\), priced by Corollary 2. The two halves of this report meet here: <strong>pretraining supplies \(\mu_0\); Theorem 1 prices it; Proposition 4 calibrates how long we are willing to pay for it.</strong></p>
+
+<h3>7.1 The serving path</h3>
+
+<svg class="arch" width="640" height="248" viewBox="0 0 640 248" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif" font-size="10.5">
+  <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#444"/></marker></defs>
+  <rect x="6" y="14" width="126" height="34" rx="5" fill="#eef2fb" stroke="#2f5fd0"/>
+  <text x="69" y="29" text-anchor="middle">arm text</text><text x="69" y="41" text-anchor="middle" fill="#555">"20% off first order"</text>
+  <rect x="6" y="66" width="126" height="34" rx="5" fill="#eef2fb" stroke="#2f5fd0"/>
+  <text x="69" y="81" text-anchor="middle">context</text><text x="69" y="93" text-anchor="middle" fill="#555">user / session features</text>
+  <rect x="160" y="30" width="118" height="56" rx="5" fill="#f3f0fb" stroke="#8a5ad0"/>
+  <text x="219" y="50" text-anchor="middle">sentence</text><text x="219" y="63" text-anchor="middle">transformer</text>
+  <text x="219" y="77" text-anchor="middle" fill="#555" font-size="9">offline / cached</text>
+  <rect x="306" y="18" width="128" height="40" rx="5" fill="#f0f7f3" stroke="#1f8a5c"/>
+  <text x="370" y="34" text-anchor="middle">pretrained trunk</text><text x="370" y="48" text-anchor="middle" font-size="9.5" fill="#555">φ(context, arm)</text>
+  <rect x="306" y="72" width="128" height="40" rx="5" fill="#f0f7f3" stroke="#1f8a5c"/>
+  <text x="370" y="88" text-anchor="middle">prior head</text><text x="370" y="102" text-anchor="middle" font-size="9.5" fill="#555">μ₀, strength λ</text>
+  <rect x="462" y="44" width="164" height="46" rx="5" fill="#fdf1ea" stroke="#c2481e"/>
+  <text x="544" y="62" text-anchor="middle">linear posterior</text>
+  <text x="544" y="77" text-anchor="middle" font-size="9.5" fill="#555">A⁻¹, b — Sherman–Morrison</text>
+  <rect x="462" y="112" width="164" height="42" rx="5" fill="#fdf1ea" stroke="#c2481e"/>
+  <text x="544" y="129" text-anchor="middle">UCB / Thompson score</text>
+  <text x="544" y="144" text-anchor="middle" font-size="9.5" fill="#555">calibrated uncertainty</text>
+  <rect x="462" y="172" width="164" height="42" rx="5" fill="#f7f4e8" stroke="#d0a72f"/>
+  <text x="544" y="189" text-anchor="middle">eligibility + shadow price</text>
+  <text x="544" y="204" text-anchor="middle" font-size="9.5" fill="#555">r̂ − λ_k, propensity logged here</text>
+  <rect x="160" y="172" width="270" height="42" rx="5" fill="#f2f2f0" stroke="#777"/>
+  <text x="295" y="189" text-anchor="middle">reward → A⁻¹, b update (all arms, incl. paused)</text>
+  <text x="295" y="204" text-anchor="middle" font-size="9.5" fill="#555">WAL · checkpoint · decay · SNIPS tournament</text>
+  <line x1="132" y1="31" x2="158" y2="46" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="132" y1="83" x2="158" y2="70" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="278" y1="50" x2="304" y2="40" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="278" y1="68" x2="304" y2="86" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="434" y1="38" x2="460" y2="56" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="434" y1="92" x2="460" y2="72" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="544" y1="90" x2="544" y2="110" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="544" y1="154" x2="544" y2="170" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="460" y1="193" x2="434" y2="193" stroke="#444" marker-end="url(#ar)"/>
+  <line x1="295" y1="170" x2="295" y2="120" stroke="#888" stroke-dasharray="3 3"/>
+  <text x="300" y="132" font-size="9" fill="#666">learning signal</text>
+</svg>
+<p class="small" style="text-align:center; color:#444; margin-top:-2pt;">Figure 1: Serving path. Pretraining contributes the representation φ and the prior (μ₀, λ); the linear posterior retains the calibrated uncertainty that drives exploration; eligibility and shadow prices are applied before propensities are logged (Theorem 5).</p>
+
+<p>Three design consequences follow from the results above.</p>
+
+<p><strong>Arms need features.</strong> Cross-campaign transfer is impossible while arms are opaque identifiers with disjoint parameters, because there is nothing for \(\mu_0\) to be a function of. Arms must carry embeddings, and scoring must become a function of the (context, arm) pair &mdash; the hybrid structure of <span class="small">[1]</span>. This is the one mandatory architectural change.</p>
+
+<p><strong>The transformer should not own the final score.</strong> The exploration guarantee is the confidence width \(\alpha\sqrt{x^\top A^{-1}x}\), and by Theorem 1 it is untouched by any prior. A transformer emitting scores directly replaces a calibrated posterior with an uncalibrated one, converting the bandit into a greedy recommender whose exploration failure is invisible in aggregate reward. Keeping the linear head preserves decay, propensities, SNIPS, and the tournament unchanged &mdash; and permits the in-context policy <span class="small">[11,12]</span> to be introduced later as a tournament challenger that must earn traffic against LinUCB on live rewards.</p>
+
+<p><strong>Latency dictates where inference runs.</strong> Arm embeddings are static and cached at insertion; context embeddings are computed upstream, since the API already accepts vectors. If a pretrained trunk must run per request, it enters a path currently measured in microseconds. The conservative deployment runs the trunk offline to emit \(\mu_0\) at arm-creation time, leaving the hot path linear.</p>
+
+<h3>7.2 Corpus design</h3>
+
+<p>Proposition 9 makes corpus design the central scientific risk rather than an implementation detail: the trained object is only as good as \(P\). If an LLM both invents and judges every interaction, the resulting \(P\) is smooth, low-noise and decisive in ways real behavioural data is not, and the induced \(\mu_0\) will be systematically over-confident &mdash; which, by Corollary 2, is the precise failure that turns a prior harmful.</p>
+
+<p>The division of labour we recommend: <em>the LLM supplies semantics, a simulator supplies statistics.</em> The LLM proposes campaign topics, arm texts, audience descriptions, and a latent affinity structure; the simulator draws effect sizes, noise levels, context informativeness, interaction structure, drift, and reward sparsity from explicit randomised distributions. This also fixes the cost arithmetic: judging every interaction is \(O(\text{campaigns}\times\text{interactions}) \approx 10^9\) LLM calls, whereas generating latent structures is \(O(\text{campaigns}) \approx 10^6\) calls at a few thousand tokens each.</p>
+
+<p>One category is easy to omit and essential to include: <strong>null campaigns</strong>, in which no arm is genuinely better. A corpus without them trains a model that cannot express "no signal", and such a model will manufacture confident winners for customers whose arms do not differ &mdash; a failure that aggregate metrics conceal and customers discover.</p>
+
+<h2>8. Experiments</h2>
+
+<p>Five experiments. The first establishes that a fast reference implementation is faithful to the production engine; the next three test Theorems 1, 5 and 7; the last exercises the full dynamic-arm lifecycle against the live service over HTTP. All code, seeds and raw outputs accompany this report.</p>
+
+<h3>8.1 Reference validation</h3>
+
+<p>Sweeps require thousands of runs, which is impractical over HTTP against a durable, fsync-backed service. We therefore implemented the update rules of Section 3 directly and validated them against the running engine on an identical stream: same contexts, same reward coins, same \(\alpha\), 1,500 steps, four arms. The engine chose each action; the reference was asked what it would have chosen, and both were updated with the same (action, reward) pair.</p>
+
+<table>
+<caption>Table 1: Reference implementation versus the live engine (1,500 steps, \(d=6\), 4 arms).</caption>
+<thead><tr><th>Quantity</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Action agreement (after step 0)</td><td>99.93% (1 disagreement in 1,499)</td></tr>
+<tr><td>Max \(\|\hat\theta^{\text{engine}}_a - \hat\theta^{\text{ref}}_a\|_2\)</td><td>\(1.32 \times 10^{-15}\)</td></tr>
+<tr><td>Engine cumulative regret</td><td>38.96</td></tr>
+<tr><td>Reference counterfactual regret</td><td>39.00</td></tr>
+</tbody>
+</table>
+
+<p>Parameters agree to machine precision. The single action disagreement is a near-tie: when arms have identical state the engine's arg-max resolves ties by hash iteration order. We note this because it is also a confound in Section 8.5.</p>
+
+<h3>8.2 Prior error and prior strength (Theorem 1)</h3>
+
+<p>Setup: \(d=6\), five arms, \(T=3{,}000\), \(\alpha=1\), 20 seeds. Every arm's true parameter is scaled to \(\|\theta^*\|_2 = 0.45\), so cold start is exactly a prior with \(\varepsilon = 0.45\). Warm priors are constructed as \(\mu_0 = \theta^* + \varepsilon u\) for a random unit \(u\), making prior error an exact independent variable. Rewards are Bernoulli.</p>
+
+<figure>
+  <img src="{{FIG_PRIOR}}" alt="regret versus prior error">
+  <figcaption><strong>Figure 2:</strong> Cumulative regret against prior error \(\varepsilon\), by prior strength \(\lambda\); 20 seeds, bars are ±1 s.e.; dashed line and band are the cold-start baseline. At \(\lambda=1\) the curve is nearly flat, as Proposition 3 requires. Strength amplifies the prior in both directions, and the curves cross the cold baseline near \(\varepsilon \approx \|\theta^*\| = 0.45\), as Corollary 2 requires.</figcaption>
+</figure>
+
+<table>
+<caption>Table 2: Cumulative regret at \(T=3{,}000\) (mean ± s.e. over 20 seeds). Cold-start baseline: 87.6 ± 4.1.</caption>
+<thead><tr><th>\(\varepsilon\)</th><th>\(\lambda=1\)</th><th>\(\lambda=5\)</th><th>\(\lambda=25\)</th></tr></thead>
+<tbody>
+<tr><td>0.00 (perfect prior)</td><td>83.0 ± 3.7</td><td>62.5 ± 3.4</td><td><strong>31.4 ± 2.0</strong></td></tr>
+<tr><td>0.10</td><td>76.4 ± 3.3</td><td>63.5 ± 2.5</td><td>33.6 ± 2.0</td></tr>
+<tr><td>0.20</td><td>77.6 ± 3.8</td><td>62.7 ± 3.6</td><td>43.7 ± 2.6</td></tr>
+<tr><td>0.45 \(=\|\theta^*\|\)</td><td>82.4 ± 4.7</td><td>70.7 ± 2.4</td><td>80.3 ± 5.3</td></tr>
+<tr><td>0.90</td><td>82.7 ± 4.1</td><td>93.4 ± 6.3</td><td>130.8 ± 9.5</td></tr>
+<tr><td>1.80</td><td>94.0 ± 5.1</td><td>137.2 ± 9.6</td><td><strong>172.7 ± 13.4</strong></td></tr>
+</tbody>
+</table>
+
+<p>Three predictions were made in advance and all three hold.</p>
+<ul>
+<li><strong>P1 (monotonicity).</strong> Regret increases in \(\varepsilon\) at every strength; the effect is pronounced once \(\lambda>1\).</li>
+<li><strong>P2 (cold equivalence).</strong> Theorem 1 predicts that a warm start with \(\varepsilon = \|\theta^*\|\) at \(\lambda=1\) is equivalent to cold start. Measured: 82.4 ± 4.7 versus 87.6 ± 4.1, a difference of 5.2 against a standard error of the difference of 6.2 &mdash; statistically indistinguishable, as required.</li>
+<li><strong>P3 (strength amplifies).</strong> At \(\lambda=25\) a perfect prior cuts regret by <strong>64%</strong> (31.4 vs 87.6), while a prior at \(\varepsilon=1.8\) nearly doubles it (172.7, <strong>+97%</strong>). The curves cross the baseline between \(\varepsilon = 0.45\) and \(0.9\).</li>
+</ul>
+
+<p>The practical reading is blunt: <em>a pretrained prior is worth nothing at \(\lambda=1\) and a great deal at \(\lambda=25\), which means the entire value of pretraining is contingent on being willing to trust it</em> &mdash; and that willingness is precisely what Corollary 2 makes dangerous when the corpus is mis-specified.</p>
+
+<h3>8.3 Where the filter goes (Theorem 5)</h3>
+
+<p>Two earlier designs failed and are reported here because their failure is informative.</p>
+<p><em>First attempt.</em> Using LinUCB as the logging policy gave biased estimates under <em>both</em> propensity schemes (+17.3% and +14.1%). The cause is not filtering: LinUCB is deterministic, so softmax-of-scores is a heuristic surrogate, not an action probability, and IPS has no support. <strong>This is a real property of the deployed system</strong> &mdash; any absolute off-policy estimate computed from LinUCB-logged propensities inherits it.</p>
+<p><em>Second attempt.</em> Using Thompson sampling with Monte-Carlo propensities (\(N=400\)) still showed +11.7% bias on the filter-aware estimator, because \(\mathbb{E}[1/\hat p] > 1/p\) when \(\hat p\) is a noisy MC estimate of a small probability. This too is a property of the deployed system, and it bounds how small a logged TS propensity can be trusted to be.</p>
+<p><em>Final design.</em> To isolate the filtering effect, the logger draws from a softmax over the eligible set, so propensities are exact. \(K=6\), eligibility probability 0.6, \(T=60{,}000\), 10 seeds; target policy uniform over eligible arms.</p>
+
+<figure>
+  <img src="{{FIG_OPE}}" alt="off-policy estimates">
+  <figcaption><strong>Figure 3:</strong> Estimated policy value under the four combinations of estimator and propensity convention; dashed line is the true value (0.3180), bars are ±1 s.e. over 10 seeds. Mean ineligible mass \(\bar q = 0.399\); Jensen lower bound on inflation \(1/(1-\bar q) = 1.66\); measured inflation \(2.06\).</figcaption>
+</figure>
+
+<table>
+<caption>Table 3: Off-policy estimates (true value 0.31796; 10 seeds, \(T=60{,}000\)).</caption>
+<thead><tr><th>Estimator</th><th>Estimate</th><th>Bias</th><th>Relative</th></tr></thead>
+<tbody>
+<tr><td>IPS, filter-aware</td><td>0.31928</td><td>+0.00132 (±0.00356)</td><td>+0.42%</td></tr>
+<tr><td>IPS, naive</td><td>0.65586</td><td>+0.33790 (±0.00678)</td><td><strong>+106.27%</strong></td></tr>
+<tr><td>SNIPS, filter-aware</td><td>0.31923</td><td>+0.00128 (±0.00353)</td><td>+0.40%</td></tr>
+<tr><td>SNIPS, naive</td><td>0.31499</td><td>−0.00297 (±0.00379)</td><td>−0.93%</td></tr>
+</tbody>
+</table>
+
+<p>Theorem 5(i) is confirmed (+0.42%, within one standard error of zero). Theorem 5(ii) is confirmed with the predicted direction and a magnitude above the Jensen bound, as expected given the variability of \(q_t\). Proposition 6 is confirmed dramatically: the self-normalised estimator absorbs almost the entire distortion, reporting −0.93% where IPS reports +106%. <strong>The correct engineering conclusion is not "SNIPS is safe" but "SNIPS conceals this class of defect"</strong>: the log is only reusable if propensities are right, and the estimator that would have caught the error is the one nobody runs.</p>
+
+<h3>8.4 Capacity-constrained allocation (Theorem 7)</h3>
+
+<p>\(T=2{,}000\) requests, five arms, 10 seeds. Arm 0 is broadly strong but can serve only 15% of requests; the others can serve 40% each, so every request is always servable. Payoffs are known exactly, deliberately removing estimation from the picture: the question is allocation, not learning. We compare greedy (serve the best arm with capacity remaining &mdash; what a bandit plus an inventory check does), dual mirror descent, and the hindsight LP optimum computed with HiGHS.</p>
+
+<figure>
+  <img src="{{FIG_CAPACITY}}" alt="capacity experiment">
+  <figcaption><strong>Figure 4:</strong> Left: optimality gap against the hindsight LP over 10 seeds. Right: realised reward per seed. Dual pricing recovers 84% of the gap that greedy availability-checking leaves on the table.</figcaption>
+</figure>
+
+<p>Greedy loses 1.02% ± 0.02 of the optimum; dual pricing loses 0.16% ± 0.01, consistent across every seed. The absolute magnitude depends on how heterogeneous the scarce arm's advantage is &mdash; a more sharply differentiated instance widens the gap &mdash; but the ordering is structural: greedy spends scarce capacity on requests that happen to arrive early, while the shadow price defers it to requests whose advantage over the alternatives is largest. Theorem 7(i) was verified incidentally: the LP solutions returned by HiGHS were integral in all 10 instances without integrality constraints.</p>
+
+<h3>8.5 Live dynamic-arm lifecycle</h3>
+
+<p>Finally, the full mechanism against the running service over HTTP: 12,000 requests per campaign, 24,000 HTTP round trips per run, 3 seeds, with periodic checkpoints so that time-decay actually executes. A catalogue of six arms in three groups undergoes a stock-out (per-request exclusion of one arm for ~20% of shoppers from step 3,000), a seasonal pause of two arms (step 4,500), two arm launches (step 6,000), a reactivation (step 9,000) and a retirement (step 10,500). Two campaigns receive an <em>identical</em> request stream with common random numbers, differing only in whether the launched arms are warm-started. One launch enters a strong group, one a weak group.</p>
+
+<figure>
+  <img src="{{FIG_CATALOG}}" alt="catalogue launch results">
+  <figcaption><strong>Figure 5:</strong> Launch outcomes over 3 seeds (±1 s.e.). Left: impressions won after launch. Right: parameter error 2,000 steps after launch. The warm start reliably finds the strong arm and estimates both arms better; it does not reliably reduce regret (Table 4).</figcaption>
+</figure>
+
+<table>
+<caption>Table 4: Live-engine launch results, mean over 3 seeds.</caption>
+<thead><tr><th>Metric</th><th>warm</th><th>cold</th></tr></thead>
+<tbody>
+<tr><td>\(\|\hat\theta-\theta^*\|\) at launch — <code>boot_new</code></td><td><strong>0.171</strong></td><td>0.407</td></tr>
+<tr><td>\(\|\hat\theta-\theta^*\|\) at launch — <code>sneaker_new</code></td><td><strong>0.233</strong></td><td>0.363</td></tr>
+<tr><td>\(\|\hat\theta-\theta^*\|\) at t+2000 — <code>boot_new</code></td><td><strong>0.320</strong></td><td>0.614</td></tr>
+<tr><td>Impressions — <code>boot_new</code> (strong group)</td><td><strong>3,634</strong></td><td>1,970</td></tr>
+<tr><td>Impressions — <code>sneaker_new</code> (weak group)</td><td>1,110</td><td>1,208</td></tr>
+<tr><td>Post-launch regret (lower better)</td><td>128.1</td><td><strong>116.2</strong></td></tr>
+</tbody>
+</table>
+
+<p><strong>The null result.</strong> Post-launch regret was <em>better for the cold campaign on 2 of 3 seeds</em> (deltas −59.7, +36.4, +59.1; mean +11.9 against warm). This is exactly what Proposition 3 predicts: the deployment used \(\lambda=1\), at which the prior cannot reduce exploration and can only re-centre estimates. Section 8.2 shows the same null at \(\lambda=1\) under 20 seeds and controlled prior error, and shows where the benefit actually lives (\(\lambda>1\)). We report this prominently because the intuitive claim &mdash; "warm starting reduces regret" &mdash; is the one a reader is most likely to assume, and at unit strength it is false.</p>
+
+<p><strong>What the warm start does deliver</strong> is estimation: parameter error at launch is 2.4× lower for the strong-group arm and 1.6× lower for the weak-group arm, and it remains ~1.9× lower 2,000 steps later. The strong-group arm won 84% more impressions, in all three seeds, at a higher realised payoff (0.285 vs 0.276). The weak-group arm was served slightly <em>less</em> when warm-started &mdash; correct behaviour, since its borrowed mean truthfully reports it as mediocre.</p>
+
+<figure>
+  <img src="{{FIG_ENTROPY}}" alt="entropy over the lifecycle">
+  <figcaption><strong>Figure 6:</strong> Normalised selection entropy through the lifecycle. Computed over active arms (solid) it stays flat through the pause; computed over all arms (dashed) it <em>rises</em> to 0.940 during the pause, reporting a narrowed policy as healthier.</figcaption>
+</figure>
+
+<p>The diagnostic finding is worth isolating. During the pause window the naive all-arms entropy reads 0.940 against 0.895 for the active-arms computation: a policy that has just lost a third of its action space appears <em>more</em> diverse, because paused arms' historical impressions still count. An operational collapse detector built on the naive quantity would therefore be most wrong exactly when arms are being withdrawn. Across the three runs the service executed 31 checkpoints with no errors, and paused arms continued to absorb rewards for predictions issued before the pause.</p>
+
+<h2>9. Limitations and threats to validity</h2>
+
+<p><strong>The rewards are synthetic.</strong> Every number in Section 8 comes from a simulator with a known \(\theta^*\). This is appropriate for testing theorems &mdash; ground truth is required to measure bias and regret &mdash; and inadequate for establishing that pretraining helps in practice. The honest position is that this report validates <em>mechanisms</em>, not <em>market value</em>. Before any pretrained prior ships, it must be evaluated on real logged bandit data with real propensities, e.g. the Open Bandit Dataset <span class="small">[17]</span>, against a cold baseline.</p>
+
+<p><strong>Theorem 1 is about ridge, not about everything.</strong> The reduction holds for linear/ridge posteriors, and hence for LinUCB, linear Thompson sampling, and the linear head of a neural-linear method. It does not hold for a policy whose scores come from a network trained end-to-end; such a system has no \(\mu_0\) and no \(\lambda\), and correspondingly no way to price or expire its prior. We regard that as an argument for the architecture of Section 7.1 rather than a limitation of the theorem.</p>
+
+<p><strong>Tie-breaking confound in Section 8.5.</strong> The two campaigns diverge before any launch, because at \(t=0\) all arms share identical state and arg-max ties resolve by hash order. Pre-launch regret differed by up to 60 units between paired campaigns &mdash; comparable to the effect under study. Section 8.2's 20-seed controlled design exists precisely because Section 8.5 cannot support a regret claim on its own.</p>
+
+<p><strong>Capacity results assume known payoffs.</strong> Section 8.4 removes estimation deliberately. Joint exploration and constraint satisfaction is materially harder <span class="small">[18,19]</span>, and by Theorem 5 the shadow price must enter the logged propensity, which we have not implemented or measured.</p>
+
+<p><strong>The corpus does not exist yet.</strong> Section 7.2 is a design, not a result. Proposition 9 guarantees only that pretraining recovers the posterior predictive <em>of the training distribution</em>; whether an LLM-seeded distribution resembles real campaigns is an empirical question this report does not answer, and it is the question on which the entire programme turns.</p>
+
+<p><strong>Replicability as a business risk.</strong> A synthetic corpus is reproducible by anyone with a comparable LLM. The defensible assets are the serving engine, the calibration of \(\lambda\) against real outcomes, and the evaluation harness &mdash; not the corpus.</p>
+
+<h2>10. Roadmap</h2>
+
+<ol>
+<li><strong>Arm features and a model-sourced prior.</strong> Embed arm text, train a small model on the generated corpus to emit \(\mu_0\), expose it through the existing warm-start interface, and calibrate \(\lambda\) per domain using the wash-out rule of Proposition 4. This is the smallest change that makes the theory operational and requires no transformer.</li>
+<li><strong>Constraint layer.</strong> Implement (P) with online dual prices over existing scores, with the shadow price entering the logged propensity. Independent commercial value, no machine-learning risk, and it subsumes per-request exclusion (Proposition 8).</li>
+<li><strong>In-context policy as challenger.</strong> Introduce a DPT-style policy <span class="small">[12]</span> only as a tournament challenger evaluated by SNIPS on live traffic &mdash; with propensities verified per Theorem 5, since Proposition 6 shows the tournament cannot detect its own propensity bugs.</li>
+<li><strong>Real-data benchmark.</strong> Before (1) ships: cold vs warm on the Open Bandit Dataset, plus a deliberate negative-transfer test measuring observations-to-recovery from a contradicted prior.</li>
+</ol>
+
+<h2>11. Conclusion</h2>
+
+<p>The phrase "pretrained decision model" suggests that a bandit service should be rebuilt around a large sequence model. The analysis here suggests something less dramatic and more useful. Pretraining enters a contextual bandit at exactly one place &mdash; the prior mean \(\mu_0\) and its strength \(\lambda\) &mdash; and Theorem 1 shows that everything a pretrained model can contribute to this family of algorithms is compressed into the single scalar \(\|\theta^*-\mu_0\|\). That is a strong constraint and a liberating one: it means the value of pretraining can be measured before any transformer is trained, and it means a mis-specified corpus has a priced, bounded, expiring cost rather than an unbounded one.</p>
+
+<p>The complementary finding is that the risky part of such a system is not the model but the plumbing. A propensity computed on the wrong side of an eligibility filter biases absolute policy value by 106%, and the estimator most likely to be deployed hides it. Capacity constraints, meanwhile, are not a bandit problem at all and should not be solved as one; as an allocation problem they are integral, dual-priced, and nearly closed-form.</p>
+
+<p>The recommended posture is therefore: keep the linear posterior and its calibrated uncertainty; let pretraining supply the prior and the representation; apply eligibility and scarcity before propensities are logged; and require any in-context policy to win its traffic in a live tournament. Under that arrangement the database remains the product, and pretraining is what makes day one of a new arm stop looking like day one.</p>
+
+<h2 class="pagebreak">References</h2>
+<div class="refs">
+<p>[1] L. Li, W. Chu, J. Langford, R. E. Schapire. A Contextual-Bandit Approach to Personalized News Article Recommendation. <em>WWW</em>, 2010.</p>
+<p>[2] Y. Abbasi-Yadkori, D. Pál, C. Szepesvári. Improved Algorithms for Linear Stochastic Bandits. <em>NeurIPS</em>, 2011.</p>
+<p>[3] S. Agrawal, N. Goyal. Thompson Sampling for Contextual Bandits with Linear Payoffs. <em>ICML</em>, 2013.</p>
+<p>[4] O. Chapelle, L. Li. An Empirical Evaluation of Thompson Sampling. <em>NeurIPS</em>, 2011.</p>
+<p>[5] C. Riquelme, G. Tucker, J. Snoek. Deep Bayesian Bandits Showdown: An Empirical Comparison of Bayesian Deep Networks for Thompson Sampling. <em>ICLR</em>, 2018.</p>
+<p>[6] D. Zhou, L. Li, Q. Gu. Neural Contextual Bandits with UCB-based Exploration. <em>ICML</em>, 2020.</p>
+<p>[7] W. Zhang, D. Zhou, L. Li, Q. Gu. Neural Thompson Sampling. <em>ICLR</em>, 2021.</p>
+<p>[8] B. Kveton, M. Konobeev, M. Zaheer, C.-W. Hsu, M. Mladenov, C. Boutilier, C. Szepesvári. Meta-Thompson Sampling. <em>ICML</em>, 2021.</p>
+<p>[9] S. Basu, B. Kveton, M. Zaheer, C. Szepesvári. No Regrets for Learning the Prior in Bandits. <em>NeurIPS</em>, 2021.</p>
+<p>[10] L. Cella, A. Lazaric, M. Pontil. Meta-Learning with Stochastic Linear Bandits. <em>ICML</em>, 2020.</p>
+<p>[11] M. Laskin, L. Wang, J. Oh, E. Parisotto, S. Spencer, R. Steigerwald, et al. In-Context Reinforcement Learning with Algorithm Distillation. <em>ICLR</em>, 2023.</p>
+<p>[12] J. N. Lee, A. Xie, A. Pacchiano, Y. Chandak, C. Finn, O. Nachum, E. Brunskill. Supervised Pretraining Can Learn In-Context Reinforcement Learning. <em>NeurIPS</em>, 2023.</p>
+<p>[13] S. Müller, N. Hollmann, S. P. Arango, J. Grabocka, F. Hutter. Transformers Can Do Bayesian Inference. <em>ICLR</em>, 2022.</p>
+<p>[14] D. G. Horvitz, D. J. Thompson. A Generalization of Sampling Without Replacement from a Finite Universe. <em>JASA</em>, 1952.</p>
+<p>[15] A. Swaminathan, T. Joachims. The Self-Normalized Estimator for Counterfactual Learning. <em>NeurIPS</em>, 2015.</p>
+<p>[16] M. Dudík, J. Langford, L. Li. Doubly Robust Policy Evaluation and Learning. <em>ICML</em>, 2011.</p>
+<p>[17] Y. Saito, S. Aihara, M. Matsutani, Y. Narita. Open Bandit Dataset and Pipeline: Towards Realistic and Reproducible Off-Policy Evaluation. arXiv:2008.07146, 2020.</p>
+<p>[18] A. Badanidiyuru, R. Kleinberg, A. Slivkins. Bandits with Knapsacks. <em>FOCS</em>, 2013.</p>
+<p>[19] S. Agrawal, N. R. Devanur. Bandits with Concave Rewards and Convex Knapsacks. <em>EC</em>, 2014.</p>
+<p>[20] S. Balseiro, H. Lu, V. Mirrokni. The Best of Many Worlds: Dual Mirror Descent for Online Allocation Problems. <em>Operations Research</em>, 2023.</p>
+<p>[21] N. Reimers, I. Gurevych. Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks. <em>EMNLP</em>, 2019.</p>
+</div>
+
+<h2>Appendix A. Experimental details</h2>
+
+<p class="small"><strong>Environment.</strong> BanditDB v2.0.0, debug build, single node, default fsync interval; experiments run on macOS (Darwin 25.5.0), Python 3 with NumPy 2.2.6, SciPy 1.15.3 (HiGHS), Matplotlib 3.10.9.</p>
+
+<p class="small"><strong>§8.1 validation.</strong> \(d=6\), 4 arms, \(T=1{,}500\), \(\alpha=1\), seed 99. The engine served every decision over HTTP; the reference observed the same (action, reward) pairs.</p>
+
+<p class="small"><strong>§8.2 prior sweep.</strong> \(d=6\), \(K=5\), \(T=3{,}000\), \(\alpha=1\), seeds 0&ndash;19, \(\|\theta^*_a\|=0.45\) with non-negative entries, contexts drawn as \(|\mathcal{N}(0,I)|\) normalised to unit \(\ell_2\), Bernoulli rewards. 361 runs total including baselines.</p>
+
+<p class="small"><strong>§8.3 off-policy evaluation.</strong> \(d=5\), \(K=6\), \(T=60{,}000\), 10 seeds, eligibility Bernoulli(0.6) per arm with a guaranteed non-empty set, softmax temperature 3, fixed scoring model \(\hat\theta = \theta^* + 0.15\,\mathcal{N}(0,I)\) to isolate the estimator from learning dynamics. Preliminary designs used LinUCB (deterministic) and Monte-Carlo Thompson propensities; both are reported in §8.3.</p>
+
+<p class="small"><strong>§8.4 allocation.</strong> \(T=2{,}000\), \(K=5\), 10 seeds, \(c_0 = 0.15T\), \(c_k = 0.40T\) otherwise; dual step size \(\eta = 0.02\); LP solved as a \(10{,}000\)-variable programme with HiGHS via SciPy.</p>
+
+<p class="small"><strong>§8.5 lifecycle.</strong> \(d=8\), 6 initial arms in 3 groups, \(T=12{,}000\), \(\alpha=1\), <code>decay_half_life_hours = 72</code>, checkpoint every 2,000 steps, seeds 7/11/23. Contexts include two seasonal features traversing a full period over the run. Common random numbers across the paired warm/cold campaigns. Warm launches borrow from named sibling arms at \(\lambda=1\).</p>
+
+<p class="small"><strong>Reproduction.</strong> Scripts: <code>linucb_ref.py</code> (reference), <code>exp_validate.py</code> (§8.1), <code>exp_prior.py</code> (§8.2), <code>exp_ope3.py</code> (§8.3, with <code>exp_ope.py</code> and <code>exp_ope2.py</code> the two superseded designs), <code>exp_capacity.py</code> (§8.4), <code>sim_dynamic_arms.py</code> (§8.5), <code>figures.py</code>. Raw outputs are the corresponding JSON files.</p>
+
+<p class="small" style="margin-top:14pt; color:#555;"><em>Preparation note:</em> the experiments, proofs and drafting in this report were carried out with Claude Code (Claude Opus 5) in a single working session; all numerical results are from executed code rather than estimates, and the two superseded experimental designs in §8.3 are reported rather than discarded.</p>
+
+</body>
+</html>
