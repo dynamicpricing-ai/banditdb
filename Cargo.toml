@@ -21,6 +21,7 @@ polars = { version = "0.41", features = ["json", "parquet", "lazy"] }
 rand = "0.8"
 rand_distr = "0.4"
 subtle = "2"
+sha2 = "0.10"
 governor = "0.6"
 rmp-serde = "1"
 candle-core = { version = "0.10", optional = true }
@@ -30,3 +31,6 @@ candle-nn = { version = "0.10", optional = true }
 neural = ["dep:candle-core", "dep:candle-nn"]
 cuda   = ["neural", "candle-core/cuda"]
 metal  = ["neural", "candle-core/metal"]
+
+[dev-dependencies]
+sha2 = "0.10"

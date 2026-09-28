@@ -10,6 +10,8 @@ use axum::{
 use tower_http::cors::{CorsLayer, Any};
 use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, WarmStart, DEFAULT_ALPHA};
 use banditdb::engine::ArmFilter;
+use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
+use parking_lot::RwLock;
 use banditdb::BanditDB;
 use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
 use serde::{Deserialize, Serialize};
@@ -48,7 +50,13 @@ fn build_features_str() -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Role { Reader = 1, Writer = 2, Admin = 3 }
+pub enum Role {
+    /// A provisioned tenant whose status is not `active` — authenticates, then
+    /// fails every role gate. Ordered below Reader so `role >= min` refuses it
+    /// without a special case at each call site.
+    Suspended = 0,
+    Reader = 1, Writer = 2, Admin = 3,
+}
 
 /// Per-request auth context — injected by `auth_middleware`, read by handlers.
 #[derive(Debug, Clone)]
@@ -69,6 +77,13 @@ pub struct AuthContext {
 pub struct KeyRegistry {
     keys:        Vec<(Vec<u8>, Role, Option<String>)>,
     tenant_mode: bool,
+    /// Tenants provisioned at runtime by a control plane. Separate from `keys`
+    /// because the two answer the same question with different trade-offs: the
+    /// env list is a constant-time scan over a handful of static keys, while this
+    /// is an O(1) digest lookup that can hold thousands and change without a
+    /// restart. Env keys are checked first so a local operator key keeps working
+    /// even if the store is empty or unreadable.
+    tenants:     RwLock<TenantStore>,
 }
 
 impl KeyRegistry {
@@ -107,15 +122,43 @@ impl KeyRegistry {
             }
         }
 
-        Self { keys, tenant_mode }
+        Self { keys, tenant_mode, tenants: RwLock::new(TenantStore::new()) }
     }
+
+    /// Same as `from_env`, plus the tenant store persisted in `data_dir`.
+    pub fn from_env_with_store(data_dir: &str) -> Result<Self, String> {
+        let mut registry = Self::from_env();
+        registry.tenants = RwLock::new(TenantStore::load(data_dir)?);
+        Ok(registry)
+    }
+
+    /// Provision or replace a tenant. Idempotent — the control plane retries.
+    pub fn upsert_tenant(&self, tenant: Tenant) -> Result<(), String> {
+        self.tenants.write().upsert(tenant)
+    }
+
+    pub fn remove_tenant(&self, tenant_id: &str) -> Result<bool, String> {
+        self.tenants.write().remove(tenant_id)
+    }
+
+    pub fn tenant_ids(&self) -> Vec<String> { self.tenants.read().ids() }
+
+    pub fn tenant_quotas(&self, tenant_id: &str) -> Option<TenantQuotas> {
+        self.tenants.read().get(tenant_id).map(|t| t.quotas.clone())
+    }
+
+    pub fn tenant_count(&self) -> usize { self.tenants.read().len() }
 
     /// Authenticate in constant time — no branch on comparison result position.
     pub fn authenticate(&self, provided: &str) -> Option<AuthContext> {
-        if self.keys.is_empty() {
+        // Provisioned tenants are checked first only when the static list misses,
+        // below; this early return keeps "no auth configured at all" meaning open
+        // access, which several local workflows depend on.
+        if self.keys.is_empty() && self.tenants.read().is_empty() {
             return Some(AuthContext { role: Role::Admin, tenant_id: None });
         }
-        let provided = provided.as_bytes();
+        let presented = provided;                 // keep the &str for the digest lookup
+        let provided  = provided.as_bytes();
         let mut found:     u8              = 0u8;
         let mut role_val:  u8              = 0u8;
         let mut tenant_id: Option<String>  = None;
@@ -136,10 +179,26 @@ impl KeyRegistry {
                 2 => Role::Writer,
                 _ => Role::Reader,
             };
-            Some(AuthContext { role, tenant_id: if self.tenant_mode { tenant_id } else { None } })
-        } else {
-            None
+            return Some(AuthContext { role, tenant_id: if self.tenant_mode { tenant_id } else { None } });
         }
+
+        // Not a statically configured key — try the provisioned tenants.
+        let matched = self.tenants.read().authenticate(presented)?;
+        if !matched.active {
+            // Suspended tenants authenticate and are then refused by role, so a
+            // lapsed subscription reads as "forbidden" rather than "bad key".
+            return Some(AuthContext { role: Role::Suspended, tenant_id: Some(matched.tenant_id) });
+        }
+        let role = match matched.role.as_str() {
+            "admin"  => Role::Admin,
+            "writer" => Role::Writer,
+            _        => Role::Reader,
+        };
+        // A provisioned tenant is ALWAYS namespace-scoped, whatever
+        // BANDITDB_TENANT_MODE says. Hosted tenants sharing a process without
+        // isolation would be a cross-tenant data leak, and it must not be
+        // possible to switch that off with an environment variable.
+        Some(AuthContext { role, tenant_id: Some(matched.tenant_id) })
     }
 
     pub fn is_open(&self) -> bool { self.keys.is_empty() }
@@ -482,6 +541,15 @@ async fn auth_middleware(
         None    => return AppError(StatusCode::UNAUTHORIZED, "Unauthorized".into()).into_response(),
     };
 
+    // Suspension is enforced here rather than in `require_role`, because not every
+    // route group carries a role gate — reader routes are reachable by anyone who
+    // authenticates. One choke point cannot be forgotten when a route is added.
+    if auth.role == Role::Suspended {
+        return AppError(StatusCode::FORBIDDEN,
+            "Tenant suspended — the key is valid but the account is not active".into())
+            .into_response();
+    }
+
     if let Some(limiter) = &state.rate_limiter {
         let key = if provided.is_empty() { addr.ip().to_string() } else { provided.to_string() };
         if limiter.check_key(&key).is_err() {
@@ -495,6 +563,10 @@ async fn auth_middleware(
 }
 
 async fn require_role(min: Role, Extension(auth): Extension<AuthContext>, req: Request, next: Next) -> Response {
+    if auth.role == Role::Suspended {
+        return AppError(StatusCode::FORBIDDEN,
+            "Tenant suspended — the key is valid but the account is not active".into()).into_response();
+    }
     if auth.role >= min { next.run(req).await }
     else { AppError(StatusCode::FORBIDDEN, "Insufficient permissions".into()).into_response() }
 }
@@ -613,6 +685,8 @@ async fn handle_create_campaign(
             format!("feature_dim {arm_dim} exceeds BANDITDB_MAX_FEATURE_DIM={}", state.db.max_feature_dim)));
     }
 
+    enforce_tenant_quotas(&state, &auth, arm_dim)?;
+
     state.db.add_campaign(
         &ns(&auth, &payload.campaign_id),
         payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata,
@@ -657,6 +731,188 @@ async fn handle_restore_campaign(
         .await
         .map(|_| Json("Campaign Restored"))
         .map_err(map_engine_err)
+}
+
+// ---------------------------------------------------------------------------
+// Tenant provisioning (control plane → engine)
+// ---------------------------------------------------------------------------
+
+/// Guard for the provisioning routes.
+///
+/// Deliberately NOT a tenant key: `BANDITDB_PROVISION_KEY` is a machine-to-machine
+/// credential held only by the control plane. A tenant admin must never be able to
+/// create, inspect or delete other tenants, so this is a separate credential with
+/// its own env var rather than a higher role on the existing ladder. Absent the
+/// var, the routes return 404 — an engine that was never meant to be provisioned
+/// should not advertise that it could be.
+async fn require_provision_key(req: Request, next: Next) -> Response {
+    let Ok(expected) = std::env::var("BANDITDB_PROVISION_KEY") else {
+        return AppError(StatusCode::NOT_FOUND, "Not found".into()).into_response();
+    };
+    if expected.is_empty() {
+        return AppError(StatusCode::NOT_FOUND, "Not found".into()).into_response();
+    }
+    let presented = req.headers()
+        .get("X-Provision-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Constant time: this credential is long-lived and high value.
+    if presented.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1 {
+        next.run(req).await
+    } else {
+        AppError(StatusCode::UNAUTHORIZED, "Invalid provisioning key".into()).into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct ProvisionTenantRequest {
+    #[serde(default)]
+    keys:   Vec<ProvisionKey>,
+    #[serde(default)]
+    quotas: TenantQuotas,
+    #[serde(default = "default_tenant_status")]
+    status: String,
+}
+
+fn default_tenant_status() -> String { "active".to_string() }
+
+#[derive(Deserialize)]
+struct ProvisionKey {
+    /// SHA-256 of the API key, hex. The plaintext key never reaches the engine —
+    /// the control plane hashes it at mint time and shows it to the user once.
+    hash:   String,
+    role:   String,
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TenantResponse {
+    tenant_id: String,
+    keys:      usize,
+    status:    String,
+}
+
+async fn handle_put_tenant(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+    Json(payload): Json<ProvisionTenantRequest>,
+) -> Result<Json<TenantResponse>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    if !matches!(payload.status.as_str(), "active" | "suspended") {
+        return Err(AppError(StatusCode::BAD_REQUEST,
+            "status must be \"active\" or \"suspended\"".into()));
+    }
+    let tenant = Tenant {
+        id:     tenant_id.clone(),
+        keys:   payload.keys.into_iter().map(|k| banditdb::tenancy::TenantKey {
+                    hash: k.hash, role: k.role, prefix: k.prefix,
+                }).collect(),
+        quotas: payload.quotas,
+        status: payload.status.clone(),
+        updated_at: 0,
+    };
+    let key_count = tenant.keys.len();
+    state.registry.upsert_tenant(tenant)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+
+    tracing::info!(tenant = %tenant_id, keys = key_count, status = %payload.status,
+        "tenant provisioned");
+    Ok(Json(TenantResponse { tenant_id, keys: key_count, status: payload.status }))
+}
+
+async fn handle_delete_tenant(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<&'static str>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    // Only the keys are revoked here. Campaign data under the `tenant/` namespace
+    // is deliberately left intact: deleting a tenant's models as a side effect of
+    // a credential change would make an accidental call unrecoverable.
+    let existed = state.registry.remove_tenant(&tenant_id)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !existed {
+        return Err(AppError(StatusCode::NOT_FOUND, format!("Tenant '{tenant_id}' not found")));
+    }
+    tracing::info!(tenant = %tenant_id, "tenant keys revoked");
+    Ok(Json("Tenant Removed"))
+}
+
+#[derive(Serialize)]
+struct TenantListResponse { tenants: Vec<String>, count: usize }
+
+async fn handle_list_tenants(State(state): State<Arc<AppState>>) -> Json<TenantListResponse> {
+    let tenants = state.registry.tenant_ids();
+    let count = tenants.len();
+    Json(TenantListResponse { tenants, count })
+}
+
+/// A tenant's effective quotas and current usage.
+///
+/// The console renders this directly, and every quota error names the same
+/// numbers, so a developer never has to guess why a create was refused.
+#[derive(Serialize)]
+struct LimitsResponse {
+    tenant_id:         Option<String>,
+    campaigns_used:    usize,
+    max_campaigns:     Option<usize>,
+    max_campaign_bytes: Option<u64>,
+    max_feature_dim:   Option<usize>,
+    rate_limit_per_sec: Option<u32>,
+}
+
+async fn handle_limits(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Json<LimitsResponse> {
+    let used = match &auth.tenant_id {
+        Some(t) => {
+            let prefix = format!("{t}/");
+            state.db.campaigns.read().keys().filter(|k| k.starts_with(&prefix)).count()
+        }
+        None => state.db.campaigns.read().len(),
+    };
+    let q = auth.tenant_id.as_ref().and_then(|t| state.registry.tenant_quotas(t));
+    Json(LimitsResponse {
+        tenant_id:          auth.tenant_id.clone(),
+        campaigns_used:     used,
+        max_campaigns:      q.as_ref().and_then(|q| q.max_campaigns),
+        max_campaign_bytes: q.as_ref().and_then(|q| q.max_campaign_bytes),
+        max_feature_dim:    q.as_ref().and_then(|q| q.max_feature_dim),
+        rate_limit_per_sec: q.as_ref().and_then(|q| q.rate_limit_per_sec),
+    })
+}
+
+/// Per-tenant quota check, run before the engine's instance-wide limits.
+///
+/// The engine protects the process and knows nothing about tenants; this is where
+/// business rules live, because the tenant boundary exists at the HTTP layer where
+/// `AuthContext` does.
+fn enforce_tenant_quotas(
+    state: &AppState,
+    auth:  &AuthContext,
+    feature_dim: usize,
+) -> Result<(), AppError> {
+    let Some(tenant_id) = &auth.tenant_id else { return Ok(()) };
+    let Some(q) = state.registry.tenant_quotas(tenant_id) else { return Ok(()) };
+
+    if let Some(max_dim) = q.max_feature_dim {
+        if feature_dim > max_dim {
+            return Err(AppError(StatusCode::FORBIDDEN, format!(
+                "feature_dim {feature_dim} exceeds your plan limit of {max_dim}"
+            )));
+        }
+    }
+    if let Some(max) = q.max_campaigns {
+        let prefix = format!("{tenant_id}/");
+        let used = state.db.campaigns.read().keys().filter(|k| k.starts_with(&prefix)).count();
+        if used >= max {
+            return Err(AppError(StatusCode::FORBIDDEN, format!(
+                "campaign limit reached: {used} of {max} used on your plan"
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn handle_add_arm(
@@ -1105,7 +1361,15 @@ async fn main() {
         }
     }
 
-    let registry = Arc::new(KeyRegistry::from_env());
+    let registry = Arc::new(match KeyRegistry::from_env_with_store(&data_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            // Same rule as a corrupt checkpoint: refuse to start rather than come
+            // up authenticating nobody and overwrite the evidence on first write.
+            eprintln!("FATAL: {e}");
+            std::process::exit(1);
+        }
+    });
 
     if registry.is_open() {
         // Open mode grants every caller Role::Admin. That is a reasonable default for
@@ -1217,7 +1481,8 @@ async fn main() {
         .route("/campaign/:id/report",      get(handle_campaign_report))
         .route("/campaign/:id/diagnostics", get(handle_campaign_diagnostics))
         .route("/health/detail",            get(handle_health_detail))
-        .route("/export",                   get(handle_export));
+        .route("/export",                   get(handle_export))
+        .route("/limits",                   get(handle_limits));
 
     let writer_routes = Router::new()
         .route("/predict",       post(handle_predict))
@@ -1243,6 +1508,17 @@ async fn main() {
         .layer(middleware::from_fn(|ext: Extension<AuthContext>, req: Request, next: Next| {
             require_role(Role::Admin, ext, req, next)
         }))
+        .with_state(Arc::clone(&admin_state));
+
+    // Provisioning routes sit OUTSIDE the API-key auth layer entirely: they are
+    // guarded by BANDITDB_PROVISION_KEY, a machine-to-machine credential held by
+    // the control plane. Keeping them off the tenant ladder means no tenant key,
+    // at any role, can reach them.
+    let provision_routes = Router::new()
+        .route("/admin/tenants",     get(handle_list_tenants))
+        .route("/admin/tenants/:id", axum::routing::put(handle_put_tenant)
+                                         .delete(handle_delete_tenant))
+        .layer(middleware::from_fn(require_provision_key))
         .with_state(Arc::clone(&admin_state));
 
     let protected = Router::new()
@@ -1291,6 +1567,11 @@ async fn main() {
         .route("/health",       get(handle_health))
         .route("/openapi.yaml", get(handle_openapi))
         .merge(metrics_route)
+        // Provisioning is merged OUTSIDE the API-key auth layer on purpose: it
+        // carries its own machine-to-machine credential, and routing it through
+        // the tenant auth layer would mean a tenant key was a prerequisite for
+        // creating tenants.
+        .merge(provision_routes)
         .merge(protected)
         .layer(cors)
         .layer(tower_http::trace::TraceLayer::new_for_http())
