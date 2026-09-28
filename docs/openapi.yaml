@@ -319,6 +319,7 @@ paths:
       responses:
         "200": { description: Campaign created }
         "400": { description: Validation error,   content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: "Instance limit reached — BANDITDB_MAX_CAMPAIGNS, or the campaign's estimated memory exceeds BANDITDB_MAX_CAMPAIGN_BYTES. The message names the limit and the current usage.", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "409": { description: Already exists,     content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /campaign/{id}:

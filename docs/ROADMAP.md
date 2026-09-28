@@ -90,11 +90,19 @@ add arms often.
 Carried forward from the gate review in PRODUCTION_STAGE1. Each is a deliberate
 boundary, recorded here so it stays visible.
 
-### No cap on campaign count
-`max_arms` and `max_feature_dim` are enforced per campaign, but the number of
-campaigns is unbounded — an admin key can create them until memory runs out. Stage 1
-assumes trusted admin credentials. Fix is a `BANDITDB_MAX_CAMPAIGNS` check in
-`add_campaign`.
+### ~~No cap on campaign count~~ — DONE
+
+`BANDITDB_MAX_CAMPAIGNS` (default 10,000) bounds the instance, and
+`BANDITDB_MAX_CAMPAIGN_BYTES` (default 0 = unlimited) bounds a single campaign's
+estimated footprint — count alone is a poor proxy, since the same number of campaigns
+can mean 30 KB or 10 GB depending on dimension and algorithm. Both are enforced on the
+create path only: recovery and WAL replay deliberately bypass them, so lowering a limit
+below what an instance already holds cannot make it unrecoverable.
+
+**Still open for multi-tenancy.** These are instance-wide, so in a pooled deployment
+they bound the host but do not stop one tenant from consuming the whole allowance —
+that becomes a cross-tenant denial of service rather than an OOM. Per-tenant budgets
+belong in the control plane; see [CLOUD_PLAN_REVIEW.md](CLOUD_PLAN_REVIEW.md).
 
 ### Promotion / rollback untested in CI
 The three Progressive tournament tests are `#[ignore]`d because candle 0.10.2 cannot
