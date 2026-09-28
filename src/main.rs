@@ -149,6 +149,10 @@ impl KeyRegistry {
 
     pub fn tenant_count(&self) -> usize { self.tenants.read().len() }
 
+    pub fn tenant_detail(&self, tenant_id: &str) -> Option<Tenant> {
+        self.tenants.read().detail(tenant_id)
+    }
+
     /// Authenticate in constant time — no branch on comparison result position.
     pub fn authenticate(&self, provided: &str) -> Option<AuthContext> {
         // Provisioned tenants are checked first only when the static list misses,
@@ -806,7 +810,7 @@ async fn handle_put_tenant(
     let tenant = Tenant {
         id:     tenant_id.clone(),
         keys:   payload.keys.into_iter().map(|k| banditdb::tenancy::TenantKey {
-                    hash: k.hash, role: k.role, prefix: k.prefix,
+                    hash: k.hash, role: k.role, prefix: k.prefix, last_used_at: 0,
                 }).collect(),
         quotas: payload.quotas,
         status: payload.status.clone(),
@@ -819,6 +823,80 @@ async fn handle_put_tenant(
     tracing::info!(tenant = %tenant_id, keys = key_count, status = %payload.status,
         "tenant provisioned");
     Ok(Json(TenantResponse { tenant_id, keys: key_count, status: payload.status }))
+}
+
+/// A tenant's keys and quotas, including live usage.
+///
+/// The console stores only key digests, so it cannot call the engine as a tenant.
+/// Rather than keep a decryptable copy of a tenant key — which would put working
+/// credentials in a second database — the console reads tenant data with the
+/// provisioning credential it already holds, and the engine does the namespace
+/// scoping. No tenant plaintext exists anywhere after mint time.
+async fn handle_get_tenant(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    let tenant = state.registry.tenant_detail(&tenant_id)
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Tenant '{tenant_id}' not found")))?;
+    Ok(Json(serde_json::json!({
+        "tenant_id": tenant.id,
+        "status":    tenant.status,
+        "quotas":    tenant.quotas,
+        "keys": tenant.keys.iter().map(|k| serde_json::json!({
+            "role":         k.role,
+            "prefix":       k.prefix,
+            // 0 means never authenticated since the engine last loaded its store.
+            "last_used_at": k.last_used_at,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// Campaigns belonging to one tenant, with the namespace prefix stripped.
+async fn handle_tenant_campaigns(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<Vec<CampaignSummary>>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    let prefix = format!("{tenant_id}/");
+    let campaigns = state.db.campaigns.read();
+    let mut list: Vec<CampaignSummary> = campaigns.iter()
+        .filter(|(id, _)| id.starts_with(&prefix))
+        .map(|(id, c)| CampaignSummary {
+            campaign_id: id[prefix.len()..].to_string(),
+            alpha:       c.alpha,
+            algorithm:   c.algorithm.clone(),
+            arm_count:   c.arms.read().len(),
+            archived:    c.archived.load(Ordering::Relaxed),
+            metadata:    c.metadata.clone(),
+        })
+        .collect();
+    list.sort_by(|a, b| a.campaign_id.cmp(&b.campaign_id));
+    Ok(Json(list))
+}
+
+async fn handle_tenant_campaign_report(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_id, campaign_id)): Path<(String, String)>,
+) -> Result<Json<CampaignReport>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    validate_id(&campaign_id, "campaign_id")?;
+    let mut report = state.db.campaign_report(&format!("{tenant_id}/{campaign_id}"))
+        .map_err(map_engine_err)?;
+    report.campaign_id = campaign_id;          // hide the namespace from the console
+    Ok(Json(report))
+}
+
+async fn handle_tenant_campaign_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_id, campaign_id)): Path<(String, String)>,
+) -> Result<Json<banditdb::state::CampaignDiagnosticsData>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    validate_id(&campaign_id, "campaign_id")?;
+    let mut diag = state.db.campaign_diagnostics(&format!("{tenant_id}/{campaign_id}"))
+        .map_err(map_engine_err)?;
+    diag.campaign_id = campaign_id;
+    Ok(Json(diag))
 }
 
 async fn handle_delete_tenant(
@@ -1517,7 +1595,12 @@ async fn main() {
     let provision_routes = Router::new()
         .route("/admin/tenants",     get(handle_list_tenants))
         .route("/admin/tenants/:id", axum::routing::put(handle_put_tenant)
-                                         .delete(handle_delete_tenant))
+                                         .delete(handle_delete_tenant)
+                                         .get(handle_get_tenant))
+        .route("/admin/tenants/:id/campaigns", get(handle_tenant_campaigns))
+        .route("/admin/tenants/:id/campaigns/:campaign/report", get(handle_tenant_campaign_report))
+        .route("/admin/tenants/:id/campaigns/:campaign/diagnostics",
+               get(handle_tenant_campaign_diagnostics))
         .layer(middleware::from_fn(require_provision_key))
         .with_state(Arc::clone(&admin_state));
 

@@ -300,3 +300,59 @@ fn removing_a_tenant_revokes_keys_but_keeps_data() {
     let (_, body) = srv.get("/campaigns", Some(key)).unwrap();
     assert!(body.contains("data"), "re-provisioning must restore access: {body}");
 }
+
+/// The console reads tenant data with the provisioning credential, because it
+/// holds only key digests and must never hold a usable tenant key.
+#[test]
+fn console_can_read_tenant_data_without_a_tenant_key() {
+    let srv = server_or_skip!(18410, "/tmp/bdb_provision_9", true);
+    let key = "BDBconsole00000000000000000000000";
+    srv.provision("PUT", "/admin/tenants/org_console",
+        Some(&tenant_body(key, "BDBconsolewriter000000000", 5))).unwrap();
+    srv.post_key("/campaign", key,
+        r#"{"campaign_id":"checkout","arms":["a","b"],"feature_dim":4}"#).unwrap();
+
+    // Campaign list, with the namespace stripped for display.
+    let (status, body) = srv.provision("GET", "/admin/tenants/org_console/campaigns", None).unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("\"campaign_id\":\"checkout\""),
+        "the console must see the campaign under its bare name: {body}");
+    assert!(!body.contains("org_console/checkout"),
+        "the namespace prefix must not leak into the console view: {body}");
+
+    // Report and diagnostics for one campaign.
+    let (status, body) = srv.provision("GET",
+        "/admin/tenants/org_console/campaigns/checkout/report", None).unwrap();
+    assert_eq!(status, 200, "report must be readable: {body}");
+    assert!(body.contains("\"campaign_id\":\"checkout\""));
+
+    let (status, body) = srv.provision("GET",
+        "/admin/tenants/org_console/campaigns/checkout/diagnostics", None).unwrap();
+    assert_eq!(status, 200, "diagnostics must be readable: {body}");
+    assert!(body.contains("selection_entropy"));
+
+    // One tenant's credential cannot read another's data through these routes,
+    // because they are not reachable with a tenant key at all.
+    assert_eq!(
+        srv.request("GET", "/admin/tenants/org_console/campaigns",
+                    &[("X-Api-Key", key)], None).unwrap().0,
+        401, "a tenant key must not reach the console read routes");
+}
+
+/// Key usage is recorded, so the console can stop claiming "never used".
+#[test]
+fn key_usage_is_reported() {
+    let srv = server_or_skip!(18411, "/tmp/bdb_provision_10", true);
+    let key = "BDBusage0000000000000000000000000";
+    srv.provision("PUT", "/admin/tenants/org_usage",
+        Some(&tenant_body(key, "BDBusagewriter00000000000", 5))).unwrap();
+
+    let (_, before) = srv.provision("GET", "/admin/tenants/org_usage", None).unwrap();
+    assert!(before.contains("\"last_used_at\":0"), "a fresh key must read as never used: {before}");
+
+    srv.get("/campaigns", Some(key)).unwrap();          // authenticate once
+
+    let (_, after) = srv.provision("GET", "/admin/tenants/org_usage", None).unwrap();
+    assert!(!after.contains("\"last_used_at\":0") || after.matches("\"last_used_at\":0").count() < 2,
+        "the used key must record a timestamp: {after}");
+}

@@ -32,6 +32,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 /// Quotas a control plane assigns to a tenant. Stored here so the engine can
@@ -61,6 +63,14 @@ pub struct TenantKey {
     /// not used for authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// Unix seconds of the last successful authentication, 0 for never.
+    ///
+    /// Updated in memory on every authentication and written out whenever the
+    /// store is persisted for another reason, so it is *best effort*: a restart
+    /// loses usage since the last write. That is an acceptable trade for not
+    /// touching the disk on the authentication path.
+    #[serde(default)]
+    pub last_used_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -107,8 +117,11 @@ struct StoreFile {
 #[derive(Debug, Default)]
 pub struct TenantStore {
     tenants: HashMap<String, Tenant>,
-    /// key digest → (tenant id, role). Rebuilt whenever tenants change.
-    index:   HashMap<String, (String, String)>,
+    /// key digest → (tenant id, role, last-used clock). Rebuilt whenever tenants
+    /// change. The clock is an `Arc<AtomicU64>` so authentication can record use
+    /// under a read lock — taking a write lock per request would serialise the
+    /// whole auth path.
+    index:   HashMap<String, (String, String, Arc<AtomicU64>)>,
     path:    Option<PathBuf>,
 }
 
@@ -138,15 +151,40 @@ impl TenantStore {
     }
 
     fn reindex(&mut self) {
+        // Preserve in-memory usage across a reindex: an upsert that rewrites a
+        // tenant's keys must not reset the clock on keys that still exist.
+        let previous: HashMap<String, Arc<AtomicU64>> = self.index.iter()
+            .map(|(hash, (_, _, clock))| (hash.clone(), Arc::clone(clock)))
+            .collect();
+
         self.index.clear();
         for t in self.tenants.values() {
             for k in &t.keys {
-                self.index.insert(k.hash.to_lowercase(), (t.id.clone(), k.role.clone()));
+                let hash = k.hash.to_lowercase();
+                let clock = previous.get(&hash)
+                    .map(Arc::clone)
+                    .unwrap_or_else(|| Arc::new(AtomicU64::new(k.last_used_at)));
+                self.index.insert(hash, (t.id.clone(), k.role.clone(), clock));
             }
         }
     }
 
-    fn persist(&self) -> Result<(), String> {
+    /// Fold in-memory usage back onto the tenants before they are serialised.
+    fn sync_last_used(&mut self) {
+        let seen: HashMap<String, u64> = self.index.iter()
+            .map(|(hash, (_, _, clock))| (hash.clone(), clock.load(Ordering::Relaxed)))
+            .collect();
+        for t in self.tenants.values_mut() {
+            for k in &mut t.keys {
+                if let Some(&used) = seen.get(&k.hash.to_lowercase()) {
+                    k.last_used_at = k.last_used_at.max(used);
+                }
+            }
+        }
+    }
+
+    fn persist(&mut self) -> Result<(), String> {
+        self.sync_last_used();
         let Some(path) = &self.path else { return Ok(()) };
         let mut tenants: Vec<&Tenant> = self.tenants.values().collect();
         tenants.sort_by(|a, b| a.id.cmp(&b.id));      // stable file, readable diffs
@@ -186,7 +224,7 @@ impl TenantStore {
         // Reject a digest already claimed by a different tenant: whoever presented
         // that key would otherwise authenticate as whichever tenant indexed last.
         for k in &tenant.keys {
-            if let Some((owner, _)) = self.index.get(&k.hash.to_lowercase()) {
+            if let Some((owner, _, _)) = self.index.get(&k.hash.to_lowercase()) {
                 if owner != &tenant.id {
                     return Err(format!("key already assigned to tenant '{owner}'"));
                 }
@@ -210,9 +248,21 @@ impl TenantStore {
     /// Authenticate a presented key. O(1) in the number of tenants.
     pub fn authenticate(&self, presented: &str) -> Option<KeyMatch> {
         let digest = hash_key(presented);
-        let (tenant_id, role) = self.index.get(&digest)?;
+        let (tenant_id, role, clock) = self.index.get(&digest)?;
+        clock.store(now_secs(), Ordering::Relaxed);
         let active = self.tenants.get(tenant_id).map(|t| t.is_active()).unwrap_or(false);
         Some(KeyMatch { tenant_id: tenant_id.clone(), role: role.clone(), active })
+    }
+
+    /// A tenant with live usage folded in, for the console's key list.
+    pub fn detail(&self, tenant_id: &str) -> Option<Tenant> {
+        let mut t = self.tenants.get(tenant_id)?.clone();
+        for k in &mut t.keys {
+            if let Some((_, _, clock)) = self.index.get(&k.hash.to_lowercase()) {
+                k.last_used_at = k.last_used_at.max(clock.load(Ordering::Relaxed));
+            }
+        }
+        Some(t)
     }
 
     pub fn get(&self, tenant_id: &str) -> Option<&Tenant> { self.tenants.get(tenant_id) }
