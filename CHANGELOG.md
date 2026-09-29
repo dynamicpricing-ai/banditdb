@@ -29,6 +29,18 @@ Two behaviours worth knowing:
   message naming suspension, so a lapsed subscription reads as "suspended" rather
   than "bad key".
 
+A tenant's footprint is bounded by **bytes**, not campaign count:
+`max_campaign_bytes` is now enforced as a cumulative budget across all of a
+tenant's campaigns, using the same `campaign_memory_estimate` the instance-wide
+ceiling uses. Count alone is a poor proxy — the same number of campaigns can mean
+kilobytes or gigabytes — and the budget also gates neural campaigns without a
+separate rule, since a 256-dimensional neural campaign reserves ~105 MB for its
+replay buffer and simply will not fit a small plan.
+
+The figure is a *reservation*, not a measurement: a replay buffer is counted full
+from day one, because admission control reserves the capacity a campaign grows
+into rather than sampling what it occupies today.
+
 An engine with `BANDITDB_PROVISION_KEY` set never falls back to open access. The
 registry treats "no keys configured at all" as open mode for local development,
 and a control-plane-managed engine matches that description between boot and its

@@ -703,7 +703,7 @@ async fn handle_create_campaign(
             format!("feature_dim {arm_dim} exceeds BANDITDB_MAX_FEATURE_DIM={}", state.db.max_feature_dim)));
     }
 
-    enforce_tenant_quotas(&state, &auth, arm_dim)?;
+    enforce_tenant_quotas(&state, &auth, payload.arms.len(), arm_dim, &payload.algorithm)?;
 
     state.db.add_campaign(
         &ns(&auth, &payload.campaign_id),
@@ -980,18 +980,44 @@ async fn handle_limits(
 /// The engine protects the process and knows nothing about tenants; this is where
 /// business rules live, because the tenant boundary exists at the HTTP layer where
 /// `AuthContext` does.
+/// Memory a tenant's existing campaigns reserve, in bytes.
+///
+/// "Reserved" rather than "used": `campaign_memory_estimate` counts a neural
+/// replay buffer as full from day one. That is deliberate for admission control —
+/// the budget reserves the capacity a campaign will grow into, rather than
+/// measuring what it occupies right now — but it means this reads higher than the
+/// process's actual resident size, and the console says so.
+fn tenant_reserved_bytes(state: &AppState, tenant_id: &str) -> u64 {
+    let prefix = format!("{tenant_id}/");
+    state.db.campaigns.read().iter()
+        .filter(|(id, _)| id.starts_with(&prefix))
+        .map(|(_, campaign)| {
+            let arms = campaign.arms.read();
+            let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+            banditdb::engine::campaign_memory_estimate(arms.len(), arm_dim, &campaign.algorithm)
+        })
+        .sum()
+}
+
+/// Per-tenant quota check, run before the engine's instance-wide limits.
+///
+/// The engine protects the process and knows nothing about tenants; this is where
+/// business rules live, because the tenant boundary exists at the HTTP layer where
+/// `AuthContext` does.
 fn enforce_tenant_quotas(
     state: &AppState,
     auth:  &AuthContext,
-    feature_dim: usize,
+    arms:  usize,
+    arm_dim: usize,
+    algorithm: &Algorithm,
 ) -> Result<(), AppError> {
     let Some(tenant_id) = &auth.tenant_id else { return Ok(()) };
     let Some(q) = state.registry.tenant_quotas(tenant_id) else { return Ok(()) };
 
     if let Some(max_dim) = q.max_feature_dim {
-        if feature_dim > max_dim {
+        if arm_dim > max_dim {
             return Err(AppError(StatusCode::FORBIDDEN, format!(
-                "feature_dim {feature_dim} exceeds your plan limit of {max_dim}"
+                "feature_dim {arm_dim} exceeds your plan limit of {max_dim}"
             )));
         }
     }
@@ -1001,6 +1027,23 @@ fn enforce_tenant_quotas(
         if used >= max {
             return Err(AppError(StatusCode::FORBIDDEN, format!(
                 "campaign limit reached: {used} of {max} used on your plan"
+            )));
+        }
+    }
+    // Byte budget. This is what actually bounds a tenant's footprint: campaign
+    // count is a poor proxy, since the same count can mean kilobytes or
+    // gigabytes. It also gates neural campaigns without a separate rule — a
+    // 256-dimensional neural campaign reserves ~105 MB for its replay buffer, so
+    // a small plan refuses it on arithmetic alone.
+    if let Some(budget) = q.max_campaign_bytes {
+        let reserved = tenant_reserved_bytes(state, tenant_id);
+        let wanted = banditdb::engine::campaign_memory_estimate(arms, arm_dim, algorithm);
+        if reserved + wanted > budget {
+            let mb = |b: u64| b as f64 / 1_048_576.0;
+            return Err(AppError(StatusCode::FORBIDDEN, format!(
+                "memory budget exceeded: this campaign reserves {:.1} MB, you have \
+                 {:.1} MB of {:.1} MB left on your plan",
+                mb(wanted), mb(budget.saturating_sub(reserved)), mb(budget)
             )));
         }
     }

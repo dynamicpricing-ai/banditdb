@@ -104,10 +104,17 @@ fn hash(key: &str) -> String {
 }
 
 fn tenant_body(admin: &str, writer: &str, max_campaigns: usize) -> String {
+    tenant_body_with_bytes(admin, writer, max_campaigns, None)
+}
+
+fn tenant_body_with_bytes(
+    admin: &str, writer: &str, max_campaigns: usize, max_bytes: Option<u64>,
+) -> String {
+    let bytes = max_bytes.map(|b| format!(r#","max_campaign_bytes":{b}"#)).unwrap_or_default();
     format!(
         r#"{{"keys":[{{"hash":"{}","role":"admin","prefix":"{}"}},
                      {{"hash":"{}","role":"writer"}}],
-            "quotas":{{"max_campaigns":{max_campaigns},"max_feature_dim":64}},
+            "quotas":{{"max_campaigns":{max_campaigns},"max_feature_dim":512{bytes}}},
             "status":"active"}}"#,
         hash(admin), &admin[..8.min(admin.len())], hash(writer)
     )
@@ -400,4 +407,53 @@ fn a_provisioned_engine_is_never_open() {
     assert_eq!(srv.provision("PUT", "/admin/tenants/org_open",
         Some(&tenant_body(key, "BDBopenwriter00000000000000", 5))).unwrap().0, 200);
     assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200);
+}
+
+/// A tenant's footprint is bounded by bytes, not by campaign count.
+///
+/// Count is a poor proxy — the same number of campaigns can mean kilobytes or
+/// gigabytes — so the budget is what actually protects a shared host.
+#[test]
+fn tenant_memory_budget_is_enforced() {
+    let srv = server_or_skip!(18413, "/tmp/bdb_provision_bytes", true);
+    let key = "BDBbytes0000000000000000000000000";
+
+    // 2 MB: room for a few small campaigns, nowhere near a wide one.
+    srv.provision("PUT", "/admin/tenants/org_bytes",
+        Some(&tenant_body_with_bytes(key, "BDBbyteswriter000000000000", 50, Some(2 * 1024 * 1024))))
+        .unwrap();
+
+    // 10 arms at d=16 ≈ 10 × 8 × 256 ≈ 20 KB.
+    let small = r#"{"campaign_id":"small","arms":["a","b","c","d","e","f","g","h","i","j"],"feature_dim":16}"#;
+    assert_eq!(srv.post_key("/campaign", key, small).unwrap().0, 200,
+        "a small campaign must fit");
+
+    // 40 arms at d=256 ≈ 40 × 8 × 65536 ≈ 21 MB — over budget on its own.
+    let wide: String = format!(
+        r#"{{"campaign_id":"wide","arms":[{}],"feature_dim":256}}"#,
+        (0..40).map(|i| format!("\"a{i}\"")).collect::<Vec<_>>().join(","));
+    let (status, body) = srv.post_key("/campaign", key, &wide).unwrap();
+    assert_eq!(status, 403, "a campaign over the byte budget must be refused");
+    assert!(body.contains("MB"), "the error must be stated in MB: {body}");
+    assert!(body.to_lowercase().contains("budget"), "and name the budget: {body}");
+
+    // The budget is cumulative, not per campaign: enough small campaigns must
+    // eventually exhaust it even though each one fits comfortably.
+    let mut refused_at = None;
+    for i in 0..40 {
+        let body = format!(
+            r#"{{"campaign_id":"fill{i}","arms":[{}],"feature_dim":128}}"#,
+            (0..12).map(|j| format!("\"a{j}\"")).collect::<Vec<_>>().join(","));
+        if srv.post_key("/campaign", key, &body).unwrap().0 == 403 {
+            refused_at = Some(i);
+            break;
+        }
+    }
+    assert!(refused_at.is_some(),
+        "the budget must accumulate across campaigns, not reset for each one");
+
+    // Campaign count was never the binding limit here — the plan allowed 50.
+    let (_, listed) = srv.get("/campaigns", Some(key)).unwrap();
+    assert!(listed.matches("campaign_id").count() < 50,
+        "bytes should bind before the count limit does");
 }
