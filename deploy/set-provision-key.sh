@@ -23,6 +23,7 @@
 set -euo pipefail
 
 ENV_FILE=/etc/banditdb/banditdb.env
+SOURCE_URL="${SOURCE_URL:-https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main}"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 1; }
 [ -f "$ENV_FILE" ] || { echo "$ENV_FILE not found — run setup-vm.sh first"; exit 1; }
@@ -40,11 +41,15 @@ if [ "${1:-}" = "--show" ]; then
 fi
 
 if [ -n "$(current)" ]; then
+  # Not "$0": this script is normally piped from curl, where $0 is "bash" and
+  # printing it produces an instruction that does nothing.
+  SELF="curl -fsSL ${SOURCE_URL}/deploy/set-provision-key.sh | sudo bash"
   echo "A key is already set. Rotating it breaks provisioning until the console"
-  echo "has the new value too. To go ahead:"
+  echo "has the new value too, and needs a restart to take effect. To go ahead:"
   echo
   echo "    sudo sed -i 's/^BANDITDB_PROVISION_KEY=.*/BANDITDB_PROVISION_KEY=/' $ENV_FILE"
-  echo "    sudo $0"
+  echo "    $SELF"
+  echo "    sudo systemctl restart banditdb"
   exit 1
 fi
 
