@@ -29,6 +29,12 @@ Two behaviours worth knowing:
   message naming suspension, so a lapsed subscription reads as "suspended" rather
   than "bad key".
 
+An engine with `BANDITDB_PROVISION_KEY` set never falls back to open access. The
+registry treats "no keys configured at all" as open mode for local development,
+and a control-plane-managed engine matches that description between boot and its
+first signup — which would have granted admin to anonymous callers during exactly
+the window a freshly deployed node is most exposed.
+
 Per-key usage is tracked in memory and written out when the store is persisted for
 another reason — best effort by design, since recording it on disk per request
 would put a write on the authentication path.

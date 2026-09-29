@@ -84,6 +84,14 @@ pub struct KeyRegistry {
     /// restart. Env keys are checked first so a local operator key keeps working
     /// even if the store is empty or unreadable.
     tenants:     RwLock<TenantStore>,
+    /// True when BANDITDB_PROVISION_KEY is configured, i.e. a control plane owns
+    /// this engine's tenants.
+    ///
+    /// Such an engine must never fall back to open access, even with no tenants
+    /// yet. That is precisely the state a freshly deployed node is in before its
+    /// first tenant is provisioned, and granting admin to anonymous callers
+    /// during that window would be a hole no operator expects.
+    provisioned: bool,
 }
 
 impl KeyRegistry {
@@ -122,7 +130,10 @@ impl KeyRegistry {
             }
         }
 
-        Self { keys, tenant_mode, tenants: RwLock::new(TenantStore::new()) }
+        let provisioned = std::env::var("BANDITDB_PROVISION_KEY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        Self { keys, tenant_mode, tenants: RwLock::new(TenantStore::new()), provisioned }
     }
 
     /// Same as `from_env`, plus the tenant store persisted in `data_dir`.
@@ -155,10 +166,10 @@ impl KeyRegistry {
 
     /// Authenticate in constant time — no branch on comparison result position.
     pub fn authenticate(&self, provided: &str) -> Option<AuthContext> {
-        // Provisioned tenants are checked first only when the static list misses,
-        // below; this early return keeps "no auth configured at all" meaning open
-        // access, which several local workflows depend on.
-        if self.keys.is_empty() && self.tenants.read().is_empty() {
+        // "No auth configured at all" means open access, which several local
+        // workflows depend on — but never on an engine a control plane manages,
+        // whose tenant list is empty only until the first signup.
+        if !self.provisioned && self.keys.is_empty() && self.tenants.read().is_empty() {
             return Some(AuthContext { role: Role::Admin, tenant_id: None });
         }
         let presented = provided;                 // keep the &str for the digest lookup
@@ -205,7 +216,7 @@ impl KeyRegistry {
         Some(AuthContext { role, tenant_id: Some(matched.tenant_id) })
     }
 
-    pub fn is_open(&self) -> bool { self.keys.is_empty() }
+    pub fn is_open(&self) -> bool { self.keys.is_empty() && !self.provisioned }
     pub fn key_count(&self) -> usize { self.keys.len() }
 }
 

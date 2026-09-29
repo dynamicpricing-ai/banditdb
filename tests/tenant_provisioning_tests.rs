@@ -356,3 +356,48 @@ fn key_usage_is_reported() {
     assert!(!after.contains("\"last_used_at\":0") || after.matches("\"last_used_at\":0").count() < 2,
         "the used key must record a timestamp: {after}");
 }
+
+/// An engine a control plane manages must never fall back to open access.
+///
+/// With no static keys and no tenants yet, the registry's "nothing configured
+/// means open" rule would grant admin to anonymous callers — and that is exactly
+/// the state a freshly deployed node is in between boot and its first signup.
+#[test]
+fn a_provisioned_engine_is_never_open() {
+    let srv = {
+        let bin = env!("CARGO_BIN_EXE_banditdb");
+        let dir = "/tmp/bdb_provision_open";
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).ok();
+        // Provisioning configured, NO BANDITDB_API_KEYS, no tenants yet.
+        let child = Command::new(bin)
+            .env("DATA_DIR", dir).env("PORT", "18412")
+            .env("BANDITDB_PROVISION_KEY", PROVISION_KEY)
+            .env_remove("BANDITDB_API_KEYS").env_remove("BANDITDB_API_KEY")
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().ok();
+        let Some(child) = child else { eprintln!("SKIPPED: spawn failed"); return };
+        let srv = Server { child, port: 18412 };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if matches!(srv.get("/health", None), Some((200, _))) { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        srv
+    };
+
+    assert_eq!(srv.get("/campaigns", None).unwrap().0, 401,
+        "an anonymous caller must not be admitted");
+    assert_eq!(srv.get("/campaigns", Some("anything-at-all")).unwrap().0, 401,
+        "an arbitrary key must not be admitted");
+    assert_eq!(
+        srv.post_key("/campaign", "anything-at-all",
+            r#"{"campaign_id":"x","arms":["a","b"],"feature_dim":4}"#).unwrap().0,
+        401, "and certainly must not be able to create campaigns");
+
+    // Provisioning still works, and its tenant then authenticates normally.
+    let key = "BDBopencheck0000000000000000000000";
+    assert_eq!(srv.provision("PUT", "/admin/tenants/org_open",
+        Some(&tenant_body(key, "BDBopenwriter00000000000000", 5))).unwrap().0, 200);
+    assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200);
+}
