@@ -519,6 +519,22 @@ pub struct BanditDB {
     /// Upper bound on the number of arms per campaign.
     /// Env: BANDITDB_MAX_ARMS (default 1000).
     pub max_arms:         usize,
+    /// Upper bound on the number of campaigns this instance will create.
+    ///
+    /// `max_arms` and `max_feature_dim` bound one campaign; nothing bounded how
+    /// many of them exist, so a client loop — a retrying job, a test suite pointed
+    /// at the wrong host — could create campaigns until the process ran out of
+    /// memory. Env: BANDITDB_MAX_CAMPAIGNS (default 10_000).
+    pub max_campaigns:    usize,
+    /// Upper bound on the estimated steady-state memory of a single campaign.
+    ///
+    /// Campaign count is a poor proxy for cost: two arms at d=4 is ~300 bytes,
+    /// while six arms over a 256-dimensional neural embedding is ~105 MB, almost
+    /// all of it replay buffer. Because arms, dimension and algorithm are all fixed
+    /// at creation, the steady-state footprint is exactly computable up front —
+    /// see `campaign_memory_estimate`. Env: BANDITDB_MAX_CAMPAIGN_BYTES
+    /// (default 0 = unlimited, preserving pre-existing behaviour).
+    pub max_campaign_bytes: u64,
     /// Largest absolute value accepted in a context vector.
     ///
     /// Finiteness alone is not enough. `update()` forms `x·A⁻¹·x` and an outer
@@ -825,6 +841,14 @@ impl BanditDB {
         let max_context_magnitude: f64 = std::env::var("BANDITDB_MAX_CONTEXT_MAGNITUDE")
             .ok().and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite() && *v > 0.0)
             .unwrap_or(1e6);
+        let max_campaigns: usize = std::env::var("BANDITDB_MAX_CAMPAIGNS")
+            .ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(10_000);
+        // 0 disables the per-campaign size check. Defaulting to unlimited keeps
+        // existing deployments working unchanged: a limit that rejects campaigns an
+        // operator has already been creating would be a breaking change shipped as a
+        // default.
+        let max_campaign_bytes: u64 = std::env::var("BANDITDB_MAX_CAMPAIGN_BYTES")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
 
         // Ceiling on pending (predicted, not yet rewarded) interactions.
         //
@@ -894,6 +918,8 @@ impl BanditDB {
             data_dir:             data_dir.to_string(),
             max_feature_dim,
             max_arms,
+            max_campaigns,
+            max_campaign_bytes,
             max_context_magnitude,
             wal_healthy,
             wal_dropped:          AtomicU64::new(0),
@@ -1666,8 +1692,23 @@ impl BanditDB {
         metadata:             Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
     ) -> Result<(), EngineError> {
-        if self.campaigns.read().contains_key(campaign_id) {
-            return Err(EngineError::AlreadyExists(format!("Campaign '{campaign_id}' already exists")));
+        // Admission control runs on the create path ONLY. Recovery and WAL replay
+        // deliberately bypass it — see `apply_event_to_memory`. Lowering a limit
+        // below what a checkpoint already holds must not make an instance
+        // unrecoverable, and v2 refuses to start rather than come up empty, so a
+        // limit enforced during recovery would turn a config edit into an outage.
+        {
+            let campaigns = self.campaigns.read();
+            if campaigns.contains_key(campaign_id) {
+                return Err(EngineError::AlreadyExists(format!("Campaign '{campaign_id}' already exists")));
+            }
+            if campaigns.len() >= self.max_campaigns {
+                return Err(EngineError::LimitExceeded(format!(
+                    "campaign limit reached: {} of {} campaigns exist — \
+                     BANDITDB_MAX_CAMPAIGNS={}. Delete or archive a campaign, or raise the limit",
+                    campaigns.len(), self.max_campaigns, self.max_campaigns
+                )));
+            }
         }
         // A non-finite alpha makes every score NaN from the first prediction; a
         // negative one inverts exploration into a penalty on uncertainty.
@@ -1684,6 +1725,22 @@ impl BanditDB {
             }
         }
         Self::validate_algorithm(&algorithm, self.max_feature_dim)?;
+
+        // Size check. Campaign count alone is a poor bound: the same count can mean
+        // 30 KB or 10 GB depending on dimension and algorithm.
+        if self.max_campaign_bytes > 0 {
+            let estimate = campaign_memory_estimate(arms.len(), feature_dim, &algorithm);
+            if estimate > self.max_campaign_bytes {
+                return Err(EngineError::LimitExceeded(format!(
+                    "campaign '{campaign_id}' needs an estimated {:.1} MB of memory, \
+                     over the {:.1} MB per-campaign limit (BANDITDB_MAX_CAMPAIGN_BYTES). \
+                     Reduce arms ({}), dimension ({}), or the replay buffer",
+                    estimate as f64 / 1_048_576.0,
+                    self.max_campaign_bytes as f64 / 1_048_576.0,
+                    arms.len(), feature_dim
+                )));
+            }
+        }
         let event = Arc::new(DbEvent::CampaignCreated {
             campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
@@ -2726,6 +2783,63 @@ fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize)
 
 /// Normalised Shannon entropy of an arm selection distribution (0 = collapsed, 1 = uniform).
 /// Returns 1.0 when there are fewer than two arms or no predictions yet.
+/// Estimated steady-state memory of a campaign, in bytes.
+///
+/// Every input is fixed at creation — arms, arm dimension, algorithm — so this is a
+/// computed footprint rather than a prediction, which is what makes admission
+/// control on size possible at all.
+///
+/// Terms:
+/// * per arm, `A⁻¹` (d×d) plus `b` and `θ` (d each), doubled for Thompson sampling
+///   because the Cholesky factor is cached, and doubled again for Progressive
+///   because base and challenger each keep a full arm map;
+/// * the MLP for neural algorithms, counted three times over for the live VarMap,
+///   the published snapshot, and gradients;
+/// * the replay buffer, which at 50k entries over a 256-dimensional context is
+///   ~105 MB and dominates everything else in a neural campaign.
+///
+/// Deliberately an over-estimate where it is uncertain: admission control that
+/// under-counts lets in the campaign that exhausts the host.
+pub fn campaign_memory_estimate(arms: usize, arm_dim: usize, algorithm: &Algorithm) -> u64 {
+    let d = arm_dim as u64;
+    let per_arm = 8 * d * d + 16 * d + 64;
+
+    let (is_ts, neural_cfg, is_progressive) = match algorithm {
+        Algorithm::ThompsonSampling => (true, None, false),
+        Algorithm::NeuralThompsonSampling(cfg) => (true, Some(cfg), false),
+        Algorithm::NeuralLinUCB(cfg) => (false, Some(cfg), false),
+        Algorithm::Progressive(cfg) => {
+            let challenger_neural = match cfg.challenger.as_ref() {
+                Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => Some(c),
+                _ => None,
+            };
+            let ts = matches!(cfg.base.as_ref(), Algorithm::ThompsonSampling)
+                || matches!(cfg.challenger.as_ref(), Algorithm::ThompsonSampling);
+            (ts, challenger_neural, true)
+        }
+        Algorithm::Linucb => (false, None, false),
+    };
+
+    let mut total = arms as u64 * per_arm;
+    if is_ts          { total *= 2; }
+    if is_progressive { total *= 2; }
+
+    if let Some(cfg) = neural_cfg {
+        let (ctx, h, layers, embed) = (
+            cfg.context_dim as u64, cfg.hidden_dim as u64,
+            cfg.hidden_layers as u64, cfg.embed_dim as u64,
+        );
+        let params = ctx * h + h * h * layers.saturating_sub(1) + h * embed;
+        total += params * 4 * 3;
+
+        let buffer_cap: u64 = std::env::var("BANDITDB_NEURAL_BUFFER_CAP")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+        total += buffer_cap * (8 * ctx + 70);
+    }
+
+    total
+}
+
 /// Turn a [`WarmStart`] request into the concrete prior stored in the WAL.
 ///
 /// The borrowed mean is the arithmetic mean of the source arms' θ. Arms that have

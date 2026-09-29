@@ -22,6 +22,11 @@ pub enum EngineError {
     WalFull,
     WalUnavailable,
     BadRequest(String),
+    /// A configured quota refused the request. Distinct from `BadRequest`: the
+    /// request is well formed and would succeed against an instance with more
+    /// headroom, so the caller needs the limit and the current usage, not a
+    /// validation message.
+    LimitExceeded(String),
     Internal(String),
 }
 
@@ -34,6 +39,7 @@ impl std::fmt::Display for EngineError {
             EngineError::WalFull          => write!(f, "wal:full — server is busy, retry momentarily"),
             EngineError::WalUnavailable   => write!(f, "wal:unavailable — storage error, check server logs"),
             EngineError::BadRequest(m)    => write!(f, "{m}"),
+            EngineError::LimitExceeded(m) => write!(f, "{m}"),
             EngineError::Internal(m)      => write!(f, "{m}"),
         }
     }

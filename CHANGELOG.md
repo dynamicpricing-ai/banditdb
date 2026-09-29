@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — Campaign admission control
+
+Closes the "no cap on campaign count" gap from `docs/ROADMAP.md`.
+
+- **`BANDITDB_MAX_CAMPAIGNS`** (default 10,000) bounds how many campaigns an instance
+  will create. Previously unbounded: a retrying client or a test suite pointed at the
+  wrong host could create campaigns until the process ran out of memory.
+- **`BANDITDB_MAX_CAMPAIGN_BYTES`** (default 0 = unlimited) bounds one campaign's
+  estimated steady-state memory. Count is a poor proxy for cost — two arms at d=4 is
+  ~300 bytes, six arms over a 256-dimensional neural embedding is ~105 MB, nearly all
+  replay buffer. Because arms, dimension and algorithm are fixed at creation, the
+  footprint is computed exactly rather than estimated.
+- Both return **403** with the limit and the current usage named, via a new
+  `EngineError::LimitExceeded`.
+
+Enforced on the create path only. Recovery and WAL replay bypass both checks by
+design, so lowering a limit below what an instance already holds cannot make it
+unrecoverable. Archived campaigns still count, because their state stays resident.
+
+Defaults are chosen to change no existing behaviour: the size ceiling is off, and
+10,000 campaigns is far above any current deployment.
+
 ## Unreleased — Dynamic arms
 
 Arms are no longer fixed at campaign creation.

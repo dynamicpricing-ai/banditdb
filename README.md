@@ -181,6 +181,8 @@ services:
       # - BANDITDB_EXPORT_RETAIN_SHARDS=50     # Parquet shards kept per campaign (0 = keep all)
       # - BANDITDB_MAX_PENDING_INTERACTIONS=100000  # cache ceiling; evictions lose reward matching
       # - BANDITDB_MAX_CONTEXT_MAGNITUDE=1e6   # reject context values that overflow the update
+      # - BANDITDB_MAX_CAMPAIGNS=10000         # instance-wide campaign ceiling
+      # - BANDITDB_MAX_CAMPAIGN_BYTES=0        # per-campaign memory ceiling, 0 = unlimited
       # --- neural builds only ---
       # - BANDITDB_RETRAIN_POLL_SECS=2         # background MLP retrain cadence; 0 = checkpoint-only
       # - BANDITDB_NEURAL_BUFFER_CAP=50000     # replay buffer retention per campaign

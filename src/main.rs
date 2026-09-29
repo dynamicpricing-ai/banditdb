@@ -343,6 +343,9 @@ fn map_engine_err(e: EngineError) -> AppError {
         EngineError::WalFull          => StatusCode::SERVICE_UNAVAILABLE,
         EngineError::WalUnavailable   => StatusCode::SERVICE_UNAVAILABLE,
         EngineError::BadRequest(_)    => StatusCode::BAD_REQUEST,
+        // 403, not 400: the request is valid and the client cannot fix it by
+        // changing the payload — an operator has to raise the limit or free space.
+        EngineError::LimitExceeded(_) => StatusCode::FORBIDDEN,
         EngineError::Internal(_)      => StatusCode::INTERNAL_SERVER_ERROR,
     };
     AppError(status, e.to_string())
