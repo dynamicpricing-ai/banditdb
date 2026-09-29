@@ -1,0 +1,67 @@
+
+# Roll a published release onto the engine VM.
+#
+# Deliberately manual, and deliberately not part of Release. The engine is a
+# stateful singleton: a restart replays the WAL and briefly stops serving
+# decisions, so when that happens is an operational choice, not a consequence of
+# tagging. Releases publish artifacts; this puts one on the box.
+name: Deploy engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to deploy, e.g. v2.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-engine
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT }}
+
+      # --tunnel-through-iap keeps this working when the VM has no public IP,
+      # which is where it is heading. The runner's traffic arrives from Google's
+      # IAP range rather than from the internet.
+      - name: Roll out
+        run: |
+          gcloud compute ssh "${{ vars.ENGINE_VM }}" \
+            --zone="${{ vars.ENGINE_ZONE }}" \
+            --tunnel-through-iap \
+            --quiet \
+            --command="sudo curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/update.sh -o /tmp/update.sh && sudo bash /tmp/update.sh ${{ inputs.version }}"
+
+      # update.sh rolls back and exits non-zero on a failed health check, so
+      # reaching here means the engine answered. Assert the version too: a
+      # rollback that succeeded would otherwise look like a successful deploy.
+      - name: Confirm the deployed version
+        run: |
+          REPORTED=$(gcloud compute ssh "${{ vars.ENGINE_VM }}" \
+            --zone="${{ vars.ENGINE_ZONE }}" --tunnel-through-iap --quiet \
+            --command="curl -fsS localhost:8080/health")
+          echo "$REPORTED"
+          EXPECTED="${{ inputs.version }}"
+          echo "$REPORTED" | grep -q "\"version\":\"${EXPECTED#v}\"" || {
+            echo "Engine reports a different version than ${EXPECTED} — deploy rolled back."
+            exit 1
+          }

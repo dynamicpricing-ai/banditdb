@@ -1,0 +1,62 @@
+[Unit]
+Description=BanditDB decision engine
+Documentation=https://github.com/dynamicpricing-ai/banditdb
+After=network-online.target
+Wants=network-online.target
+
+# The single most important line here. The engine takes an exclusive lock on its
+# data directory and writes a WAL into it; started before /data is mounted, it
+# would happily create a fresh, empty database on the boot disk and serve it,
+# and the real data would reappear underneath the mount point — invisible to the
+# running process. RequiresMountsFor makes systemd refuse to start rather than
+# silently fork the state.
+RequiresMountsFor=/data
+
+[Service]
+Type=exec
+User=banditdb
+Group=banditdb
+
+# Secrets live here, root-owned and 0640, so they never appear in the unit file,
+# in `systemctl show`, or in the process environment of anything but this unit.
+EnvironmentFile=/etc/banditdb/banditdb.env
+
+Environment=DATA_DIR=/data
+Environment=PORT=8080
+Environment=LOG_FORMAT=json
+Environment=RUST_LOG=info
+
+ExecStart=/usr/local/bin/banditdb
+
+# A checkpoint can be in flight. SIGTERM lets the engine finish it; the generous
+# stop timeout is there because losing a checkpoint means replaying the WAL from
+# the previous one, which on a large instance is minutes of startup rather than
+# seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+Restart=always
+RestartSec=5
+
+# Hardening. The engine needs exactly one writable path.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/data
+
+# Campaign state is held in memory and the box is sized for it; being killed by
+# the OOM reaper would cost a WAL replay. Raise the file limit too — each tenant
+# connection plus the WAL and export handles add up.
+OOMScoreAdjust=-500
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
