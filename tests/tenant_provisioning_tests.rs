@@ -457,3 +457,72 @@ fn tenant_memory_budget_is_enforced() {
     assert!(listed.matches("campaign_id").count() < 50,
         "bytes should bind before the count limit does");
 }
+
+/// Purging is explicit and separate from revoking credentials.
+///
+/// Losing a key must never destroy models, so `DELETE /admin/tenants/:id` leaves
+/// campaigns alone. Erasure — for an organization deletion, or a data-protection
+/// request — has to be asked for by name.
+#[test]
+fn campaigns_are_purged_only_when_asked() {
+    let srv = server_or_skip!(18414, "/tmp/bdb_provision_purge", true);
+    let key = "BDBpurge0000000000000000000000000";
+    srv.provision("PUT", "/admin/tenants/org_purge",
+        Some(&tenant_body(key, "BDBpurgewriter00000000000", 5))).unwrap();
+
+    for c in ["one", "two"] {
+        assert_eq!(srv.post_key("/campaign", key,
+            &format!(r#"{{"campaign_id":"{c}","arms":["a","b"],"feature_dim":4}}"#)).unwrap().0,
+            200);
+    }
+
+    let (status, body) = srv.provision("DELETE", "/admin/tenants/org_purge/campaigns", None).unwrap();
+    assert_eq!(status, 200, "purge must succeed: {body}");
+    assert!(body.contains("\"deleted\":2"), "both campaigns must be deleted: {body}");
+
+    let (_, after) = srv.provision("GET", "/admin/tenants/org_purge/campaigns", None).unwrap();
+    assert!(!after.contains("\"one\"") && !after.contains("\"two\""),
+        "no campaign may survive a purge: {after}");
+
+    // The tenant itself is untouched — its keys still work.
+    assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200,
+        "purging data must not revoke credentials");
+}
+
+/// The console can drive a campaign for its playground, and cannot reach across
+/// tenants while doing it.
+#[test]
+fn console_playground_traffic_is_tenant_scoped() {
+    let srv = server_or_skip!(18415, "/tmp/bdb_provision_play", true);
+    let a_key = "BDBplayA00000000000000000000000000";
+    let b_key = "BDBplayB00000000000000000000000000";
+    srv.provision("PUT", "/admin/tenants/org_play_a",
+        Some(&tenant_body(a_key, "BDBplayAwriter0000000000000", 5))).unwrap();
+    srv.provision("PUT", "/admin/tenants/org_play_b",
+        Some(&tenant_body(b_key, "BDBplayBwriter0000000000000", 5))).unwrap();
+    srv.post_key("/campaign", a_key,
+        r#"{"campaign_id":"demo","arms":["x","y"],"feature_dim":3}"#).unwrap();
+
+    // Predict through the provisioning credential.
+    let (status, body) = srv.provision("POST", "/admin/tenants/org_play_a/campaigns/demo/predict",
+        Some(r#"{"context":[0.5,0.5,0.5]}"#)).unwrap();
+    assert_eq!(status, 200, "playground predict must work: {body}");
+    let iid = body.split("\"interaction_id\":\"").nth(1)
+        .and_then(|s| s.split('"').next()).unwrap().to_string();
+
+    // Reward it, scoped to the owning tenant.
+    let (status, _) = srv.provision("POST", "/admin/tenants/org_play_a/reward",
+        Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#))).unwrap();
+    assert_eq!(status, 200, "playground reward must work");
+
+    // The same interaction must not be rewardable under another tenant.
+    let (status, _) = srv.provision("POST", "/admin/tenants/org_play_b/reward",
+        Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#))).unwrap();
+    assert_eq!(status, 404, "one tenant must not reward another's interaction");
+
+    // The traffic is visible in the tenant's request log, and only theirs.
+    let (_, log_a) = srv.provision("GET", "/admin/tenants/org_play_a/requests", None).unwrap();
+    assert!(log_a.contains("/campaign"), "the tenant's own calls must appear: {log_a}");
+    let (_, log_b) = srv.provision("GET", "/admin/tenants/org_play_b/requests", None).unwrap();
+    assert!(!log_b.contains("demo"), "another tenant's calls must not: {log_b}");
+}

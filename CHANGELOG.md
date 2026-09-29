@@ -29,6 +29,22 @@ Two behaviours worth knowing:
   message naming suspension, so a lapsed subscription reads as "suspended" rather
   than "bad key".
 
+Three endpoints support a hosted console:
+
+* **`DELETE /admin/tenants/:id/campaigns`** erases a tenant's campaigns. Kept
+  separate from revoking credentials, because losing a key must never destroy
+  models — erasure has to be asked for by name. This is what makes "delete my
+  organization" mean it.
+* **`GET /admin/tenants/:id/requests`** returns a bounded ring of that tenant's
+  recent requests with status and latency, so a console can answer "what did my
+  last few calls do?". In memory and capped at 50 per tenant: a debugging window,
+  not an audit trail — `BANDITDB_AUDIT_LOG` remains the durable record.
+* **`POST /admin/tenants/:id/campaigns/:campaign/predict`** and
+  **`/admin/tenants/:id/reward`** let a console drive a campaign for an
+  in-browser playground. Rewards are scoped to the tenant that owns the
+  interaction, so the provisioning credential cannot be pointed at another
+  tenant's id.
+
 A tenant's footprint is bounded by **bytes**, not campaign count:
 `max_campaign_bytes` is now enforced as a cumulative budget across all of a
 tenant's campaigns, using the same `campaign_memory_estimate` the instance-wide

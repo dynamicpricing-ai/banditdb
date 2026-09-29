@@ -11,6 +11,7 @@ use tower_http::cors::{CorsLayer, Any};
 use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, WarmStart, DEFAULT_ALPHA};
 use banditdb::engine::ArmFilter;
 use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
+use banditdb::reqlog::{RequestLog, RequestRecord};
 use parking_lot::RwLock;
 use banditdb::BanditDB;
 use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
@@ -326,6 +327,9 @@ fn atomic_add_f64(atom: &AtomicU64, val: f64) {
 
 pub struct AppState {
     pub db:             Arc<BanditDB>,
+    /// Recent requests per tenant, for a console's request inspector. Bounded and
+    /// in memory: a debugging window, not an audit trail.
+    pub request_log:    RequestLog,
     pub registry:       Arc<KeyRegistry>,
     pub rate_limiter:   Option<Arc<ApiKeyLimiter>>,
     pub metrics_public: bool,
@@ -913,6 +917,89 @@ async fn handle_tenant_campaign_diagnostics(
     Ok(Json(diag))
 }
 
+/// Recent requests for a tenant, newest first.
+async fn handle_tenant_requests(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<Vec<banditdb::reqlog::RequestRecord>>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    Ok(Json(state.request_log.recent(&tenant_id, 50)))
+}
+
+/// Delete every campaign belonging to a tenant.
+///
+/// Separate from `DELETE /admin/tenants/:id`, which only revokes credentials:
+/// losing a key must never destroy models, so erasure has to be asked for
+/// explicitly. This is what makes "delete my organization" mean it, and what a
+/// deletion request under data-protection law needs.
+async fn handle_purge_tenant_campaigns(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    let prefix = format!("{tenant_id}/");
+    let ids: Vec<String> = state.db.campaigns.read().keys()
+        .filter(|k| k.starts_with(&prefix))
+        .cloned()
+        .collect();
+
+    let mut deleted = 0usize;
+    for id in &ids {
+        // Each deletion is WAL-logged and awaited, so a purge that reports
+        // success has actually reached disk.
+        match state.db.delete_campaign(id).await {
+            Ok(())  => deleted += 1,
+            Err(e)  => tracing::warn!(campaign = %id, error = %e, "purge: delete failed"),
+        }
+    }
+    tracing::info!(tenant = %tenant_id, deleted, "tenant campaigns purged");
+    Ok(Json(serde_json::json!({ "deleted": deleted, "requested": ids.len() })))
+}
+
+#[derive(Deserialize)]
+struct AdminPredictRequest { context: Vec<f64> }
+
+/// Predict on a tenant's behalf, for the console's playground.
+///
+/// The console holds no tenant key, so playground traffic arrives on the
+/// provisioning credential like the reads do. Unlike the reads this **mutates
+/// the model** — the prediction is recorded and the arm's counters move — so the
+/// console labels it plainly rather than presenting it as a dry run.
+async fn handle_tenant_predict(
+    State(state): State<Arc<AppState>>,
+    Path((tenant_id, campaign_id)): Path<(String, String)>,
+    Json(payload): Json<AdminPredictRequest>,
+) -> Result<Json<PredictResponse>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    validate_id(&campaign_id, "campaign_id")?;
+    let cid = format!("{tenant_id}/{campaign_id}");
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || db.predict(&cid, payload.context))
+        .await
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("scoring task failed: {e}")))?
+        .map(|(arm_id, interaction_id)| Json(PredictResponse { arm_id, interaction_id }))
+        .map_err(map_engine_err)
+}
+
+async fn handle_tenant_reward(
+    State(state): State<Arc<AppState>>,
+    Path(tenant_id): Path<String>,
+    Json(payload): Json<RewardRequest>,
+) -> Result<Json<&'static str>, AppError> {
+    validate_id(&tenant_id, "tenant_id")?;
+    // Scope the reward to the tenant that owns the interaction, so the
+    // provisioning credential cannot be pointed at another tenant's id.
+    match state.db.interaction_campaign(&payload.interaction_id) {
+        Some(cid) if cid.starts_with(&format!("{tenant_id}/")) => {}
+        _ => return Err(AppError(StatusCode::NOT_FOUND,
+            format!("Interaction '{}' not found or already rewarded", payload.interaction_id))),
+    }
+    state.db.reward(&payload.interaction_id, payload.reward)
+        .await
+        .map(|_| Json("OK"))
+        .map_err(map_engine_err)
+}
+
 async fn handle_delete_tenant(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
@@ -926,6 +1013,7 @@ async fn handle_delete_tenant(
     if !existed {
         return Err(AppError(StatusCode::NOT_FOUND, format!("Tenant '{tenant_id}' not found")));
     }
+    state.request_log.forget(&tenant_id);
     tracing::info!(tenant = %tenant_id, "tenant keys revoked");
     Ok(Json("Tenant Removed"))
 }
@@ -1312,6 +1400,13 @@ async fn metrics_middleware(
     next: Next,
 ) -> Response {
     let ep_idx = classify_endpoint(req.uri().path());
+    // Captured before the request is consumed, for the per-tenant request ring.
+    let method = req.method().as_str().to_string();
+    let path   = req.uri().path().to_string();
+    let api_key = req.headers().get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     let t0 = Instant::now();
     let resp = next.run(req).await;
     let elapsed = t0.elapsed().as_secs_f64();
@@ -1327,6 +1422,27 @@ async fn metrics_middleware(
     }
     atomic_add_f64(&ep.lat_sum_bits, elapsed);
     ep.lat_count.fetch_add(1, Ordering::Relaxed);
+
+    // Record for the tenant's inspector. Only provisioned tenants keep a ring —
+    // a single-tenant install has the process log instead — and the key is
+    // resolved here rather than read from request extensions, which the auth
+    // layer sets further in and are gone by the time the response comes back.
+    if let Some(key) = api_key {
+        if let Some(auth) = state.registry.authenticate(&key) {
+            if let Some(tenant_id) = auth.tenant_id {
+                let prefix = format!("/{tenant_id}");
+                state.request_log.record(&tenant_id, RequestRecord {
+                    at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs()).unwrap_or(0),
+                    method,
+                    path: path.strip_prefix(&prefix).unwrap_or(&path).to_string(),
+                    status,
+                    latency_us: (elapsed * 1e6) as u64,
+                });
+            }
+        }
+    }
 
     resp
 }
@@ -1541,6 +1657,7 @@ async fn main() {
 
     let app_state = Arc::new(AppState {
         db: Arc::clone(&db), registry, rate_limiter, metrics_public,
+        request_log: RequestLog::new(),
         http_metrics: HttpMetrics::default(),
     });
 
@@ -1654,7 +1771,11 @@ async fn main() {
         .route("/admin/tenants/:id", axum::routing::put(handle_put_tenant)
                                          .delete(handle_delete_tenant)
                                          .get(handle_get_tenant))
-        .route("/admin/tenants/:id/campaigns", get(handle_tenant_campaigns))
+        .route("/admin/tenants/:id/campaigns", get(handle_tenant_campaigns)
+                                                   .delete(handle_purge_tenant_campaigns))
+        .route("/admin/tenants/:id/requests", get(handle_tenant_requests))
+        .route("/admin/tenants/:id/campaigns/:campaign/predict", post(handle_tenant_predict))
+        .route("/admin/tenants/:id/reward", post(handle_tenant_reward))
         .route("/admin/tenants/:id/campaigns/:campaign/report", get(handle_tenant_campaign_report))
         .route("/admin/tenants/:id/campaigns/:campaign/diagnostics",
                get(handle_tenant_campaign_diagnostics))
