@@ -1,6 +1,7 @@
 pub mod state;
 pub mod math;
 pub mod engine;
+pub mod tenancy;
 #[cfg(feature = "neural")]
 pub mod neural;
 
