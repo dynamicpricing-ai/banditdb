@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — Runtime tenant provisioning
+
+Keys were read from `BANDITDB_API_KEYS` once at startup, so adding a tenant meant
+editing configuration and restarting. A hosted control plane cannot work that way.
+
+- **`PUT /admin/tenants/:id`** creates or updates a tenant: key digests, quotas and
+  status. Idempotent, so a control plane can retry until it succeeds.
+  **`DELETE`** revokes a tenant's keys and deliberately leaves its campaign data
+  intact. **`GET`** returns keys, quotas and per-key last-used times.
+- **`GET /admin/tenants/:id/campaigns`**, plus `/report` and `/diagnostics` per
+  campaign, let a console render dashboards without holding a usable tenant key.
+- **`GET /limits`** reports a caller's quotas and current usage.
+- Keys are stored as **SHA-256 digests**, never in the clear. A digest lookup is
+  also O(1), replacing a constant-time scan over every configured key that cost
+  more than scoring once a few hundred tenants existed.
+
+Provisioning routes carry their own credential, **`BANDITDB_PROVISION_KEY`**, and
+sit outside the API-key auth layer: no tenant key at any role can reach them. With
+the variable unset the routes return 404.
+
+Two behaviours worth knowing:
+
+- A provisioned tenant is **always namespace-scoped**, regardless of
+  `BANDITDB_TENANT_MODE`. Hosted tenants sharing a process without isolation would
+  be a cross-tenant leak, and that must not be switchable by an environment variable.
+- A tenant whose status is not `active` authenticates and is then refused with a
+  message naming suspension, so a lapsed subscription reads as "suspended" rather
+  than "bad key".
+
+Per-key usage is tracked in memory and written out when the store is persisted for
+another reason — best effort by design, since recording it on disk per request
+would put a write on the authentication path.
+
 ## Unreleased — Campaign admission control
 
 Closes the "no cap on campaign count" gap from `docs/ROADMAP.md`.
