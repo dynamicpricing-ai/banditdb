@@ -870,23 +870,54 @@ async fn handle_get_tenant(
     })))
 }
 
-/// Campaigns belonging to one tenant, with the namespace prefix stripped.
+/// A tenant's campaign as a console sees it.
+///
+/// Carries `context_dim` — the length of the vector `/predict` expects — which
+/// the public summary does not. For neural algorithms that is the *input*
+/// dimension, not the arm dimension: the arms live in the embedding space, so
+/// reading a theta length there would ask a caller for 32 numbers when the
+/// campaign wants 256.
+#[derive(Serialize)]
+struct TenantCampaignSummary {
+    campaign_id: String,
+    alpha:       f64,
+    algorithm:   Algorithm,
+    arm_count:   usize,
+    archived:    bool,
+    context_dim: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata:    Option<serde_json::Value>,
+}
+
 async fn handle_tenant_campaigns(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<String>,
-) -> Result<Json<Vec<CampaignSummary>>, AppError> {
+) -> Result<Json<Vec<TenantCampaignSummary>>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
     let prefix = format!("{tenant_id}/");
     let campaigns = state.db.campaigns.read();
-    let mut list: Vec<CampaignSummary> = campaigns.iter()
+    let mut list: Vec<TenantCampaignSummary> = campaigns.iter()
         .filter(|(id, _)| id.starts_with(&prefix))
-        .map(|(id, c)| CampaignSummary {
-            campaign_id: id[prefix.len()..].to_string(),
-            alpha:       c.alpha,
-            algorithm:   c.algorithm.clone(),
-            arm_count:   c.arms.read().len(),
-            archived:    c.archived.load(Ordering::Relaxed),
-            metadata:    c.metadata.clone(),
+        .map(|(id, c)| {
+            let arms = c.arms.read();
+            let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+            let context_dim = match &c.algorithm {
+                Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.context_dim,
+                Algorithm::Progressive(cfg) => match cfg.base.as_ref() {
+                    Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => c.context_dim,
+                    _ => arm_dim,
+                },
+                _ => arm_dim,
+            };
+            TenantCampaignSummary {
+                campaign_id: id[prefix.len()..].to_string(),
+                alpha:       c.alpha,
+                algorithm:   c.algorithm.clone(),
+                arm_count:   arms.len(),
+                archived:    c.archived.load(Ordering::Relaxed),
+                context_dim,
+                metadata:    c.metadata.clone(),
+            }
         })
         .collect();
     list.sort_by(|a, b| a.campaign_id.cmp(&b.campaign_id));
