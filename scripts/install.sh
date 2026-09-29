@@ -34,8 +34,12 @@ case "$os" in
 esac
 
 # ── Resolve latest version ────────────────────────────────────────────────────
-version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/')"
+if command -v jq > /dev/null 2>&1; then
+  version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.tag_name')"
+else
+  version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+fi
 
 if [ -z "$version" ]; then
   echo "Could not determine latest BanditDB version." >&2
@@ -53,12 +57,22 @@ curl -fsSL "$url" -o "$tmp/banditdb.tar.gz"
 tar -xzf "$tmp/banditdb.tar.gz" -C "$tmp"
 
 # ── Install binary ────────────────────────────────────────────────────────────
+# Release archives have varied in layout, so locate the binary rather than
+# assuming it sits at the archive root.
+bin_path="$(find "$tmp" -name "$BIN_NAME" -type f | head -1)"
+if [ -z "$bin_path" ]; then
+  echo "Could not find '$BIN_NAME' binary after extraction." >&2
+  exit 1
+fi
+
+mkdir -p "$INSTALL_DIR"
 if [ -w "$INSTALL_DIR" ]; then
-  mv "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  mv "$bin_path" "$INSTALL_DIR/$BIN_NAME"
   chmod +x "$INSTALL_DIR/$BIN_NAME"
 else
   echo "Installing to $INSTALL_DIR (sudo required)..."
-  sudo mv "$tmp/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  echo "Tip: set BANDITDB_INSTALL_DIR to a writable path to skip sudo."
+  sudo mv "$bin_path" "$INSTALL_DIR/$BIN_NAME"
   sudo chmod +x "$INSTALL_DIR/$BIN_NAME"
 fi
 
