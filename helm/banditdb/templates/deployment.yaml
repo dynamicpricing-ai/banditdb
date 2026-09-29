@@ -70,6 +70,50 @@ spec:
             - name: BANDITDB_AUDIT_LOG
               value: {{ .Values.config.auditLog | quote }}
             {{- end }}
+            {{- if .Values.config.maxPendingInteractions }}
+            - name: BANDITDB_MAX_PENDING_INTERACTIONS
+              value: {{ .Values.config.maxPendingInteractions | quote }}
+            {{- end }}
+            {{- if .Values.config.rewardTtlSecs }}
+            - name: BANDITDB_REWARD_TTL_SECS
+              value: {{ .Values.config.rewardTtlSecs | quote }}
+            {{- end }}
+            {{- if .Values.config.maxContextMagnitude }}
+            - name: BANDITDB_MAX_CONTEXT_MAGNITUDE
+              value: {{ .Values.config.maxContextMagnitude | quote }}
+            {{- end }}
+            {{- if .Values.config.fsyncIntervalMs }}
+            - name: BANDITDB_FSYNC_INTERVAL_MS
+              value: {{ .Values.config.fsyncIntervalMs | quote }}
+            {{- end }}
+            {{- if .Values.config.neuralBufferCap }}
+            - name: BANDITDB_NEURAL_BUFFER_CAP
+              value: {{ .Values.config.neuralBufferCap | quote }}
+            {{- end }}
+            {{- if .Values.config.neuralBatchSize }}
+            - name: BANDITDB_NEURAL_BATCH_SIZE
+              value: {{ .Values.config.neuralBatchSize | quote }}
+            {{- end }}
+            {{- /*
+              exportRetainShards and retrainPollSecs below use an explicit nil
+              check rather than `if`. For both, 0 is a deliberate setting that
+              differs from leaving them unset — 0 means "keep every Parquet
+              shard" and "retrain only at checkpoint", while unset means 50 and
+              2 seconds. Helm treats 0 as falsy, so `if` would silently discard
+              the operator's choice and apply the server default instead.
+            */}}
+            {{- if not (kindIs "invalid" .Values.config.exportRetainShards) }}
+            - name: BANDITDB_EXPORT_RETAIN_SHARDS
+              value: {{ .Values.config.exportRetainShards | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.retrainPollSecs) }}
+            - name: BANDITDB_RETRAIN_POLL_SECS
+              value: {{ .Values.config.retrainPollSecs | quote }}
+            {{- end }}
+            {{- if .Values.config.metricsPublic }}
+            - name: BANDITDB_METRICS_PUBLIC
+              value: "true"
+            {{- end }}
             {{- if or .Values.auth.apiKeys .Values.auth.apiKey }}
             {{- if .Values.auth.apiKeys }}
             - name: BANDITDB_API_KEYS

@@ -2,7 +2,7 @@ apiVersion: v2
 name: banditdb
 description: Ultra-fast Contextual Bandit Database with WAL durability and causal analysis
 type: application
-version: 2.0.0
+version: 2.1.0
 appVersion: "2.0.0"
 keywords:
   - bandit
