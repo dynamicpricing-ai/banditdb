@@ -663,7 +663,9 @@ pub struct BanditDB {
     /// must be alerted on rather than merely graphed. Exported as
     /// `banditdb_interactions_evicted_total`.
     pub interactions_evicted: Arc<AtomicU64>,
-    /// WAL serialisation format determined at startup from `BANDITDB_WAL_FORMAT`.
+    /// WAL serialisation format configured by `BANDITDB_WAL_FORMAT`. An existing
+    /// WAL in the other format keeps it until the next rotation converts it, so
+    /// readers detect the format from the file rather than trusting this.
     pub wal_format:       WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
     /// summary line to a dedicated audit file (separate from application logs).
@@ -714,11 +716,27 @@ impl BanditDB {
         // Transient I/O errors are retried up to MAX_WAL_RETRIES times with exponential back-off.
         const MAX_WAL_RETRIES: u32 = 5;
 
-        let write_format    = WalFormat::from_env();
+        // An existing WAL keeps its own format until the next rotation converts it.
+        // Appending the configured format to a file in the other one would be
+        // unreadable: recovery parses the whole file in the format its first bytes
+        // declare, and silently skips everything it cannot parse.
+        let configured_format = WalFormat::from_env();
+        let initial_format = match fs::metadata(wal_path) {
+            Ok(m) if m.len() > 0 => detect_wal_format(wal_path),
+            _ => configured_format,
+        };
+        if initial_format != configured_format {
+            tracing::warn!(existing = ?initial_format, configured = ?configured_format,
+                "WAL: the existing log is in a different format than BANDITDB_WAL_FORMAT; \
+                 appending in its current format until the next checkpoint converts it");
+        }
         let path            = wal_path.to_string();
         let writer_data_dir = data_dir.to_string();
 
         tokio::spawn(async move {
+            // Format of the file on disk. Differs from `configured_format` only
+            // between a configuration change and the rotation that applies it.
+            let mut write_format = initial_format;
             let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(f)  => f,
                 Err(e) => {
@@ -921,7 +939,12 @@ impl BanditDB {
                             fatal_err = Some(e);
                         } else {
                             let rotate = (|| -> std::io::Result<(usize, std::fs::File)> {
-                                let header: &[u8] = if write_format == WalFormat::Msgpack { WAL_MAGIC } else { b"" };
+                                let header_for = |f: WalFormat| -> &'static [u8] {
+                                    if f == WalFormat::Msgpack { WAL_MAGIC } else { b"" }
+                                };
+                                // The segment is a verbatim slice of the old file, so it
+                                // keeps that file's format and header.
+                                let header = header_for(write_format);
                                 let seg_from = segment_start.max(header.len() as u64);
 
                                 let mut old = File::open(&path)?;
@@ -933,6 +956,15 @@ impl BanditDB {
                                 let mut tail = Vec::new();
                                 old.read_to_end(&mut tail)?;
                                 drop(old);
+
+                                // The rewrite is where a configured format change takes
+                                // effect: the tail is re-encoded, not copied.
+                                if write_format != configured_format {
+                                    tail.clear();
+                                    for e in read_wal_slice(&path, checkpoint_offset, 0, write_format) {
+                                        tail.extend(encode_wal_record(configured_format, &e)?);
+                                    }
+                                }
 
                                 // Keep the discarded segment before discarding it. The
                                 // previous checkpoint plus this segment plus the new WAL
@@ -954,8 +986,8 @@ impl BanditDB {
 
                                 // The new WAL opens with a marker naming this checkpoint,
                                 // so recovery knows which history the file continues.
-                                let mut new_content = header.to_vec();
-                                new_content.extend(encode_wal_record(write_format, &DbEvent::WalStart { generation })?);
+                                let mut new_content = header_for(configured_format).to_vec();
+                                new_content.extend(encode_wal_record(configured_format, &DbEvent::WalStart { generation })?);
                                 new_content.extend(tail);
 
                                 // Durable: the pre-rotation WAL is discarded here, so a
@@ -968,6 +1000,7 @@ impl BanditDB {
                             match rotate {
                                 Ok((total_len, new_file)) => {
                                     file = new_file;
+                                    write_format = configured_format;
                                     tracing::info!(
                                         freed_bytes  = checkpoint_offset,
                                         new_file_len = total_len,
@@ -994,7 +1027,7 @@ impl BanditDB {
             }
         });
 
-        let wal_format = write_format; // already determined above for the writer task
+        let wal_format = configured_format;
 
         let ttl_secs: u64 = std::env::var("BANDITDB_REWARD_TTL_SECS")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(86400);
@@ -1489,7 +1522,7 @@ impl BanditDB {
 
         let wal_path_clone  = self.wal_path.clone();
         let export_dir_clone = export_dir.clone();
-        let wal_fmt         = self.wal_format;
+        let wal_fmt         = detect_wal_format(&self.wal_path);
         // Parquet shards accumulate one per checkpoint per campaign and nothing used
         // to remove them, so exports/ filled the volume and then checkpointing began
         // to fail. Recovery never reads these files, so the oldest can be dropped.

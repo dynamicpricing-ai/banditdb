@@ -39,7 +39,7 @@ Every variable the binary reads. Defaults are what you get with the variable uns
 | `BANDITDB_FSYNC_INTERVAL_MS` | `200` | Group-commit window. **Measured to have almost no effect** across 0–1000 ms, because the writer also syncs whenever it goes idle. Not a useful tuning lever; leave it. |
 | `BANDITDB_CHECKPOINT_INTERVAL` | *(disabled)* | Auto-checkpoint after N rewards. Controls WAL size and replay time — **not** durability. |
 | `BANDITDB_MAX_WAL_SIZE_MB` | *(disabled)* | Auto-checkpoint when the WAL exceeds this. |
-| `BANDITDB_WAL_FORMAT` | `json` | `msgpack` for a 3–5× smaller WAL. |
+| `BANDITDB_WAL_FORMAT` | `json` | `msgpack` for a 3–5× smaller WAL. Safe to change on an existing data directory: the current WAL keeps its format until the next checkpoint rotates it into the new one. |
 | `BANDITDB_REWARD_TTL_SECS` | `86400` | How long a prediction stays matchable. |
 | `BANDITDB_EXPORT_RETAIN_SHARDS` | `50` | Parquet shards kept per campaign. `0` keeps everything — `exports/` then grows until the volume fills, which stops checkpointing. |
 | `BANDITDB_ALLOW_CORRUPT_CHECKPOINT` | `false` | Escape hatch. Normally a corrupt checkpoint with no usable `checkpoint.prev`, or a fallback whose `wal_segment.N` is missing, stops startup; `true` starts anyway (empty, or with the gap) and **accepts the data loss**. |

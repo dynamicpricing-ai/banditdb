@@ -55,9 +55,14 @@ async fn overlapping_checkpoints_lose_nothing() {
         let cp: CheckpointData = serde_json::from_str(
             &fs::read_to_string(format!("{dir}/checkpoint.json")).unwrap()).unwrap();
         assert_eq!(cp.generation, 2, "round {round}: two checkpoints must produce generation 2");
-        let first_record = fs::read_to_string(&wal).unwrap().lines().next().unwrap_or("").to_string();
-        assert_eq!(first_record, r#"{"WalStart":{"generation":2}}"#,
-            "round {round}: the WAL must continue from the checkpoint on disk");
+        // The marker is only readable as text in a JSON WAL; the recovery check
+        // below covers both formats.
+        let log = fs::read(&wal).unwrap();
+        if !log.starts_with(b"BDMP") {
+            let first_record = String::from_utf8_lossy(&log).lines().next().unwrap_or("").to_string();
+            assert_eq!(first_record, r#"{"WalStart":{"generation":2}}"#,
+                "round {round}: the WAL must continue from the checkpoint on disk");
+        }
 
         let live = reward_count(&db);
         drop(Arc::try_unwrap(db).ok().expect("writers still hold the db"));
