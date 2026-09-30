@@ -574,6 +574,15 @@ pub struct BanditDB {
     /// elapsed time for time-aware campaign decay. Initialised to startup time so
     /// a restart followed immediately by checkpoint does not over-decay.
     pub last_checkpoint_secs: AtomicU64,
+    /// Makes a checkpoint's WAL offset and its memory snapshot describe the same
+    /// set of events.
+    ///
+    /// Every write path holds this shared while it enqueues an event and applies
+    /// it to memory. `checkpoint` holds it exclusively while it enqueues its
+    /// barrier and clones state. The channel is FIFO, so each event is then either
+    /// before the barrier and in the snapshot, or after it and in neither — never
+    /// in the snapshot and the retained WAL tail, which recovery would apply twice.
+    write_gate: RwLock<()>,
 }
 
 impl BanditDB {
@@ -929,6 +938,7 @@ impl BanditDB {
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
+            write_gate:           RwLock::new(()),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1111,103 +1121,9 @@ impl BanditDB {
             return Err("WAL writer is unavailable — server needs restart".to_string());
         }
 
-        // 1. Send flush barrier through the WAL channel — writer drains all prior
-        //    events to disk before replying with the confirmed byte offset.
-        let (reply_tx, reply_rx) = oneshot::channel::<u64>();
-        self.event_tx
-            .send(WalMessage::Checkpoint { reply: reply_tx })
-            .await
-            .map_err(|_| "WAL channel closed".to_string())?;
-
-        let wal_offset = reply_rx.await.map_err(|_| "WAL writer closed".to_string())?;
-
-        // 2. Parquet export: read WAL [0, wal_offset), join Predicted+Rewarded pairs,
-        //    write Parquet shards. Runs inside spawn_blocking so the synchronous WAL
-        //    scan and Parquet I/O do not stall the tokio async runtime.
-        //
-        //    Done BEFORE the neural/tournament block so WAL rotation (step 9) doesn't
-        //    discard events we still need to read.
-        let export_dir = format!("{}/exports", self.data_dir);
-        fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
-
-        let wal_path_clone  = self.wal_path.clone();
-        let export_dir_clone = export_dir.clone();
-        let wal_fmt         = self.wal_format;
-        // Parquet shards accumulate one per checkpoint per campaign and nothing used
-        // to remove them, so exports/ filled the volume and then checkpointing began
-        // to fail. Recovery never reads these files, so the oldest can be dropped.
-        let export_retain: usize = std::env::var("BANDITDB_EXPORT_RETAIN_SHARDS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(50);
-
-        let (matched, parquet_rows) = tokio::task::spawn_blocking(move || {
-            // Scan the WAL for matched Predicted+Rewarded pairs.
-            #[allow(clippy::type_complexity)] // matched-pair accumulator; a named type alias would not aid clarity here
-            let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
-            let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
-
-            for event in read_wal_slice(&wal_path_clone, 0, wal_offset, wal_fmt) {
-                match event {
-                    DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
-                        predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
-                    }
-                    DbEvent::Rewarded { interaction_id, reward, timestamp_secs } => {
-                        rewarded.insert(interaction_id, (reward, timestamp_secs));
-                    }
-                    _ => {}
-                }
-            }
-
-            let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
-            let mut matched:     HashSet<String>                             = HashSet::new();
-
-            for (iid, (reward, rewarded_at)) in &rewarded {
-                if let Some((campaign_id, arm_id, context, arm_propensities, predicted_at)) = predicted.get(iid) {
-                    matched.insert(iid.clone());
-                    let propensity = arm_propensities.as_ref().and_then(|m| m.get(arm_id.as_str())).copied();
-                    by_campaign.entry(campaign_id.clone()).or_default().push(CompletedInteraction {
-                        interaction_id: iid.clone(),
-                        arm_id:         arm_id.clone(),
-                        context:        context.clone(),
-                        reward:         *reward,
-                        predicted_at:   *predicted_at,
-                        rewarded_at:    *rewarded_at,
-                        propensity,
-                    });
-                }
-            }
-
-            let mut rows = 0usize;
-            for (campaign_id, interactions) in &by_campaign {
-                let feature_dim = interactions[0].context.len();
-                prune_export_shards(&export_dir_clone, campaign_id, export_retain);
-                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
-                    Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
-                    Ok(())  => rows += interactions.len(),
-                }
-            }
-
-            (matched, rows)
-        }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
-
-        // 6. Capture in-flight (unmatched) predictions so a late reward can still be
-        //    matched after rotation discards their WAL records.
-        //
-        //    Previously each one was re-emitted into the WAL as an `is_reemit`
-        //    Predicted record — rewriting the entire unmatched set on every
-        //    checkpoint, so a campaign with a low conversion rate paid for its whole
-        //    backlog again and again. They travel in the checkpoint now: written once
-        //    per checkpoint either way, but the WAL stays small and recovery restores
-        //    the cache directly instead of replaying them.
-        let pending_interactions: HashMap<String, InteractionRecord> = self.interactions
-            .iter()
-            .filter(|(iid, _)| !matched.contains(iid.as_ref()))
-            .map(|(iid, record)| (iid.as_ref().clone(), record))
-            .collect();
-        let reemit_count = pending_interactions.len();
-
-        // 7. (Neural) Run Algorithm 2 on campaigns that have accumulated enough rewards,
+        // 1. (Neural) Run Algorithm 2 on campaigns that have accumulated enough rewards,
         //    then re-accumulate arm matrices in embedding space (warm start).
-        //    Runs before WAL rotation so the updated weights are included in the checkpoint.
+        //    Runs before the snapshot so the updated weights are included in the checkpoint.
         #[cfg(feature = "neural")]
         {
             let neural_dir = self.neural_dir();
@@ -1225,14 +1141,14 @@ impl BanditDB {
                 // Skip the whole block if neither a retrain nor a tournament evaluation is due.
                 if !needs_retrain && !is_progressive { continue }
 
-                // 7a. Algorithm 2. Usually a no-op now that the background retrain
+                // 1a. Algorithm 2. Usually a no-op now that the background retrain
                 //     worker keeps up with arriving rewards; retained so checkpoints
                 //     still train when the worker is disabled.
                 if needs_retrain {
                     Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "checkpoint");
                 }
 
-                // 7b. Tournament — neural lock re-acquired with no arms lock held.
+                // 1b. Tournament — neural lock re-acquired with no arms lock held.
                 if is_progressive {
                     let neural = neural_mutex.lock();
                     if let Algorithm::Progressive(cfg) = &campaign.algorithm {
@@ -1242,7 +1158,7 @@ impl BanditDB {
             }
         }
 
-        // 4b. Time-aware decay: apply exponential forgetting to campaigns that have
+        // 2. Time-aware decay: apply exponential forgetting to campaigns that have
         //     decay_half_life_hours set. Done after neural retrain so fresh matrices
         //     are decayed, and before snapshot so checkpoint.json reflects the decayed state.
         {
@@ -1273,38 +1189,138 @@ impl BanditDB {
             }
         }
 
-        // 5. Snapshot all campaign matrices under read lock — done AFTER neural retrain
-        //    and tournament evaluation so checkpoint.json captures post-retrain arm matrices
-        //    and post-tournament challenger_traffic_bps / tournament_wins.
-        let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
-            let campaigns = self.campaigns.read();
-            campaigns.iter().map(|(id, campaign)| {
-                let arms_snapshot: HashMap<String, ArmState> = campaign.arms.read()
-                    .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                let challenger_snapshot = campaign.challenger_arms.as_ref().map(|c| {
-                    c.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                });
-                let entropy_at_checkpoint = selection_entropy(
-                    &arms_snapshot.values()
-                        .map(|s| s.prediction_count.load(Ordering::Relaxed))
-                        .collect::<Vec<_>>(),
-                );
-                campaign.last_checkpoint_entropy.store(entropy_at_checkpoint.to_bits(), Ordering::Relaxed);
+        // 3. Barrier and snapshot, as one step with respect to writers. Done AFTER
+        //    neural retrain, tournament evaluation and decay so checkpoint.json
+        //    captures post-retrain arm matrices and post-tournament
+        //    challenger_traffic_bps / tournament_wins.
+        //
+        //    The barrier fixes the WAL offset that rotation later cuts at; the
+        //    snapshot must hold exactly the events before it. Holding `write_gate`
+        //    exclusively while enqueuing the barrier and cloning state guarantees
+        //    that: nothing can be enqueued, or applied to memory, in between. Writes
+        //    that raced the old unguarded version landed after the offset yet inside
+        //    the snapshot, and recovery applied them a second time from the tail.
+        //
+        //    The channel slot is reserved first so the gate is never held across an
+        //    await; writers wait only for the clone, not for the WAL writer.
+        let permit = self.event_tx
+            .reserve()
+            .await
+            .map_err(|_| "WAL channel closed".to_string())?;
+        let (reply_tx, reply_rx) = oneshot::channel::<u64>();
+        let (campaigns_snapshot, pending_interactions) = {
+            let _gate = self.write_gate.write();
+            permit.send(WalMessage::Checkpoint { reply: reply_tx });
+            let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
+                let campaigns = self.campaigns.read();
+                campaigns.iter().map(|(id, campaign)| {
+                    let arms_snapshot: HashMap<String, ArmState> = campaign.arms.read()
+                        .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let challenger_snapshot = campaign.challenger_arms.as_ref().map(|c| {
+                        c.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                    });
+                    let entropy_at_checkpoint = selection_entropy(
+                        &arms_snapshot.values()
+                            .map(|s| s.prediction_count.load(Ordering::Relaxed))
+                            .collect::<Vec<_>>(),
+                    );
+                    campaign.last_checkpoint_entropy.store(entropy_at_checkpoint.to_bits(), Ordering::Relaxed);
 
-                (id.clone(), CampaignCheckpoint {
-                    alpha:                  campaign.alpha,
-                    algorithm:              campaign.algorithm.clone(),
-                    arms:                   arms_snapshot,
-                    challenger_arms:        challenger_snapshot,
-                    challenger_traffic_bps: campaign.challenger_traffic_bps.load(Ordering::SeqCst),
-                    tournament_wins:        campaign.tournament_wins.load(Ordering::SeqCst),
-                    archived:               campaign.archived.load(Ordering::SeqCst),
-                    metadata:               campaign.metadata.clone(),
-                    entropy_snapshot:       Some(entropy_at_checkpoint),
-                    decay_half_life_hours:  campaign.decay_half_life_hours,
-                })
-            }).collect()
+                    (id.clone(), CampaignCheckpoint {
+                        alpha:                  campaign.alpha,
+                        algorithm:              campaign.algorithm.clone(),
+                        arms:                   arms_snapshot,
+                        challenger_arms:        challenger_snapshot,
+                        challenger_traffic_bps: campaign.challenger_traffic_bps.load(Ordering::SeqCst),
+                        tournament_wins:        campaign.tournament_wins.load(Ordering::SeqCst),
+                        archived:               campaign.archived.load(Ordering::SeqCst),
+                        metadata:               campaign.metadata.clone(),
+                        entropy_snapshot:       Some(entropy_at_checkpoint),
+                        decay_half_life_hours:  campaign.decay_half_life_hours,
+                    })
+                }).collect()
+            };
+
+            // Predictions still awaiting a reward. Their Predicted records are before
+            // the barrier, so rotation discards them; they travel in the checkpoint
+            // instead so a late reward can still match after a restart. Rewarded
+            // interactions are already gone from the cache, so no WAL scan is needed.
+            let pending_interactions: HashMap<String, InteractionRecord> = self.interactions
+                .iter()
+                .map(|(iid, record)| (iid.as_ref().clone(), record))
+                .collect();
+            (campaigns_snapshot, pending_interactions)
         };
+        let reemit_count = pending_interactions.len();
+
+        // The writer replies once everything enqueued before the barrier is on disk.
+        let wal_offset = reply_rx.await.map_err(|_| "WAL writer closed".to_string())?;
+
+        // 4. Parquet export: read WAL [0, wal_offset), join Predicted+Rewarded pairs,
+        //    write Parquet shards. Runs inside spawn_blocking so the synchronous WAL
+        //    scan and Parquet I/O do not stall the tokio async runtime.
+        //
+        //    Done before WAL rotation (step 5) so it doesn't discard events we still
+        //    need to read.
+        let export_dir = format!("{}/exports", self.data_dir);
+        fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+
+        let wal_path_clone  = self.wal_path.clone();
+        let export_dir_clone = export_dir.clone();
+        let wal_fmt         = self.wal_format;
+        // Parquet shards accumulate one per checkpoint per campaign and nothing used
+        // to remove them, so exports/ filled the volume and then checkpointing began
+        // to fail. Recovery never reads these files, so the oldest can be dropped.
+        let export_retain: usize = std::env::var("BANDITDB_EXPORT_RETAIN_SHARDS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+
+        let parquet_rows = tokio::task::spawn_blocking(move || {
+            // Scan the WAL for matched Predicted+Rewarded pairs.
+            #[allow(clippy::type_complexity)] // matched-pair accumulator; a named type alias would not aid clarity here
+            let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
+            let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
+
+            for event in read_wal_slice(&wal_path_clone, 0, wal_offset, wal_fmt) {
+                match event {
+                    DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
+                        predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
+                    }
+                    DbEvent::Rewarded { interaction_id, reward, timestamp_secs } => {
+                        rewarded.insert(interaction_id, (reward, timestamp_secs));
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
+
+            for (iid, (reward, rewarded_at)) in &rewarded {
+                if let Some((campaign_id, arm_id, context, arm_propensities, predicted_at)) = predicted.get(iid) {
+                    let propensity = arm_propensities.as_ref().and_then(|m| m.get(arm_id.as_str())).copied();
+                    by_campaign.entry(campaign_id.clone()).or_default().push(CompletedInteraction {
+                        interaction_id: iid.clone(),
+                        arm_id:         arm_id.clone(),
+                        context:        context.clone(),
+                        reward:         *reward,
+                        predicted_at:   *predicted_at,
+                        rewarded_at:    *rewarded_at,
+                        propensity,
+                    });
+                }
+            }
+
+            let mut rows = 0usize;
+            for (campaign_id, interactions) in &by_campaign {
+                let feature_dim = interactions[0].context.len();
+                prune_export_shards(&export_dir_clone, campaign_id, export_retain);
+                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
+                    Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
+                    Ok(())  => rows += interactions.len(),
+                }
+            }
+
+            rows
+        }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
 
         let timestamp_secs = now_secs();
         self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
@@ -1331,7 +1347,7 @@ impl BanditDB {
         write_file_durable(&self.data_dir, &tmp_path, &dest_path, json.as_bytes())
             .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
 
-        // 9. Rotate WAL — discard the prefix already embedded in the checkpoint
+        // 5. Rotate WAL — discard the prefix already embedded in the checkpoint
         let (rot_tx, rot_rx) = oneshot::channel::<()>();
         self.event_tx
             .send(WalMessage::Rotate { checkpoint_offset: wal_offset, reply: rot_tx })
@@ -1523,6 +1539,19 @@ impl BanditDB {
     /// going unlogged and late rewards will fail to match.
     fn wal_send(&self, event: Arc<DbEvent>, durability: Durability) -> Result<(), EngineError> {
         self.wal_enqueue(event, durability).map(|_| ())
+    }
+
+    /// Enqueue an event and apply it to memory as one step with respect to
+    /// `checkpoint`. See `write_gate`.
+    fn log_and_apply(
+        &self,
+        event: Arc<DbEvent>,
+        durability: Durability,
+    ) -> Result<Option<oneshot::Receiver<Result<(), String>>>, EngineError> {
+        let _gate = self.write_gate.read();
+        let ack = self.wal_enqueue(Arc::clone(&event), durability)?;
+        self.apply_event_to_memory(&event);
+        Ok(ack)
     }
 
     /// Enqueue and, for `Acked`, hand back the receiver that resolves once the
@@ -1745,8 +1774,7 @@ impl BanditDB {
             campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("create", campaign_id, None);
         Self::await_ack(ack).await
     }
@@ -1821,8 +1849,7 @@ impl BanditDB {
         };
 
         // WAL before memory. See BanditDB consistency-model doc comment.
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("arm_add", campaign_id, Some(arm_id));
         Self::await_ack(ack).await
     }
@@ -1868,8 +1895,7 @@ impl BanditDB {
             status,
             timestamp_secs: now_secs(),
         });
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("arm_status", campaign_id, Some(&format!("{arm_id}={status:?}")));
         Self::await_ack(ack).await
     }
@@ -1889,6 +1915,9 @@ impl BanditDB {
         filter:      &ArmFilter,
     ) -> Result<(String, String), EngineError> {
         self.validate_context(&context)?;
+        // prediction_count is bumped during scoring, well before the WAL record is
+        // enqueued, so the whole prediction sits inside the gate. See `write_gate`.
+        let _gate = self.write_gate.read();
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
@@ -2057,8 +2086,7 @@ impl BanditDB {
             arm_propensities: None, // Historical data doesn't usually have propensities
             is_reemit:        false,
         });
-        self.wal_send(Arc::clone(&pred_event), Durability::Required)?;
-        self.apply_event_to_memory(&pred_event);
+        self.log_and_apply(pred_event, Durability::Required)?;
 
         // 2. Emit Rewarded event
         let reward_event = Arc::new(DbEvent::Rewarded {
@@ -2068,8 +2096,7 @@ impl BanditDB {
         });
         // One ack covers both records: the prediction was enqueued first, so any
         // fsync that reaches the reward has necessarily already covered it.
-        let ack = self.wal_enqueue(Arc::clone(&reward_event), Durability::Acked)?;
-        self.apply_event_to_memory(&reward_event);
+        let ack = self.log_and_apply(reward_event, Durability::Acked)?;
 
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await?;
@@ -2083,8 +2110,7 @@ impl BanditDB {
         }
         let event = Arc::new(DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("delete", campaign_id, None);
         Self::await_ack(ack).await
     }
@@ -2109,10 +2135,9 @@ impl BanditDB {
             interaction_id: interaction_id.to_string(), reward, timestamp_secs: now_secs(),
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
         // Applied before awaiting: the update is visible to concurrent readers
         // immediately, while the caller's ack still means "durable".
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await
     }
@@ -2140,8 +2165,7 @@ impl BanditDB {
         let event = Arc::new(DbEvent::CampaignArchived {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("archive", campaign_id, None);
         Self::await_ack(ack).await
     }
@@ -2154,8 +2178,7 @@ impl BanditDB {
         let event = Arc::new(DbEvent::CampaignRestored {
             campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
         });
-        let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
-        self.apply_event_to_memory(&event);
+        let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("restore", campaign_id, None);
         Self::await_ack(ack).await
     }

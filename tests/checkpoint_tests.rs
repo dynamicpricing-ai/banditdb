@@ -441,3 +441,82 @@ async fn test_4_3_reemit_does_not_double_count() {
     // Cleanup
     let _ = std::fs::remove_dir_all(data_dir);
 }
+
+/// Writes that race a checkpoint must be applied exactly once after recovery.
+///
+/// The checkpoint records a WAL offset, then snapshots memory. If writers keep
+/// running in between, a write can land after the offset (so it survives
+/// rotation in the WAL tail) and still be in the snapshot — and recovery then
+/// applies it twice. Prefilling the WAL makes the checkpoint's export scan slow,
+/// which widens that window so concurrent `interact()` calls fall inside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_checkpoint_under_concurrent_writes_applies_each_reward_once() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let data_dir = "/tmp/banditdb_ckpt_concurrent_writes_test";
+    let wal_path = format!("{}/bandit_wal.jsonl", data_dir);
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).unwrap();
+
+    let db = Arc::new(BanditDB::new(&wal_path, data_dir));
+    db.add_campaign(
+        "race",
+        vec!["a".to_string(), "b".to_string()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    ).await.unwrap();
+
+    // Best-effort predictions need no fsync, so they fill the WAL quickly.
+    for i in 0..50_000_usize {
+        let x = i as f64 * 0.001;
+        db.predict("race", vec![x.sin(), x.cos()]).unwrap();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writers: Vec<_> = (0..8).map(|w| {
+        let db   = Arc::clone(&db);
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            let arm = if w % 2 == 0 { "a" } else { "b" };
+            let mut i = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                let x = (w * 10_000 + i) as f64 * 0.01;
+                db.interact("race", arm, vec![x.sin(), x.cos()], 0.5).await.unwrap();
+                i += 1;
+            }
+        })
+    }).collect();
+
+    // Let the writers get going so the checkpoint starts under load.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let before = db.rewarded_count.load(Ordering::Relaxed);
+    db.checkpoint().await.unwrap();
+    let during = db.rewarded_count.load(Ordering::Relaxed) - before;
+
+    stop.store(true, Ordering::Relaxed);
+    for w in writers { w.await.unwrap(); }
+    assert!(during > 0, "no writes overlapped the checkpoint — test proves nothing");
+
+    let counts = |db: &BanditDB| -> (u64, u64) {
+        let campaigns = db.campaigns.read();
+        let arms = campaigns.get("race").unwrap().arms.read();
+        (
+            arms.values().map(|a| a.reward_count.load(Ordering::Relaxed)).sum(),
+            arms.values().map(|a| a.prediction_count.load(Ordering::Relaxed)).sum(),
+        )
+    };
+    let (live_rewards, live_predictions) = counts(&db);
+
+    drop(Arc::try_unwrap(db).ok().expect("writers still hold the db"));
+    let db2 = BanditDB::new(&wal_path, data_dir);
+    let (rec_rewards, rec_predictions) = counts(&db2);
+
+    assert_eq!(rec_rewards, live_rewards,
+        "recovered reward_count differs from live ({during} rewards overlapped the checkpoint)");
+    assert_eq!(rec_predictions, live_predictions,
+        "recovered prediction_count differs from live");
+}
