@@ -42,7 +42,7 @@ Every variable the binary reads. Defaults are what you get with the variable uns
 | `BANDITDB_WAL_FORMAT` | `json` | `msgpack` for a 3–5× smaller WAL. |
 | `BANDITDB_REWARD_TTL_SECS` | `86400` | How long a prediction stays matchable. |
 | `BANDITDB_EXPORT_RETAIN_SHARDS` | `50` | Parquet shards kept per campaign. `0` keeps everything — `exports/` then grows until the volume fills, which stops checkpointing. |
-| `BANDITDB_ALLOW_CORRUPT_CHECKPOINT` | `false` | Escape hatch. Normally a corrupt checkpoint with no usable `checkpoint.prev` stops startup; `true` starts empty and **accepts the data loss**. |
+| `BANDITDB_ALLOW_CORRUPT_CHECKPOINT` | `false` | Escape hatch. Normally a corrupt checkpoint with no usable `checkpoint.prev`, or a fallback whose `wal_segment.N` is missing, stops startup; `true` starts anyway (empty, or with the gap) and **accepts the data loss**. |
 | `BANDITDB_SKIP_DATA_DIR_LOCK` | `false` | Bypasses the single-writer lock. For read-only forensics on a copied data directory. **Never for serving** — two writers corrupt the WAL silently. |
 
 ### Limits

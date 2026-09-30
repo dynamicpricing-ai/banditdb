@@ -169,10 +169,12 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         wal_size_after
     );
     // No new events were sent between the last flush barrier and checkpoint(),
-    // so the tail is empty and the rotated WAL must be exactly 0 bytes.
+    // so the tail is empty: the rotated WAL holds only the marker naming the
+    // checkpoint it continues from.
+    let rotated = std::fs::read_to_string(&wal_path).unwrap();
     assert_eq!(
-        wal_size_after, 0,
-        "WAL tail must be 0 bytes immediately after checkpoint with no concurrent writes"
+        rotated.lines().collect::<Vec<_>>(), vec![r#"{"WalStart":{"generation":1}}"#],
+        "WAL tail must be only the rotation marker immediately after checkpoint with no concurrent writes"
     );
 
     // ===================================================================

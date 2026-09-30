@@ -6,6 +6,8 @@
 #   checkpoint.json   the full model state as of the last checkpoint
 #   checkpoint.prev   the retained previous generation — the fallback when the
 #                     current one is unreadable
+#   wal_segment.N     the WAL segment between checkpoint.prev and checkpoint.json;
+#                     without it the fallback cannot rebuild the events in between
 #   bandit_wal.jsonl  events since that checkpoint; without it you lose everything
 #                     written after the last checkpoint
 #   neural/           MLP weights; a neural campaign restored without these serves
@@ -47,6 +49,9 @@ do_backup() {
     local members=()
     for f in checkpoint.json checkpoint.prev bandit_wal.jsonl; do
         [[ -e "$data_dir/$f" ]] && members+=("$f")
+    done
+    for f in "$data_dir"/wal_segment.*; do
+        [[ -e "$f" && "$f" != *.tmp ]] && members+=("$(basename "$f")")
     done
     [[ -d "$data_dir/neural" ]] && members+=("neural")
 

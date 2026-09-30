@@ -583,6 +583,12 @@ pub struct CheckpointData {
     /// recover the old way from any re-emitted records still in the WAL.
     #[serde(default)]
     pub pending_interactions: HashMap<String, InteractionRecord>,
+    /// Increments with every checkpoint. The WAL rotated by checkpoint N begins
+    /// with `DbEvent::WalStart { generation: N }`, and the segment it discarded is
+    /// kept as `wal_segment.N`, so recovery can tell which WAL history belongs to
+    /// which checkpoint. 0 on checkpoints written before generations existed.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 
@@ -676,5 +682,10 @@ pub enum DbEvent {
         campaign_id: String,
         #[serde(default)]
         timestamp_secs: u64,
+    },
+    /// First record of a WAL rotated by checkpoint `generation`: the file holds
+    /// exactly the events after that checkpoint. Carries no state; replay skips it.
+    WalStart {
+        generation: u64,
     },
 }

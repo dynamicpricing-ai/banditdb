@@ -37,7 +37,16 @@ pub enum WalMessage {
         ack: Option<oneshot::Sender<Result<(), String>>>,
     },
     Checkpoint { reply: oneshot::Sender<u64> },
-    Rotate { checkpoint_offset: u64, reply: oneshot::Sender<()> },
+    /// Discard the WAL prefix that checkpoint `generation` subsumes.
+    /// `[segment_start, checkpoint_offset)` — the events since the previous
+    /// checkpoint — is kept as `wal_segment.<generation>` first, so the previous
+    /// checkpoint stays a lossless fallback.
+    Rotate {
+        checkpoint_offset: u64,
+        segment_start:     u64,
+        generation:        u64,
+        reply:             oneshot::Sender<()>,
+    },
 }
 
 /// How much the caller cares about this event reaching disk.
@@ -144,6 +153,55 @@ fn read_wal_slice(
         }
     }
     events
+}
+
+/// Where rotation by checkpoint `generation` keeps the WAL segment it discarded.
+fn wal_segment_path(data_dir: &str, generation: u64) -> String {
+    format!("{data_dir}/wal_segment.{generation}")
+}
+
+/// Serialise one record exactly as the WAL writer frames it.
+fn encode_wal_record(format: WalFormat, event: &DbEvent) -> std::io::Result<Vec<u8>> {
+    match format {
+        WalFormat::Json => {
+            let mut v = serde_json::to_vec(event)?;
+            v.push(b'\n');
+            Ok(v)
+        }
+        WalFormat::Msgpack => {
+            let bytes = rmp_serde::to_vec_named(event)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let mut v = (bytes.len() as u32).to_le_bytes().to_vec();
+            v.extend_from_slice(&bytes);
+            Ok(v)
+        }
+    }
+}
+
+/// Generation of the checkpoint whose rotation produced this WAL, read from its
+/// leading `WalStart` record. `None` for a WAL that has not been rotated since
+/// generations existed.
+fn wal_start_generation(path: &str, format: WalFormat) -> Option<u64> {
+    let mut reader = BufReader::new(File::open(path).ok()?);
+    let first: DbEvent = match format {
+        WalFormat::Json => {
+            let mut line = String::new();
+            reader.read_line(&mut line).ok()?;
+            serde_json::from_str(&line).ok()?
+        }
+        WalFormat::Msgpack => {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf).ok()?; // magic
+            reader.read_exact(&mut buf).ok()?;
+            let mut bytes = vec![0u8; u32::from_le_bytes(buf) as usize];
+            reader.read_exact(&mut bytes).ok()?;
+            rmp_serde::from_slice(&bytes).ok()?
+        }
+    };
+    match first {
+        DbEvent::WalStart { generation } => Some(generation),
+        _ => None,
+    }
 }
 
 /// Monotonic Unix timestamp in whole seconds. Returns 0 on the (impossible) pre-epoch case.
@@ -623,6 +681,15 @@ pub struct BanditDB {
     /// before the barrier and in the snapshot, or after it and in neither — never
     /// in the snapshot and the retained WAL tail, which recovery would apply twice.
     write_gate: RwLock<()>,
+    /// Generation of the newest checkpoint on disk. See `CheckpointData::generation`.
+    checkpoint_generation: AtomicU64,
+    /// Byte offset in the current WAL where the newest checkpoint's history ends.
+    /// The next rotation keeps `[wal_base, barrier)` as that checkpoint's segment.
+    wal_base: AtomicU64,
+    /// Set when recovery found `checkpoint.json` unreadable and started from
+    /// `checkpoint.prev`. The next checkpoint must not rotate that file into the
+    /// fallback slot.
+    current_checkpoint_unreadable: AtomicBool,
 }
 
 impl BanditDB {
@@ -844,26 +911,47 @@ impl BanditDB {
                         }
                     }
 
-                    WalMessage::Rotate { checkpoint_offset, reply } => {
+                    WalMessage::Rotate { checkpoint_offset, segment_start, generation, reply } => {
                         if let Err(e) = file.flush().and_then(|_| file.sync_all()) {
                             fatal_err = Some(e);
                         } else {
                             let rotate = (|| -> std::io::Result<(usize, std::fs::File)> {
+                                let header: &[u8] = if write_format == WalFormat::Msgpack { WAL_MAGIC } else { b"" };
+                                let seg_from = segment_start.max(header.len() as u64);
+
                                 let mut old = File::open(&path)?;
+                                old.seek(SeekFrom::Start(seg_from))?;
+                                let mut segment = header.to_vec();
+                                (&mut old).take(checkpoint_offset.saturating_sub(seg_from))
+                                    .read_to_end(&mut segment)?;
                                 old.seek(SeekFrom::Start(checkpoint_offset))?;
                                 let mut tail = Vec::new();
                                 old.read_to_end(&mut tail)?;
                                 drop(old);
 
-                                // Prepend binary magic to the new file if in msgpack mode.
-                                let new_content: Vec<u8> = if write_format == WalFormat::Msgpack {
-                                    let mut v = Vec::with_capacity(WAL_MAGIC.len() + tail.len());
-                                    v.extend_from_slice(WAL_MAGIC);
-                                    v.extend_from_slice(&tail);
-                                    v
-                                } else {
-                                    tail
-                                };
+                                // Keep the discarded segment before discarding it. The
+                                // previous checkpoint plus this segment plus the new WAL
+                                // is the full history, which is what makes
+                                // checkpoint.prev a lossless fallback.
+                                let seg_path = wal_segment_path(&writer_data_dir, generation);
+                                write_file_durable(&writer_data_dir, &format!("{seg_path}.tmp"), &seg_path, &segment)?;
+                                // Only the newest segment is ever needed: it pairs with
+                                // checkpoint.prev, which this checkpoint just replaced.
+                                if let Ok(entries) = fs::read_dir(&writer_data_dir) {
+                                    for entry in entries.flatten() {
+                                        let name = entry.file_name();
+                                        let Some(g) = name.to_str()
+                                            .and_then(|n| n.strip_prefix("wal_segment."))
+                                            .and_then(|g| g.parse::<u64>().ok()) else { continue };
+                                        if g < generation { let _ = fs::remove_file(entry.path()); }
+                                    }
+                                }
+
+                                // The new WAL opens with a marker naming this checkpoint,
+                                // so recovery knows which history the file continues.
+                                let mut new_content = header.to_vec();
+                                new_content.extend(encode_wal_record(write_format, &DbEvent::WalStart { generation })?);
+                                new_content.extend(tail);
 
                                 // Durable: the pre-rotation WAL is discarded here, so a
                                 // half-written replacement is unrecoverable.
@@ -1001,6 +1089,9 @@ impl BanditDB {
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
             write_gate:           RwLock::new(()),
+            checkpoint_generation: AtomicU64::new(0),
+            wal_base:             AtomicU64::new(0),
+            current_checkpoint_unreadable: AtomicBool::new(false),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1017,6 +1108,12 @@ impl BanditDB {
     /// every campaign — the WAL has already been rotated past them — and the server
     /// then reported itself healthy while serving an empty database.
     pub fn load_checkpoint(data_dir: &str) -> CheckpointLoad {
+        Self::load_checkpoint_detailed(data_dir).0
+    }
+
+    /// `load_checkpoint`, also reporting whether `checkpoint.json` exists but could
+    /// not be read (so the result, if any, came from `checkpoint.prev`).
+    fn load_checkpoint_detailed(data_dir: &str) -> (CheckpointLoad, bool) {
         let current = format!("{data_dir}/checkpoint.json");
         let previous = format!("{data_dir}/checkpoint.prev");
 
@@ -1030,14 +1127,14 @@ impl BanditDB {
             )
         };
 
-        match read(&current) {
+        let load = match read(&current) {
             Some(Ok(cp)) => CheckpointLoad::Loaded(cp),
             Some(Err(current_err)) => match read(&previous) {
                 Some(Ok(cp)) => {
                     tracing::error!(error = %current_err,
-                        "recovery: checkpoint.json is unreadable — falling back to checkpoint.prev. \
-                         Events written since the previous checkpoint are lost.");
-                    CheckpointLoad::Loaded(cp)
+                        "recovery: checkpoint.json is unreadable — falling back to checkpoint.prev \
+                         and the WAL segment retained with it");
+                    return (CheckpointLoad::Loaded(cp), true);
                 }
                 _ => CheckpointLoad::Corrupt(current_err),
             },
@@ -1052,14 +1149,18 @@ impl BanditDB {
                 Some(Err(e)) => CheckpointLoad::Corrupt(e),
                 None => CheckpointLoad::Fresh,
             },
-        }
+        };
+        (load, false)
     }
 
     fn recover(&self, wal_path: &str, data_dir: &str) {
         // Phase 1: Load checkpoint if one exists
         let mut wal_start_offset: u64 = 0;
+        let mut checkpoint_generation: Option<u64> = None;
 
-        let loaded = match Self::load_checkpoint(data_dir) {
+        let (load, current_unreadable) = Self::load_checkpoint_detailed(data_dir);
+        self.current_checkpoint_unreadable.store(current_unreadable, Ordering::SeqCst);
+        let loaded = match load {
             CheckpointLoad::Loaded(cp) => Some(cp),
             CheckpointLoad::Fresh      => None,
             CheckpointLoad::Corrupt(err) => {
@@ -1087,6 +1188,7 @@ impl BanditDB {
         match loaded {
             Some(checkpoint) => {
                 wal_start_offset = checkpoint.wal_offset;
+                checkpoint_generation = Some(checkpoint.generation);
                 self.last_checkpoint_secs.store(checkpoint.timestamp_secs, Ordering::Relaxed);
 
                 tracing::info!(
@@ -1156,17 +1258,66 @@ impl BanditDB {
         // Auto-detect format (JSON vs MessagePack) from the file's magic bytes.
         if !std::path::Path::new(wal_path).exists() {
             tracing::info!("recovery: no WAL found — starting fresh");
+            self.checkpoint_generation.store(checkpoint_generation.unwrap_or(0), Ordering::SeqCst);
         } else {
             let fmt = detect_wal_format(wal_path);
-
-            // After WAL rotation the file contains only the tail starting at byte 0.
-            // If the stored offset exceeds the current file size, the WAL was rotated — replay from 0.
             let file_len = File::open(wal_path)
                 .and_then(|mut f| f.seek(SeekFrom::End(0)))
                 .unwrap_or(0);
-            let start = if wal_start_offset <= file_len { wal_start_offset } else { 0 };
 
-            let events = read_wal_slice(wal_path, start, 0, fmt);
+            // Which checkpoint's rotation produced this WAL decides where the
+            // loaded checkpoint's history continues.
+            let wal_generation = wal_start_generation(wal_path, fmt);
+            let mut segment: Option<String> = None;
+            let start = match (checkpoint_generation, wal_generation) {
+                // No checkpoint and a WAL never rotated: the WAL is the whole history.
+                (None, None) => 0,
+                // Rotated by the loaded checkpoint: the WAL holds exactly what follows it.
+                (Some(g), Some(w)) if w == g => 0,
+                // Rotated by the next checkpoint, whose file was unreadable: the segment
+                // that rotation kept bridges the loaded checkpoint to this WAL.
+                (Some(g), Some(w)) if w == g + 1
+                    && Path::new(&wal_segment_path(data_dir, w)).exists() =>
+                {
+                    segment = Some(wal_segment_path(data_dir, w));
+                    0
+                }
+                // Not rotated since the loaded checkpoint, so its offset is valid here.
+                // A WAL from before rotation markers existed has no marker; for it an
+                // offset past the end still means "rotated", as it always did.
+                (Some(_), None) => {
+                    if wal_start_offset <= file_len { wal_start_offset } else { 0 }
+                }
+                (Some(g), Some(w)) if w < g => wal_start_offset,
+                // The WAL continues from a checkpoint whose history is not on disk.
+                (g, Some(w)) => {
+                    let msg = format!(
+                        "recovery: the WAL continues from checkpoint generation {w}, but the \
+                         loaded checkpoint is generation {g:?} and the WAL segment between them \
+                         is missing. Replaying would silently drop the events in that gap."
+                    );
+                    if std::env::var("BANDITDB_ALLOW_CORRUPT_CHECKPOINT").as_deref() == Ok("true") {
+                        tracing::error!("{msg} Continuing because BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true.");
+                        0
+                    } else {
+                        tracing::error!(data_dir, "{msg} Refusing to start. Restore a backup, or set \
+                            BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true to accept the loss.");
+                        std::process::exit(1);
+                    }
+                }
+            };
+            self.checkpoint_generation.store(
+                checkpoint_generation.unwrap_or(0).max(wal_generation.unwrap_or(0)),
+                Ordering::SeqCst,
+            );
+            self.wal_base.store(start, Ordering::SeqCst);
+
+            let mut events = Vec::new();
+            if let Some(seg) = &segment {
+                tracing::warn!(segment = %seg, "recovery: replaying the retained WAL segment");
+                events = read_wal_slice(seg, 0, 0, detect_wal_format(seg));
+            }
+            events.extend(read_wal_slice(wal_path, start, 0, fmt));
             let count  = events.len();
             for event in events {
                 self.apply_event_to_memory(&event);
@@ -1391,10 +1542,12 @@ impl BanditDB {
 
         let timestamp_secs = now_secs();
         self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
+        let generation = self.checkpoint_generation.load(Ordering::SeqCst) + 1;
         let mut data = CheckpointData {
             wal_offset, timestamp_secs,
             campaigns: campaigns_snapshot,
             pending_interactions,
+            generation,
         };
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
 
@@ -1402,25 +1555,42 @@ impl BanditDB {
         let dest_path = format!("{}/checkpoint.json", self.data_dir);
         let prev_path = format!("{}/checkpoint.prev", self.data_dir);
 
-        // Retain the previous generation before overwriting. WAL rotation below
-        // discards every event this checkpoint subsumes, so if the new checkpoint
-        // is unreadable the previous one plus the retained WAL tail is the only
-        // way back. A crash between these two renames leaves checkpoint.prev
-        // valid and checkpoint.json missing — recovery handles that case.
-        if Path::new(&dest_path).exists() {
+        // Retain the previous generation before overwriting. If the new checkpoint
+        // turns out unreadable, the previous one plus the WAL segment rotation keeps
+        // below plus the rotated WAL rebuild the full history. A crash between these
+        // two renames leaves checkpoint.prev valid and checkpoint.json missing —
+        // recovery handles that case.
+        //
+        // If this process recovered from checkpoint.prev because checkpoint.json was
+        // unreadable, that file must not become the fallback. It is set aside for
+        // inspection, and the new checkpoint is written to both slots.
+        let current_unreadable = self.current_checkpoint_unreadable.load(Ordering::SeqCst);
+        if current_unreadable {
+            fs::rename(&dest_path, format!("{}/checkpoint.corrupt", self.data_dir))
+                .map_err(|e| e.to_string())?;
+        } else if Path::new(&dest_path).exists() {
             fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
         }
 
         write_file_durable(&self.data_dir, &tmp_path, &dest_path, json.as_bytes())
             .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
+        if current_unreadable {
+            write_file_durable(&self.data_dir, &tmp_path, &prev_path, json.as_bytes())
+                .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
+            self.current_checkpoint_unreadable.store(false, Ordering::SeqCst);
+        }
+        self.checkpoint_generation.store(generation, Ordering::SeqCst);
+        // Until rotation succeeds, this checkpoint's history ends at the barrier.
+        let segment_start = self.wal_base.swap(wal_offset, Ordering::SeqCst);
 
         // 5. Rotate WAL — discard the prefix already embedded in the checkpoint
         let (rot_tx, rot_rx) = oneshot::channel::<()>();
         self.event_tx
-            .send(WalMessage::Rotate { checkpoint_offset: wal_offset, reply: rot_tx })
+            .send(WalMessage::Rotate { checkpoint_offset: wal_offset, segment_start, generation, reply: rot_tx })
             .await
             .map_err(|_| "WAL channel closed during rotation".to_string())?;
         rot_rx.await.map_err(|_| "WAL writer closed during rotation".to_string())?;
+        self.wal_base.store(0, Ordering::SeqCst);
 
         // Rotation rewrote the WAL so it now begins exactly at the checkpoint
         // boundary, which makes the absolute offset just recorded meaningless.
@@ -1614,6 +1784,7 @@ impl BanditDB {
                     c.archived.store(false, Ordering::Relaxed);
                 }
             }
+            DbEvent::WalStart { .. } => {}
         }
     }
 

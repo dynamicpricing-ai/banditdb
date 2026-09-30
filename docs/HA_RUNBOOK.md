@@ -37,14 +37,14 @@ Predictions are recoverable — the pending-interaction cache holds them, and th
 ## What Happens on Pod Restart
 
 1. Axum receives SIGTERM → graceful shutdown runs a **final checkpoint** (30 s timeout).
-2. On restart, `BanditDB::recover()` loads `checkpoint.json`, falling back to the retained `checkpoint.prev` if the current generation is unreadable, then replays the WAL from the recorded offset.
+2. On restart, `BanditDB::recover()` loads `checkpoint.json`, falling back to the retained `checkpoint.prev` if the current generation is unreadable, then replays the WAL from the recorded offset. The fallback is lossless: each rotation keeps the WAL segment it discards as `wal_segment.N`, and recovery replays `checkpoint.prev` + that segment + the WAL.
 3. **Maximum data loss = zero for acknowledged rewards.** `POST /reward` does not return until the record has been written *and* covered by an fsync, so a 200 response means it survives process death, power loss, and VM preemption alike. Only in-flight requests that never received a response are lost.
 
    This is not bounded by the checkpoint interval, and earlier revisions of this runbook were wrong to say so. Checkpointing controls WAL size and replay time, not durability.
 
    **Predictions are deliberately weaker.** They are best-effort: under a WAL backlog a prediction record is dropped rather than failing the request. Its reward still matches — the reward record carries the prediction, so an acknowledged reward is never lost — unless the process restarts before the next checkpoint, in which case the reward is refused with a 404 rather than acknowledged. Watch `banditdb_wal_dropped_total`.
 4. Recovery is automatic — no manual intervention for a clean restart. Measured replay: **0.6 s for 100k events / 38 MB WAL**, so restart time is dominated by pod scheduling.
-5. If the checkpoint is corrupt *and* no usable `checkpoint.prev` exists, the server **refuses to start** rather than coming up empty. Restore from backup, or set `BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true` to start empty and accept the loss.
+5. If the checkpoint is corrupt *and* no usable `checkpoint.prev` exists — or the fallback's `wal_segment.N` is missing, so the events between the two checkpoints cannot be rebuilt — the server **refuses to start** rather than coming up empty or with a gap. Restore from backup, or set `BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true` to start empty and accept the loss.
 
 ## Backup Strategy
 
@@ -76,6 +76,7 @@ spec:
               DEST=gs://$BUCKET/banditdb/$TIMESTAMP
               gsutil -m cp /data/checkpoint.json  $DEST/
               gsutil -m cp /data/checkpoint.prev  $DEST/ || true   # absent before the 2nd checkpoint
+              gsutil -m cp /data/wal_segment.*    $DEST/ || true   # pairs with checkpoint.prev
               gsutil -m cp /data/bandit_wal.jsonl $DEST/
               gsutil -m rsync -r /data/neural/    $DEST/neural/    # MLP weights
               # exports/ is deliberately NOT backed up: recovery never reads it and
@@ -107,6 +108,7 @@ kubectl run restore --rm -it --image=google/cloud-sdk:alpine \
 # Inside the pod:
 gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/checkpoint.json  /data/
 gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/checkpoint.prev  /data/ || true
+gsutil cp "gs://$BUCKET/banditdb/$TIMESTAMP/wal_segment.*"  /data/ || true
 gsutil cp gs://$BUCKET/banditdb/$TIMESTAMP/bandit_wal.jsonl /data/
 gsutil -m rsync -r gs://$BUCKET/banditdb/$TIMESTAMP/neural/ /data/neural/
 
@@ -127,7 +129,7 @@ kubectl logs -f deployment/banditdb | grep -E "recovered|checkpoint"
 | WAL writer failure | Health endpoint returns 503; new writes are rejected; existing state is safe |
 | Storage full | WAL writes fail; health endpoint reflects degraded state |
 | Second process on the same volume | Refuses to start — `flock` on `DATA_DIR` prevents the interleaved writes that would corrupt it |
-| Corrupt checkpoint | Falls back to `checkpoint.prev`; refuses to start if neither is readable, rather than serving an empty database |
+| Corrupt checkpoint | Falls back to `checkpoint.prev` plus the retained `wal_segment.N`, losing nothing; refuses to start if neither checkpoint is readable or the segment is missing, rather than serving an empty or incomplete database |
 | Prediction backlog | Prediction log records are dropped, not requests. Serving continues; `banditdb_wal_dropped_total` rises; rewards for dropped records still match unless a restart intervenes before the next checkpoint |
 | Pending-interaction cache full | Oldest entries evicted; `banditdb_interactions_evicted_total` rises. Each eviction permanently breaks reward matching for that prediction — alert on it |
 
@@ -158,6 +160,7 @@ Until then, availability is limited to single-pod restart time. Measured recover
 |---|---|
 | `checkpoint.json` | Model state as of the last checkpoint |
 | `checkpoint.prev` | Retained previous generation — the fallback when the current one is unreadable |
+| `wal_segment.N` | WAL segment between `checkpoint.prev` and `checkpoint.json`; the fallback needs it to rebuild the events in between |
 | `bandit_wal.jsonl` | Events since that checkpoint; without it everything after the last checkpoint is lost |
 | `neural/` | MLP weights. A neural campaign restored without these serves its random initialisation until the next retrain |
 
