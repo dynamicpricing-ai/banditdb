@@ -169,12 +169,12 @@ impl TenantStore {
         }
     }
 
-    /// Fold in-memory usage back onto the tenants before they are serialised.
-    fn sync_last_used(&mut self) {
+    /// Fold in-memory usage onto `tenants` before they are serialised.
+    fn fold_last_used(&self, tenants: &mut HashMap<String, Tenant>) {
         let seen: HashMap<String, u64> = self.index.iter()
             .map(|(hash, (_, _, clock))| (hash.clone(), clock.load(Ordering::Relaxed)))
             .collect();
-        for t in self.tenants.values_mut() {
+        for t in tenants.values_mut() {
             for k in &mut t.keys {
                 if let Some(&used) = seen.get(&k.hash.to_lowercase()) {
                     k.last_used_at = k.last_used_at.max(used);
@@ -183,23 +183,43 @@ impl TenantStore {
         }
     }
 
-    fn persist(&mut self) -> Result<(), String> {
-        self.sync_last_used();
+    /// Make `next` the tenant set: on disk first, then in memory.
+    ///
+    /// Never the other way round. Changing memory first meant a failed write left
+    /// the change live anyway — a revocation that "failed" still revoked until a
+    /// restart brought the key back — and a retried `remove` found nothing left in
+    /// memory, skipped the write, and reported success for a removal that was
+    /// never persisted.
+    fn commit(&mut self, mut next: HashMap<String, Tenant>) -> Result<(), String> {
+        self.fold_last_used(&mut next);
+        self.write(&next)?;
+        self.tenants = next;
+        self.reindex();
+        Ok(())
+    }
+
+    fn write(&self, tenants: &HashMap<String, Tenant>) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) };
-        let mut tenants: Vec<&Tenant> = self.tenants.values().collect();
-        tenants.sort_by(|a, b| a.id.cmp(&b.id));      // stable file, readable diffs
-        let file = StoreFile { tenants: tenants.into_iter().cloned().collect() };
+        let mut sorted: Vec<&Tenant> = tenants.values().collect();
+        sorted.sort_by(|a, b| a.id.cmp(&b.id));      // stable file, readable diffs
+        let file = StoreFile { tenants: sorted.into_iter().cloned().collect() };
         let json = serde_json::to_string_pretty(&file)
             .map_err(|e| format!("tenant serialisation failed: {e}"))?;
 
+        // Write and fsync the file, rename it into place, then fsync the directory:
+        // the rename is only durable once the directory entry is. Every step's
+        // failure is the caller's failure — a change reported as saved must be.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("tenant write failed: {e}"))?;
-        // fsync the file, then rename, then fsync the directory — the rename is
-        // only durable once the directory entry is.
-        if let Ok(f) = std::fs::File::open(&tmp) { let _ = f.sync_all(); }
+        let write_tmp = || -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            std::io::Write::write_all(&mut f, json.as_bytes())?;
+            f.sync_all()
+        };
+        write_tmp().map_err(|e| format!("tenant write failed: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("tenant rename failed: {e}"))?;
         if let Some(dir) = path.parent() {
-            if let Ok(d) = std::fs::File::open(dir) { let _ = d.sync_all(); }
+            std::fs::File::open(dir).and_then(|d| d.sync_all())
+                .map_err(|e| format!("tenant directory sync failed: {e}"))?;
         }
         Ok(())
     }
@@ -231,18 +251,19 @@ impl TenantStore {
             }
         }
         tenant.updated_at = now_secs();
-        self.tenants.insert(tenant.id.clone(), tenant);
-        self.reindex();
-        self.persist()
+        let mut next = self.tenants.clone();
+        next.insert(tenant.id.clone(), tenant);
+        self.commit(next)
     }
 
     pub fn remove(&mut self, tenant_id: &str) -> Result<bool, String> {
-        let existed = self.tenants.remove(tenant_id).is_some();
-        if existed {
-            self.reindex();
-            self.persist()?;
+        if !self.tenants.contains_key(tenant_id) {
+            return Ok(false);
         }
-        Ok(existed)
+        let mut next = self.tenants.clone();
+        next.remove(tenant_id);
+        self.commit(next)?;
+        Ok(true)
     }
 
     /// Authenticate a presented key. O(1) in the number of tenants.
