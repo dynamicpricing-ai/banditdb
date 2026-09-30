@@ -690,6 +690,11 @@ pub struct BanditDB {
     /// `checkpoint.prev`. The next checkpoint must not rotate that file into the
     /// fallback slot.
     current_checkpoint_unreadable: AtomicBool,
+    /// Held for the whole of `checkpoint`. The manual endpoint, the automatic task
+    /// and shutdown can all call it, and two overlapping runs corrupt each other:
+    /// the second rotation cuts a WAL the first has already rewritten, at an
+    /// offset that no longer means anything, and discards acknowledged records.
+    checkpoint_lock: tokio::sync::Mutex<()>,
 }
 
 impl BanditDB {
@@ -1092,6 +1097,7 @@ impl BanditDB {
             checkpoint_generation: AtomicU64::new(0),
             wal_base:             AtomicU64::new(0),
             current_checkpoint_unreadable: AtomicBool::new(false),
+            checkpoint_lock:      tokio::sync::Mutex::new(()),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1329,6 +1335,9 @@ impl BanditDB {
     }
 
     pub async fn checkpoint(&self) -> Result<String, String> {
+        // A caller that arrives mid-checkpoint waits, then takes its own.
+        let _running = self.checkpoint_lock.lock().await;
+
         // Fast-fail: if the WAL writer is dead the blocking send below would hang.
         if !self.wal_healthy.load(Ordering::SeqCst) {
             return Err("WAL writer is unavailable — server needs restart".to_string());
