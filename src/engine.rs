@@ -186,6 +186,17 @@ impl ArmFilter {
     }
 }
 
+/// Context length `algo` expects, given the dimension of the arms it scores.
+///
+/// Neural arms live in the embedding space, so their input is the network's
+/// `context_dim`; for linear algorithms the context is the arm dimension.
+pub fn expected_context_dim(algo: &Algorithm, arm_dim: usize) -> usize {
+    match algo {
+        Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.context_dim,
+        _ => arm_dim,
+    }
+}
+
 pub struct Campaign {
     pub alpha:                  f64,
     pub algorithm:              Algorithm,
@@ -300,6 +311,35 @@ impl Campaign {
             last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
             decay_half_life_hours,
         }
+    }
+
+    /// Check that a reward for `arm_id` with a context of `context_len` can be
+    /// applied to this campaign's matrices.
+    ///
+    /// Every reward updates the base arm and, for Progressive campaigns, the
+    /// challenger arm too, so the context must fit both. A mismatch would panic in
+    /// the rank-one update; an unknown arm would be silently skipped.
+    pub fn check_interaction(&self, arm_id: &str, context_len: usize) -> Result<(), EngineError> {
+        let (base_algo, challenger_algo) = match &self.algorithm {
+            Algorithm::Progressive(cfg) => (cfg.base.as_ref(), Some(cfg.challenger.as_ref())),
+            algo => (algo, None),
+        };
+        let arm_dim = self.arms.read().get(arm_id).map(|a| a.theta.len())
+            .ok_or_else(|| EngineError::NotFound(format!("Arm '{arm_id}' not found")))?;
+        let mut expected = vec![expected_context_dim(base_algo, arm_dim)];
+        if let (Some(algo), Some(c_arms)) = (challenger_algo, &self.challenger_arms) {
+            if let Some(c) = c_arms.read().get(arm_id) {
+                expected.push(expected_context_dim(algo, c.theta.len()));
+            }
+        }
+        for dim in expected {
+            if context_len != dim {
+                return Err(EngineError::BadRequest(format!(
+                    "Context dimension mismatch: expected {dim}, got {context_len}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Returns the embedding of `context` for Algorithm 1 scoring.
@@ -1435,7 +1475,21 @@ impl BanditDB {
             }
             DbEvent::Rewarded { interaction_id, reward, .. } => {
                 if let Some(record) = self.interactions.get(interaction_id.as_str()) {
-                    if let Some(campaign) = self.campaigns.read().get(&record.campaign_id) {
+                    let campaigns = self.campaigns.read();
+                    // Live writes are validated before logging, so this only trips on
+                    // replay of a WAL written before that check existed. Skipping the
+                    // record lets such a data dir open instead of panicking every start.
+                    let campaign = campaigns.get(&record.campaign_id).filter(|c| {
+                        match c.check_interaction(&record.arm_id, record.context.len()) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!(%interaction_id, campaign = %record.campaign_id,
+                                    arm = %record.arm_id, error = ?e, "skipping reward that cannot be applied");
+                                false
+                            }
+                        }
+                    });
+                    if let Some(campaign) = campaign {
                         // Helper: pick embedding based on which sub-algorithm a branch uses.
                         let embed_for = |algo: &Algorithm| -> Array1<f64> {
                             match algo {
@@ -1945,10 +1999,10 @@ impl BanditDB {
                 _ => (&campaign.algorithm, campaign.arms.read())
             };
 
-            let expected_context_dim = match active_algo {
-                Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.context_dim,
-                _ => arms_guard.iter().next().map(|(_, a)| a.theta.len()).unwrap_or(0),
-            };
+            let expected_context_dim = expected_context_dim(
+                active_algo,
+                arms_guard.values().next().map(|a| a.theta.len()).unwrap_or(0),
+            );
             if context_arr.len() != expected_context_dim {
                 return Err(EngineError::BadRequest(format!(
                     "Context dimension mismatch: expected {expected_context_dim}, got {}", context_arr.len()
@@ -2069,9 +2123,11 @@ impl BanditDB {
         // context and an out-of-range reward reached the matrix math directly.
         self.validate_context(&context)?;
         Self::validate_reward(reward)?;
-        if !self.campaigns.read().contains_key(campaign_id) {
-            return Err(Self::campaign_not_found(campaign_id));
-        }
+        // Checked before anything is logged: a record that cannot be applied would
+        // otherwise reach the WAL, and recovery would replay it.
+        self.campaigns.read().get(campaign_id)
+            .ok_or_else(|| Self::campaign_not_found(campaign_id))?
+            .check_interaction(arm_id, context.len())?;
 
         let interaction_id = Uuid::new_v4().to_string();
         let now = now_secs();

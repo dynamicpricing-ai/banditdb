@@ -908,14 +908,11 @@ async fn handle_tenant_campaigns(
         .map(|(id, c)| {
             let arms = c.arms.read();
             let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
-            let context_dim = match &c.algorithm {
-                Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.context_dim,
-                Algorithm::Progressive(cfg) => match cfg.base.as_ref() {
-                    Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => c.context_dim,
-                    _ => arm_dim,
-                },
-                _ => arm_dim,
+            let base_algo = match &c.algorithm {
+                Algorithm::Progressive(cfg) => cfg.base.as_ref(),
+                algo => algo,
             };
+            let context_dim = banditdb::engine::expected_context_dim(base_algo, arm_dim);
             TenantCampaignSummary {
                 campaign_id: id[prefix.len()..].to_string(),
                 alpha:       c.alpha,
