@@ -223,7 +223,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 |--------|----------|----------|-------------|
 | `GET` | `/health` | — | Public liveness: `{"status":"ok"\|"degraded", "version", "features"}`. No campaign data — safe for load balancer probes and safe to expose. |
 | `GET` | `/health/detail` | reader | Per-campaign entropy, scoped to the caller's tenant. |
-| `GET` | `/metrics` | reader | Prometheus text-format metrics. Authenticated by default (output names campaigns and arms); set `BANDITDB_METRICS_PUBLIC=true` to expose anonymously. |
+| `GET` | `/metrics` | reader | Prometheus text-format metrics, scoped to the caller: a tenant key sees only its own campaigns, an operator key sees everything. Authenticated by default; with `BANDITDB_METRICS_PUBLIC=true`, requests without a key get process health only. |
 | `GET` | `/openapi.yaml` | — | OpenAPI 3.1 specification (this API). |
 | `GET` | `/campaigns` | reader | List all campaigns with algorithm, arm count, and metadata. |
 | `GET` | `/campaign/:id` | reader | Full per-arm state: theta vectors, reward counts, campaign-level totals. |

@@ -180,6 +180,62 @@ fn metrics_require_authentication_by_default() {
     assert_eq!(status, 200, "a valid key must still reach metrics");
 }
 
+const OPERATOR: &str = "key-operator";
+
+/// Keys for the tests that also need an operator: an admin bound to no tenant,
+/// which is what Prometheus scrapes with.
+fn keys_with_operator() -> String {
+    format!("{ADMIN_A}=admin:tenant_a;{WRITER_A}=writer:tenant_a;\
+             {READER_A}=reader:tenant_a;{ADMIN_B}=admin:tenant_b;{OPERATOR}=admin")
+}
+
+/// `/metrics` labels series with campaign and arm ids, so it must be scoped like
+/// every other read: a tenant sees its own campaigns and nothing about anyone
+/// else's. It used to list every campaign in the process to any valid key.
+#[test]
+fn metrics_are_tenant_scoped() {
+    let keys = keys_with_operator();
+    let srv = server_or_skip!(18308, &[("BANDITDB_API_KEYS", keys.as_str())]);
+    assert_eq!(srv.create_campaign(ADMIN_A, "camp_a"), 200);
+    assert_eq!(srv.create_campaign(ADMIN_B, "camp_b"), 200);
+
+    let (status, body) = srv.get("/metrics", Some(READER_A)).expect("reachable");
+    assert_eq!(status, 200);
+    assert!(body.contains(r#"campaign="camp_a""#), "a tenant must see its own campaigns: {body}");
+    assert!(!body.contains("camp_b") && !body.contains("tenant_b"),
+        "a tenant must not see another tenant's campaigns: {body}");
+    assert!(!body.contains("banditdb_http_requests_total"),
+        "process-wide series describe every tenant's traffic: {body}");
+
+    let (status, body) = srv.get("/metrics", Some(OPERATOR)).expect("reachable");
+    assert_eq!(status, 200);
+    assert!(body.contains("tenant_a/camp_a") && body.contains("tenant_b/camp_b"),
+        "the operator sees every campaign: {body}");
+    assert!(body.contains("banditdb_wal_healthy"), "and the process-wide series: {body}");
+}
+
+/// Public metrics exist so Prometheus can scrape without a key. Anonymous output
+/// must then be process health only — no campaign or arm labels.
+#[test]
+fn public_metrics_carry_no_campaign_labels() {
+    let keys = keys_with_operator();
+    let srv = server_or_skip!(18310, &[
+        ("BANDITDB_API_KEYS", keys.as_str()),
+        ("BANDITDB_METRICS_PUBLIC", "true"),
+    ]);
+    assert_eq!(srv.create_campaign(ADMIN_A, "camp_a"), 200);
+
+    let (status, body) = srv.get("/metrics", None).expect("reachable");
+    assert_eq!(status, 200, "public metrics must not need a key");
+    assert!(body.contains("banditdb_wal_healthy"), "process health must be present: {body}");
+    assert!(!body.contains("camp_a") && !body.contains("campaign="),
+        "anonymous metrics leaked campaign identifiers: {body}");
+
+    // A key still narrows or widens the view as usual.
+    let (_, body) = srv.get("/metrics", Some(OPERATOR)).expect("reachable");
+    assert!(body.contains("tenant_a/camp_a"), "the operator still sees campaigns: {body}");
+}
+
 // ---------------------------------------------------------------------------
 // Tenant isolation
 // ---------------------------------------------------------------------------

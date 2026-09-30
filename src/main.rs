@@ -1525,29 +1525,63 @@ async fn metrics_middleware(
     resp
 }
 
-async fn handle_metrics(State(state): State<Arc<AppState>>) -> (HeaderMap, String) {
+/// Who is reading `/metrics`, which decides what they may see.
+enum MetricsScope {
+    /// No key, on a public `/metrics`: process health only, no campaign or arm ids.
+    Anonymous,
+    /// A tenant's key: that tenant's campaigns, labelled without the tenant prefix
+    /// (as `/campaigns` shows them), and nothing process-wide — those series
+    /// describe every tenant's traffic.
+    Tenant(String),
+    /// A key bound to no tenant: everything. What Prometheus should scrape with.
+    Operator,
+}
+
+async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> (HeaderMap, String) {
     let mut out = String::with_capacity(8192);
 
-    // WAL health
-    let wal_ok = if state.db.wal_healthy.load(Ordering::Relaxed) { 1 } else { 0 };
-    out.push_str("# HELP banditdb_wal_healthy WAL writer health (1=ok, 0=degraded)\n");
-    out.push_str("# TYPE banditdb_wal_healthy gauge\n");
-    out.push_str(&format!("banditdb_wal_healthy {wal_ok}\n\n"));
-    out.push_str("# HELP banditdb_wal_channel_available Remaining WAL channel slots\n");
-    out.push_str("# TYPE banditdb_wal_channel_available gauge\n");
-    out.push_str(&format!("banditdb_wal_channel_available {}\n\n", state.db.event_tx.capacity()));
-    out.push_str("# HELP banditdb_wal_dropped_total Best-effort prediction records dropped because the WAL writer fell behind\n");
-    out.push_str("# TYPE banditdb_wal_dropped_total counter\n");
-    out.push_str(&format!("banditdb_wal_dropped_total {}\n\n", state.db.wal_dropped.load(Ordering::Relaxed)));
-    out.push_str("# HELP banditdb_wal_fsync_total Group-commit fsyncs completed on the WAL\n");
-    out.push_str("# TYPE banditdb_wal_fsync_total counter\n");
-    out.push_str(&format!("banditdb_wal_fsync_total {}\n\n", state.db.wal_fsyncs.load(Ordering::Relaxed)));
-    out.push_str("# HELP banditdb_interactions_pending Predictions awaiting a reward\n");
-    out.push_str("# TYPE banditdb_interactions_pending gauge\n");
-    out.push_str(&format!("banditdb_interactions_pending {}\n\n", state.db.interactions.entry_count()));
-    out.push_str("# HELP banditdb_interactions_evicted_total Pending interactions dropped at the capacity limit; their rewards can no longer be matched\n");
-    out.push_str("# TYPE banditdb_interactions_evicted_total counter\n");
-    out.push_str(&format!("banditdb_interactions_evicted_total {}\n\n", state.db.interactions_evicted.load(Ordering::Relaxed)));
+    // Resolved here rather than taken from the auth middleware, because the
+    // public route has none: a key there still narrows or widens the view.
+    let provided = headers.get("X-Api-Key").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let scope = match state.registry.authenticate(provided) {
+        Some(a) if a.role != Role::Suspended => match a.tenant_id {
+            Some(t) => MetricsScope::Tenant(format!("{t}/")),
+            None    => MetricsScope::Operator,
+        },
+        _ => MetricsScope::Anonymous,
+    };
+    let process_wide = !matches!(scope, MetricsScope::Tenant(_));
+    // The label a campaign is shown under, or None if this caller may not see it.
+    let visible = |cid: &str| -> Option<String> {
+        match &scope {
+            MetricsScope::Anonymous   => None,
+            MetricsScope::Tenant(pfx) => cid.strip_prefix(pfx.as_str()).map(prom_label),
+            MetricsScope::Operator    => Some(prom_label(cid)),
+        }
+    };
+
+    if process_wide {
+        // WAL health
+        let wal_ok = if state.db.wal_healthy.load(Ordering::Relaxed) { 1 } else { 0 };
+        out.push_str("# HELP banditdb_wal_healthy WAL writer health (1=ok, 0=degraded)\n");
+        out.push_str("# TYPE banditdb_wal_healthy gauge\n");
+        out.push_str(&format!("banditdb_wal_healthy {wal_ok}\n\n"));
+        out.push_str("# HELP banditdb_wal_channel_available Remaining WAL channel slots\n");
+        out.push_str("# TYPE banditdb_wal_channel_available gauge\n");
+        out.push_str(&format!("banditdb_wal_channel_available {}\n\n", state.db.event_tx.capacity()));
+        out.push_str("# HELP banditdb_wal_dropped_total Best-effort prediction records dropped because the WAL writer fell behind\n");
+        out.push_str("# TYPE banditdb_wal_dropped_total counter\n");
+        out.push_str(&format!("banditdb_wal_dropped_total {}\n\n", state.db.wal_dropped.load(Ordering::Relaxed)));
+        out.push_str("# HELP banditdb_wal_fsync_total Group-commit fsyncs completed on the WAL\n");
+        out.push_str("# TYPE banditdb_wal_fsync_total counter\n");
+        out.push_str(&format!("banditdb_wal_fsync_total {}\n\n", state.db.wal_fsyncs.load(Ordering::Relaxed)));
+        out.push_str("# HELP banditdb_interactions_pending Predictions awaiting a reward\n");
+        out.push_str("# TYPE banditdb_interactions_pending gauge\n");
+        out.push_str(&format!("banditdb_interactions_pending {}\n\n", state.db.interactions.entry_count()));
+        out.push_str("# HELP banditdb_interactions_evicted_total Pending interactions dropped at the capacity limit; their rewards can no longer be matched\n");
+        out.push_str("# TYPE banditdb_interactions_evicted_total counter\n");
+        out.push_str(&format!("banditdb_interactions_evicted_total {}\n\n", state.db.interactions_evicted.load(Ordering::Relaxed)));
+    }
 
     // Per-arm counters + campaign gauges (single lock acquisition)
     struct ArmCounts { p: u64, r: u64 }
@@ -1555,12 +1589,17 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> (HeaderMap, Strin
 
     let mut active = 0u64;
     let mut archived = 0u64;
+    let in_scope = |cid: &str| match &scope {
+        MetricsScope::Tenant(pfx) => cid.starts_with(pfx.as_str()),
+        _ => true,
+    };
     let arm_data: Vec<(String, String, ArmCounts)> = campaigns.iter()
+        .filter(|(cid, _)| in_scope(cid))
         .inspect(|(_, c)| {
             if c.archived.load(Ordering::Relaxed) { archived += 1; } else { active += 1; }
         })
-        .flat_map(|(cid, campaign)| {
-            let safe_cid = prom_label(cid);
+        .filter_map(|(cid, campaign)| visible(cid).map(|label| (label, campaign)))
+        .flat_map(|(safe_cid, campaign)| {
             campaign.arms.read().iter().map(|(aid, s)| (
                 safe_cid.clone(), prom_label(aid),
                 ArmCounts { p: s.prediction_count.load(Ordering::Relaxed),
@@ -1590,52 +1629,55 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> (HeaderMap, Strin
     out.push_str("# HELP banditdb_tournament_traffic_bps Challenger traffic in basis points (Progressive)\n");
     out.push_str("# TYPE banditdb_tournament_traffic_bps gauge\n");
     for (cid, campaign) in campaigns.iter() {
+        let Some(label) = visible(cid) else { continue };
         if matches!(&campaign.algorithm, Algorithm::Progressive(_)) {
             let bps = campaign.challenger_traffic_bps.load(Ordering::Relaxed);
-            out.push_str(&format!("banditdb_tournament_traffic_bps{{campaign=\"{}\"}} {bps}\n", prom_label(cid)));
+            out.push_str(&format!("banditdb_tournament_traffic_bps{{campaign=\"{label}\"}} {bps}\n"));
         }
     }
     out.push('\n');
     drop(campaigns);
 
-    // HTTP request counters
-    out.push_str("# HELP banditdb_http_requests_total HTTP requests by endpoint and status class\n");
-    out.push_str("# TYPE banditdb_http_requests_total counter\n");
-    for (i, name) in EP_NAMES.iter().enumerate() {
-        let ep = &state.http_metrics.by_endpoint[i];
-        let r2 = ep.req_2xx.load(Ordering::Relaxed);
-        let r4 = ep.req_4xx.load(Ordering::Relaxed);
-        let r5 = ep.req_5xx.load(Ordering::Relaxed);
-        out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"2xx\"}} {r2}\n"));
-        out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"4xx\"}} {r4}\n"));
-        out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"5xx\"}} {r5}\n"));
-    }
-    out.push('\n');
+    if process_wide {
+        // HTTP request counters
+        out.push_str("# HELP banditdb_http_requests_total HTTP requests by endpoint and status class\n");
+        out.push_str("# TYPE banditdb_http_requests_total counter\n");
+        for (i, name) in EP_NAMES.iter().enumerate() {
+            let ep = &state.http_metrics.by_endpoint[i];
+            let r2 = ep.req_2xx.load(Ordering::Relaxed);
+            let r4 = ep.req_4xx.load(Ordering::Relaxed);
+            let r5 = ep.req_5xx.load(Ordering::Relaxed);
+            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"2xx\"}} {r2}\n"));
+            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"4xx\"}} {r4}\n"));
+            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"5xx\"}} {r5}\n"));
+        }
+        out.push('\n');
 
-    // HTTP latency histograms
-    out.push_str("# HELP banditdb_http_request_duration_seconds HTTP request latency\n");
-    out.push_str("# TYPE banditdb_http_request_duration_seconds histogram\n");
-    for (i, name) in EP_NAMES.iter().enumerate() {
-        let ep = &state.http_metrics.by_endpoint[i];
-        for (j, &bound) in LATENCY_BOUNDS.iter().enumerate() {
-            let count = ep.lat_bucket[j].load(Ordering::Relaxed);
+        // HTTP latency histograms
+        out.push_str("# HELP banditdb_http_request_duration_seconds HTTP request latency\n");
+        out.push_str("# TYPE banditdb_http_request_duration_seconds histogram\n");
+        for (i, name) in EP_NAMES.iter().enumerate() {
+            let ep = &state.http_metrics.by_endpoint[i];
+            for (j, &bound) in LATENCY_BOUNDS.iter().enumerate() {
+                let count = ep.lat_bucket[j].load(Ordering::Relaxed);
+                out.push_str(&format!(
+                    "banditdb_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"{bound}\"}} {count}\n"
+                ));
+            }
+            let total = ep.lat_count.load(Ordering::Relaxed);
+            let sum   = f64::from_bits(ep.lat_sum_bits.load(Ordering::Relaxed));
             out.push_str(&format!(
-                "banditdb_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"{bound}\"}} {count}\n"
+                "banditdb_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"+Inf\"}} {total}\n"
+            ));
+            out.push_str(&format!(
+                "banditdb_http_request_duration_seconds_sum{{endpoint=\"{name}\"}} {sum:.6}\n"
+            ));
+            out.push_str(&format!(
+                "banditdb_http_request_duration_seconds_count{{endpoint=\"{name}\"}} {total}\n"
             ));
         }
-        let total = ep.lat_count.load(Ordering::Relaxed);
-        let sum   = f64::from_bits(ep.lat_sum_bits.load(Ordering::Relaxed));
-        out.push_str(&format!(
-            "banditdb_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"+Inf\"}} {total}\n"
-        ));
-        out.push_str(&format!(
-            "banditdb_http_request_duration_seconds_sum{{endpoint=\"{name}\"}} {sum:.6}\n"
-        ));
-        out.push_str(&format!(
-            "banditdb_http_request_duration_seconds_count{{endpoint=\"{name}\"}} {total}\n"
-        ));
+        out.push('\n');
     }
-    out.push('\n');
 
     let mut headers = HeaderMap::new();
     headers.insert(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8".parse().unwrap());

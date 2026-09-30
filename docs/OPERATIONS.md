@@ -28,7 +28,7 @@ Every variable the binary reads. Defaults are what you get with the variable uns
 | `BANDITDB_REQUIRE_AUTH` | `false` | **Set `true` in production.** With no keys configured every caller is granted admin; this makes that fatal at startup instead of a log line. |
 | `BANDITDB_TENANT_MODE` | `false` | Namespaces campaigns per tenant. Logical isolation, not a hard security boundary — see the SLA caveat. |
 | `BANDITDB_CORS_ORIGINS` | *(deny all)* | Comma-separated allow-list. `*` permits any origin; avoid it if keys ever reach client-side code. |
-| `BANDITDB_METRICS_PUBLIC` | `false` | `/metrics` names campaigns and arms, so it requires a key by default. |
+| `BANDITDB_METRICS_PUBLIC` | `false` | `/metrics` names campaigns and arms, so it requires a key by default. When `true`, requests without a key get process health only — no campaign or arm series. |
 | `BANDITDB_RATE_LIMIT_PER_SEC` | `1000` | Per-key limit. **Raise this for load tests and bulk ingest** — the default will silently fail a benchmark loop with 429s. |
 | `BANDITDB_AUDIT_LOG` | *(disabled)* | Path to a JSONL audit file for write-path events. |
 
@@ -71,7 +71,13 @@ Campaign count is **not** capped — an admin key can create campaigns until mem
 ## Metrics
 
 `GET /metrics`, Prometheus text format. Requires a reader key unless
-`BANDITDB_METRICS_PUBLIC=true`.
+`BANDITDB_METRICS_PUBLIC=true`. What it returns depends on the key:
+
+| Caller | Sees |
+|---|---|
+| Operator key (bound to no tenant) | Everything. **Scrape with this.** |
+| Tenant key | That tenant's campaign and arm series only, labelled without the tenant prefix. No process-wide series. |
+| No key (public mode only) | Process-wide series only — no campaign or arm labels. |
 
 ### Health and durability
 
