@@ -1184,6 +1184,37 @@ fn enforce_tenant_quotas(
     Ok(())
 }
 
+/// Charge a new arm against the tenant's byte budget.
+///
+/// An arm grows its campaign's reservation just as creating a campaign does, so
+/// it is held to the same budget. Without this a tenant could create a one-arm
+/// campaign inside its budget and add arms until the process ran out of memory,
+/// taking every other tenant on the instance down with it.
+fn enforce_arm_budget(state: &AppState, auth: &AuthContext, campaign_id: &str) -> Result<(), AppError> {
+    let Some(tenant_id) = &auth.tenant_id else { return Ok(()) };
+    let Some(budget) = state.registry.tenant_quotas(tenant_id).and_then(|q| q.max_campaign_bytes) else {
+        return Ok(());
+    };
+    // An unknown campaign is the engine's to report.
+    let Some(wanted) = state.db.campaigns.read().get(campaign_id).map(|campaign| {
+        let arms = campaign.arms.read();
+        let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+        let estimate = |n| banditdb::engine::campaign_memory_estimate(n, arm_dim, &campaign.algorithm);
+        estimate(arms.len() + 1).saturating_sub(estimate(arms.len()))
+    }) else { return Ok(()) };
+
+    let reserved = tenant_reserved_bytes(state, tenant_id);
+    if reserved + wanted > budget {
+        let mb = |b: u64| b as f64 / 1_048_576.0;
+        return Err(AppError(StatusCode::FORBIDDEN, format!(
+            "memory budget exceeded: this arm reserves {:.1} MB, you have \
+             {:.1} MB of {:.1} MB left on your plan",
+            mb(wanted), mb(budget.saturating_sub(reserved)), mb(budget)
+        )));
+    }
+    Ok(())
+}
+
 async fn handle_add_arm(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1196,6 +1227,7 @@ async fn handle_add_arm(
     if let WarmStart::Arms { arms, .. } = &payload.warm_start {
         for arm in arms { validate_id(arm, "warm_start.arms")?; }
     }
+    enforce_arm_budget(&state, &auth, &ns(&auth, &campaign_id))?;
 
     state.db.add_arm(
         &ns(&auth, &campaign_id),

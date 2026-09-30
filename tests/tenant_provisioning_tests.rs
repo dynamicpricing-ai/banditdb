@@ -458,6 +458,38 @@ fn tenant_memory_budget_is_enforced() {
         "bytes should bind before the count limit does");
 }
 
+/// Adding arms grows a campaign, so it must be charged against the same budget.
+///
+/// `POST /campaign/:id/arms` skipped the check entirely: a tenant could create a
+/// one-arm campaign well inside its budget and then add arms until the process
+/// ran out of memory — taking every other tenant on the instance down with it.
+#[test]
+fn adding_arms_is_charged_against_the_memory_budget() {
+    let srv = server_or_skip!(18416, "/tmp/bdb_provision_arm_bytes", true);
+    let key = "BDBarmbytes000000000000000000000";
+
+    // 2 MB. One arm at d=256 reserves ~0.5 MB, so a handful fit and no more.
+    srv.provision("PUT", "/admin/tenants/org_arm_bytes",
+        Some(&tenant_body_with_bytes(key, "BDBarmbyteswriter0000000000", 50, Some(2 * 1024 * 1024))))
+        .unwrap();
+    let one = r#"{"campaign_id":"grow","arms":["a0"],"feature_dim":256}"#;
+    assert_eq!(srv.post_key("/campaign", key, one).unwrap().0, 200, "one arm must fit");
+
+    let mut refused = None;
+    for i in 1..20 {
+        let (status, body) = srv.post_key("/campaign/grow/arms", key,
+            &format!(r#"{{"arm_id":"a{i}"}}"#)).unwrap();
+        match status {
+            200 => {}
+            403 => { refused = Some((i, body)); break; }
+            other => panic!("unexpected status {other} adding arm {i}: {body}"),
+        }
+    }
+    let (at, body) = refused.expect("arms were added past the tenant's memory budget");
+    assert!(at > 1, "arms that fit must still be accepted");
+    assert!(body.to_lowercase().contains("budget"), "the refusal must name the budget: {body}");
+}
+
 /// Purging is explicit and separate from revoking credentials.
 ///
 /// Losing a key must never destroy models, so `DELETE /admin/tenants/:id` leaves

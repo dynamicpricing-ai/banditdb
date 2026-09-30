@@ -2123,6 +2123,19 @@ impl BanditDB {
             let base_dim = arms.values().next().map(|a| a.theta.len()).ok_or_else(|| {
                 EngineError::BadRequest(format!("campaign '{campaign_id}' has no arms to infer the feature dimension from"))
             })?;
+            // Same limit as creation, applied to the size this arm grows it to —
+            // otherwise a campaign created small grows past it one arm at a time.
+            if self.max_campaign_bytes > 0 {
+                let estimate = campaign_memory_estimate(arms.len() + 1, base_dim, &campaign.algorithm);
+                if estimate > self.max_campaign_bytes {
+                    return Err(EngineError::LimitExceeded(format!(
+                        "adding arm '{arm_id}' would grow campaign '{campaign_id}' to an estimated \
+                         {:.1} MB, over the {:.1} MB per-campaign limit (BANDITDB_MAX_CAMPAIGN_BYTES)",
+                        estimate as f64 / 1_048_576.0,
+                        self.max_campaign_bytes as f64 / 1_048_576.0,
+                    )));
+                }
+            }
             let prior = resolve_prior(&arms, warm_start, group.as_deref(), base_dim)?;
 
             // Progressive: the challenger's arms may live in a different space, so

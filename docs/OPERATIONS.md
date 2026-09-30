@@ -51,6 +51,7 @@ Every variable the binary reads. Defaults are what you get with the variable uns
 |---|---|---|
 | `BANDITDB_MAX_ARMS` | `1000` | Per campaign. |
 | `BANDITDB_MAX_FEATURE_DIM` | `4096` | Also caps context length at predict time. |
+| `BANDITDB_MAX_CAMPAIGN_BYTES` | `0` (unlimited) | Largest estimated footprint of one campaign, checked at creation and on every added arm. **Set it in production**: at d=4096 each LinUCB arm reserves 128 MiB, so unlimited lets one request exhaust the machine. `deploy/setup-vm.sh` sets 2 GiB. |
 | `BANDITDB_MAX_CONTEXT_MAGNITUDE` | `1e6` | Rejects values that would overflow the rank-one update. Finiteness is not enough: `1e155` and above squares to infinity, and the resulting NaN persists into the checkpoint. |
 | `BANDITDB_MAX_PENDING_INTERACTIONS` | `100000` | Predictions awaiting a reward. ~1 KB each at `context_dim=64`, so the default is ≈70–130 MB. Eviction permanently breaks matching for that prediction. |
 

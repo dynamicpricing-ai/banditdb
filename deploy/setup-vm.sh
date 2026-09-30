@@ -94,6 +94,12 @@ BANDITDB_PROVISION_KEY=
 # whichever trips first wins.
 BANDITDB_CHECKPOINT_INTERVAL=1000
 BANDITDB_MAX_WAL_SIZE_MB=512
+
+# Largest estimated footprint of any one campaign, however it gets there —
+# creation or adding arms. Unset means unlimited, and a single request at
+# d=4096 can then reserve more than this machine's memory for every tenant.
+# 2 GiB leaves room for several large campaigns on a 16 GB VM.
+BANDITDB_MAX_CAMPAIGN_BYTES=2147483648
 EOF
   echo "  created $ENV_FILE — add BANDITDB_PROVISION_KEY before starting"
 else
