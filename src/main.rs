@@ -885,6 +885,13 @@ struct TenantCampaignSummary {
     arm_count:   usize,
     archived:    bool,
     context_dim: usize,
+    /// What this campaign reserves against the tenant's memory budget.
+    ///
+    /// Reported rather than left for a caller to derive: the formula lives in
+    /// `campaign_memory_estimate` and is what admission control enforces, so a
+    /// console recomputing it would eventually disagree with the engine that
+    /// refuses the campaign.
+    bytes_reserved: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata:    Option<serde_json::Value>,
 }
@@ -916,6 +923,9 @@ async fn handle_tenant_campaigns(
                 arm_count:   arms.len(),
                 archived:    c.archived.load(Ordering::Relaxed),
                 context_dim,
+                bytes_reserved: banditdb::engine::campaign_memory_estimate(
+                    arms.len(), arm_dim, &c.algorithm,
+                ),
                 metadata:    c.metadata.clone(),
             }
         })
@@ -1070,6 +1080,10 @@ struct LimitsResponse {
     max_campaign_bytes: Option<u64>,
     max_feature_dim:   Option<usize>,
     rate_limit_per_sec: Option<u32>,
+    /// Sum of what this tenant's campaigns reserve. Without it a caller sees the
+    /// ceiling and not the distance to it, which is the only part anyone can act
+    /// on before a create is refused.
+    bytes_reserved:    u64,
 }
 
 async fn handle_limits(
@@ -1091,6 +1105,10 @@ async fn handle_limits(
         max_campaign_bytes: q.as_ref().and_then(|q| q.max_campaign_bytes),
         max_feature_dim:    q.as_ref().and_then(|q| q.max_feature_dim),
         rate_limit_per_sec: q.as_ref().and_then(|q| q.rate_limit_per_sec),
+        bytes_reserved:     match &auth.tenant_id {
+            Some(t) => tenant_reserved_bytes(&state, t),
+            None    => 0,
+        },
     })
 }
 
