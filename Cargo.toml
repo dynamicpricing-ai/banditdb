@@ -37,4 +37,5 @@ cuda   = ["neural", "candle-core/cuda"]
 metal  = ["neural", "candle-core/metal"]
 
 [dev-dependencies]
+libc = "0.2"
 sha2 = "0.10"

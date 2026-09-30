@@ -214,6 +214,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "governor",
+ "libc",
  "moka",
  "ndarray",
  "parking_lot",

@@ -740,8 +740,17 @@ impl BanditDB {
                                 Err(_)    => break,
                             }
                         }
+                        // Where this batch starts. An attempt that fails partway has
+                        // already written part of the batch; writing it again on top
+                        // would leave a torn record, or a second copy of the records
+                        // that did land, which replay would apply twice. So every
+                        // failed attempt is truncated back to here.
+                        let batch_start = match file.metadata() {
+                            Ok(m)  => Some(m.len()),
+                            Err(e) => { fatal_err = Some(e); None }
+                        };
                         let mut attempt = 0u32;
-                        loop {
+                        while let Some(batch_start) = batch_start {
                             let mut write_err: Option<std::io::Error> = None;
                             'write: {
                                 for e in &batch {
@@ -781,18 +790,31 @@ impl BanditDB {
                                     if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
                                         file = f;
                                     }
+                                    if let Err(e) = file.set_len(batch_start) {
+                                        fatal_err = Some(e); break;
+                                    }
                                 }
-                                Some(e) => { fatal_err = Some(e); break; }
+                                Some(e) => {
+                                    // Best effort: the writer is shutting down either way,
+                                    // but a clean tail keeps the next start simple.
+                                    let _ = file.set_len(batch_start).and_then(|_| file.sync_all());
+                                    fatal_err = Some(e); break;
+                                }
                             }
                         }
 
                         // Group commit: durable records are now in the page cache.
                         // Sync when the window has elapsed; otherwise let the next
                         // batch (or the idle path above) carry them.
-                        if batch_durable {
+                        //
+                        // Skipped when the write failed. An fsync succeeds regardless
+                        // of whether the write before it did, so running it here would
+                        // acknowledge records that never reached the file; the fatal
+                        // handler below fails every waiting caller instead.
+                        if batch_durable && fatal_err.is_none() {
                             pending_durable = true;
                         }
-                        if pending_durable && last_sync.elapsed() >= fsync_interval {
+                        if fatal_err.is_none() && pending_durable && last_sync.elapsed() >= fsync_interval {
                             match file.sync_all() {
                                 Ok(()) => {
                                     pending_durable = false;
