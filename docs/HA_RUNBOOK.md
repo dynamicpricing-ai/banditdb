@@ -42,7 +42,7 @@ Predictions are recoverable — the pending-interaction cache holds them, and th
 
    This is not bounded by the checkpoint interval, and earlier revisions of this runbook were wrong to say so. Checkpointing controls WAL size and replay time, not durability.
 
-   **Predictions are deliberately weaker.** They are best-effort: under a WAL backlog a prediction record is dropped rather than failing the request, which costs the ability to match a late reward for it. Watch `banditdb_wal_dropped_total`.
+   **Predictions are deliberately weaker.** They are best-effort: under a WAL backlog a prediction record is dropped rather than failing the request. Its reward still matches — the reward record carries the prediction, so an acknowledged reward is never lost — unless the process restarts before the next checkpoint, in which case the reward is refused with a 404 rather than acknowledged. Watch `banditdb_wal_dropped_total`.
 4. Recovery is automatic — no manual intervention for a clean restart. Measured replay: **0.6 s for 100k events / 38 MB WAL**, so restart time is dominated by pod scheduling.
 5. If the checkpoint is corrupt *and* no usable `checkpoint.prev` exists, the server **refuses to start** rather than coming up empty. Restore from backup, or set `BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true` to start empty and accept the loss.
 
@@ -128,7 +128,7 @@ kubectl logs -f deployment/banditdb | grep -E "recovered|checkpoint"
 | Storage full | WAL writes fail; health endpoint reflects degraded state |
 | Second process on the same volume | Refuses to start — `flock` on `DATA_DIR` prevents the interleaved writes that would corrupt it |
 | Corrupt checkpoint | Falls back to `checkpoint.prev`; refuses to start if neither is readable, rather than serving an empty database |
-| Prediction backlog | Prediction log records are dropped, not requests. Serving continues; `banditdb_wal_dropped_total` rises and late rewards for dropped records will not match |
+| Prediction backlog | Prediction log records are dropped, not requests. Serving continues; `banditdb_wal_dropped_total` rises; rewards for dropped records still match unless a restart intervenes before the next checkpoint |
 | Pending-interaction cache full | Oldest entries evicted; `banditdb_interactions_evicted_total` rises. Each eviction permanently breaks reward matching for that prediction — alert on it |
 
 ## Multi-Replica (Not Yet Supported)

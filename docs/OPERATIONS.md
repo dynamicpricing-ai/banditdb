@@ -79,7 +79,7 @@ Campaign count is **not** capped — an admin key can create campaigns until mem
 | `banditdb_wal_healthy` | gauge | `1` healthy, `0` the WAL writer hit an unrecoverable I/O error. At `0` all writes are rejected and `/health` returns 503. |
 | `banditdb_wal_channel_available` | gauge | Free slots in the WAL queue. Sustained near zero means the writer cannot keep up. |
 | `banditdb_wal_fsync_total` | counter | Group-commit fsyncs. Compare against reward rate to see how effectively the commit window is batching. |
-| `banditdb_wal_dropped_total` | counter | **Prediction records discarded** because the writer fell behind. Predictions are best-effort, so the request still succeeded — but a late reward for a dropped record cannot be matched. |
+| `banditdb_wal_dropped_total` | counter | **Prediction records discarded** because the writer fell behind. Predictions are best-effort, so the request still succeeded. Its reward still matches and is durable (the reward record carries the prediction), but if the process restarts before the next checkpoint the prediction is gone and its reward gets a 404. |
 
 ### Interaction cache
 

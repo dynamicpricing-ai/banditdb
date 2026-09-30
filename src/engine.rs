@@ -1325,7 +1325,12 @@ impl BanditDB {
                     DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
                         predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
                     }
-                    DbEvent::Rewarded { interaction_id, reward, timestamp_secs } => {
+                    DbEvent::Rewarded { interaction_id, reward, timestamp_secs, unlogged_prediction } => {
+                        if let Some(p) = unlogged_prediction {
+                            predicted.entry(interaction_id.clone()).or_insert((
+                                p.campaign_id, p.arm_id, p.context.to_vec(), p.arm_propensities, p.timestamp_secs,
+                            ));
+                        }
                         rewarded.insert(interaction_id, (reward, timestamp_secs));
                     }
                     _ => {}
@@ -1454,6 +1459,7 @@ impl BanditDB {
                         context:     Array1::from_vec(context.clone()),
                         arm_propensities: arm_propensities.clone(),
                         timestamp_secs: *timestamp_secs,
+                        logged:      true,
                     },
                 );
                 // Restore the prediction counter on replay so it survives restart
@@ -1473,7 +1479,14 @@ impl BanditDB {
                     }
                 }
             }
-            DbEvent::Rewarded { interaction_id, reward, .. } => {
+            DbEvent::Rewarded { interaction_id, reward, unlogged_prediction, .. } => {
+                // Replay of a reward whose Predicted record was dropped: restore the
+                // prediction from the reward itself. Live, the cache already has it.
+                if let Some(prediction) = unlogged_prediction {
+                    if !self.interactions.contains_key(interaction_id.as_str()) {
+                        self.interactions.insert(interaction_id.clone(), prediction.clone());
+                    }
+                }
                 if let Some(record) = self.interactions.get(interaction_id.as_str()) {
                     let campaigns = self.campaigns.read();
                     // Live writes are validated before logging, so this only trips on
@@ -1584,15 +1597,28 @@ impl BanditDB {
 
     // --- The Public API ---
 
-    /// Enqueue an event for the WAL writer.
+    /// Enqueue an event for the WAL writer. Returns false if it was dropped.
     ///
     /// `Required` events propagate enqueue failure to the caller. `BestEffort`
     /// events are dropped and counted instead — a prediction burst that outruns the
     /// writer degrades logging, not availability. Every drop is visible through
-    /// `banditdb_wal_dropped_total`; sustained non-zero values mean predictions are
-    /// going unlogged and late rewards will fail to match.
-    fn wal_send(&self, event: Arc<DbEvent>, durability: Durability) -> Result<(), EngineError> {
-        self.wal_enqueue(event, durability).map(|_| ())
+    /// `banditdb_wal_dropped_total`. A dropped prediction can still be rewarded:
+    /// its reward then carries the prediction itself (see `DbEvent::Rewarded`).
+    fn wal_send(&self, event: Arc<DbEvent>, durability: Durability) -> Result<bool, EngineError> {
+        match self.wal_enqueue(event, durability) {
+            Ok(_) => Ok(true),
+            Err(e) if durability == Durability::BestEffort => {
+                let dropped = self.wal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                // Log the first drop and then sparsely — a saturated writer would
+                // otherwise turn every request into a log line.
+                if dropped == 1 || dropped.is_multiple_of(1000) {
+                    tracing::warn!(dropped, reason = ?e,
+                        "WAL: dropped a best-effort prediction record — its reward will carry it instead");
+                }
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Enqueue an event and apply it to memory as one step with respect to
@@ -1625,22 +1651,8 @@ impl BanditDB {
         };
         match self.event_tx.try_send(WalMessage::Event { event, durable, ack }) {
             Ok(()) => Ok(rx),
-            Err(e) => {
-                if durable {
-                    return Err(match e {
-                        TrySendError::Full(_)   => EngineError::WalFull,
-                        TrySendError::Closed(_) => EngineError::WalUnavailable,
-                    });
-                }
-                let dropped = self.wal_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                // Log the first drop and then sparsely — a saturated writer would
-                // otherwise turn every request into a log line.
-                if dropped == 1 || dropped.is_multiple_of(1000) {
-                    tracing::warn!(dropped, reason = ?e,
-                        "WAL: dropped a best-effort prediction record — late rewards for it cannot match");
-                }
-                Ok(None)
-            }
+            Err(TrySendError::Full(_))   => Err(EngineError::WalFull),
+            Err(TrySendError::Closed(_)) => Err(EngineError::WalUnavailable),
         }
     }
 
@@ -2092,7 +2104,7 @@ impl BanditDB {
         // counter/WAL divergence the old ordering had — `prediction_count` was
         // incremented during scoring above, so an enqueue failure used to leave the
         // counter ahead of the log while returning an error to the client.
-        self.wal_send(Arc::clone(&event), Durability::BestEffort)?;
+        let logged = self.wal_send(Arc::clone(&event), Durability::BestEffort)?;
 
         // Direct cache insert — no lock needed. We skip apply_event_to_memory here
         // because the prediction_count was already incremented above.
@@ -2104,6 +2116,7 @@ impl BanditDB {
                 context:          Array1::from_vec(context),
                 arm_propensities,
                 timestamp_secs:   now,
+                logged,
             },
         );
 
@@ -2149,6 +2162,7 @@ impl BanditDB {
             interaction_id: interaction_id.clone(),
             reward,
             timestamp_secs: now,
+            unlogged_prediction: None,
         });
         // One ack covers both records: the prediction was enqueued first, so any
         // fsync that reaches the reward has necessarily already covered it.
@@ -2182,13 +2196,18 @@ impl BanditDB {
     /// `BANDITDB_FSYNC_INTERVAL_MS` when batching under load.
     pub async fn reward(&self, interaction_id: &str, reward: f64) -> Result<(), EngineError> {
         Self::validate_reward(reward)?;
-        if self.interactions.get(interaction_id).is_none() {
+        let Some(record) = self.interactions.get(interaction_id) else {
             return Err(EngineError::NotFound(
                 format!("Interaction '{interaction_id}' not found or already rewarded")
             ));
-        }
+        };
+        // A prediction whose WAL record was dropped leaves replay nothing to match
+        // this reward against, so the reward carries it. Without that, an
+        // acknowledged reward would vanish on restart.
+        let unlogged_prediction = (!record.logged).then_some(record);
         let event = Arc::new(DbEvent::Rewarded {
             interaction_id: interaction_id.to_string(), reward, timestamp_secs: now_secs(),
+            unlogged_prediction,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
         // Applied before awaiting: the update is visible to concurrent readers

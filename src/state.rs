@@ -388,7 +388,14 @@ pub struct InteractionRecord {
     pub arm_propensities: Option<HashMap<String, f64>>,
     #[serde(default)]
     pub timestamp_secs:   u64,
+    /// False when this prediction's WAL record was dropped under load, so replay
+    /// cannot find it and its reward must carry it instead. Not persisted: a
+    /// record restored from a checkpoint is recoverable from that checkpoint.
+    #[serde(skip, default = "logged_default")]
+    pub logged:           bool,
 }
+
+fn logged_default() -> bool { true }
 
 /// One completed prediction→reward pair, ready to write as a flat Parquet row.
 #[derive(Debug)]
@@ -622,6 +629,11 @@ pub enum DbEvent {
         reward:         f64,
         #[serde(default)]
         timestamp_secs: u64,
+        /// The prediction being rewarded, present only when its `Predicted`
+        /// record was dropped from the WAL. Replay restores the prediction from
+        /// here, so an acknowledged reward is never orphaned. Absent in older WALs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unlogged_prediction: Option<InteractionRecord>,
     },
     /// A new arm joined a live campaign.
     ///
