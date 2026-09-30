@@ -1,6 +1,58 @@
 # Changelog
 
-## Unreleased — Runtime tenant provisioning
+## v2.2.1 — Durability and isolation fixes
+
+Fixes from a durability and multi-tenant audit. No API changes; data written by
+2.2.0 and earlier recovers as before. Downgrading to 2.2.0 or 2.1.0 still works,
+but loses the lossless `checkpoint.prev` fallback described below.
+
+**Acknowledged writes that could be lost or applied twice**
+
+- A checkpoint taken under traffic could apply some rewards twice after the next
+  restart: the WAL offset and the memory snapshot were taken at different times.
+  They are now taken together.
+- Two overlapping checkpoints (manual endpoint, automatic task, shutdown) could
+  discard acknowledged rewards. Checkpoints now run one at a time.
+- A reward whose prediction record had been dropped under WAL backlog was
+  acknowledged but lost on restart. The reward record now carries the prediction.
+- A WAL write that failed after its retries could still be acknowledged, and each
+  retry left a torn or duplicated record behind. Failed writes are now refused and
+  truncated away.
+- Changing `BANDITDB_WAL_FORMAT` on an existing data directory silently lost every
+  later record. The WAL keeps its format until the next checkpoint converts it.
+- Falling back to `checkpoint.prev` lost every event between the two checkpoints.
+  Rotation now keeps that WAL segment as `wal_segment.N`, and the rotated WAL starts
+  with a record naming its checkpoint, so recovery rebuilds the full history.
+  **Back up `wal_segment.*` alongside `checkpoint.prev`**; `scripts/backup_restore.sh`
+  does.
+
+**Requests that could crash or corrupt the engine**
+
+- `interact` accepted a context of the wrong length or an unknown arm. A wrong
+  length was logged and then panicked — on every restart after it, too. Both are
+  now rejected before anything is logged, and replay skips such records from
+  older WALs.
+
+**Tenant isolation and limits**
+
+- `/metrics` listed every tenant's campaigns to any valid key. It is now scoped:
+  a tenant key sees its own campaigns, an operator key sees everything, and
+  anonymous public metrics carry process health only.
+- Adding arms bypassed both the per-tenant memory budget and
+  `BANDITDB_MAX_CAMPAIGN_BYTES`. Both are now enforced. **Set
+  `BANDITDB_MAX_CAMPAIGN_BYTES` in production** — unlimited lets one request exhaust
+  the machine. `deploy/setup-vm.sh` sets 2 GiB.
+- Tenant changes were applied in memory before reaching disk, and fsync errors were
+  ignored: a failed revocation could take effect and then vanish on restart, and a
+  retried tenant removal could report success without persisting.
+
+## v2.2.0 — Campaign memory reporting
+
+- The tenant campaign list reports `bytes_reserved`, what each campaign reserves
+  against the tenant's memory budget, so a console can show usage rather than only
+  the ceiling.
+
+## v2.1.0 — Runtime tenant provisioning
 
 Keys were read from `BANDITDB_API_KEYS` once at startup, so adding a tenant meant
 editing configuration and restarting. A hosted control plane cannot work that way.
@@ -67,7 +119,7 @@ Per-key usage is tracked in memory and written out when the store is persisted f
 another reason — best effort by design, since recording it on disk per request
 would put a write on the authentication path.
 
-## Unreleased — Campaign admission control
+## v2.1.0 — Campaign admission control
 
 Closes the "no cap on campaign count" gap from `docs/ROADMAP.md`.
 
@@ -89,7 +141,7 @@ unrecoverable. Archived campaigns still count, because their state stays residen
 Defaults are chosen to change no existing behaviour: the size ceiling is off, and
 10,000 campaigns is far above any current deployment.
 
-## Unreleased — Dynamic arms
+## v2.1.0 — Dynamic arms
 
 Arms are no longer fixed at campaign creation.
 
