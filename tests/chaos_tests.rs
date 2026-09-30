@@ -47,6 +47,7 @@ async fn test_3_1_torn_write_recovery() {
             algorithm: Algorithm::Linucb,
             metadata: None,
             decay_half_life_hours: None,
+            pacing: None,
         };
         writeln!(file, "{}", serde_json::to_string(&campaign_event).unwrap()).unwrap();
 

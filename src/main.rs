@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use tower_http::cors::{CorsLayer, Any};
-use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, WarmStart, DEFAULT_ALPHA};
+use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, PacingConfig, PacingReport, WarmStart, DEFAULT_ALPHA};
 use banditdb::engine::ArmFilter;
 use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
 use banditdb::reqlog::{RequestLog, RequestRecord};
@@ -401,6 +401,8 @@ struct CreateCampaignRequest {
     algorithm:   Algorithm,
     metadata:             Option<serde_json::Value>,
     decay_half_life_hours: Option<f64>,
+    #[serde(default)]
+    pacing:               Option<PacingConfig>,
 }
 
 fn default_alpha() -> f64 { DEFAULT_ALPHA }
@@ -540,6 +542,8 @@ struct CampaignInfo {
     arms: HashMap<String, ArmInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pacing: Option<PacingReport>,
 }
 
 #[derive(Serialize)]
@@ -709,10 +713,11 @@ async fn handle_create_campaign(
 
     enforce_tenant_quotas(&state, &auth, payload.arms.len(), arm_dim, &payload.algorithm)?;
 
-    state.db.add_campaign(
+    state.db.add_campaign_pacing(
         &ns(&auth, &payload.campaign_id),
         payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata,
         payload.decay_half_life_hours,
+        payload.pacing,
     )
     .await
     .map(|_| Json("Campaign Created"))
@@ -1415,6 +1420,7 @@ async fn handle_campaign_info(
         total_rewards,
         arms,
         metadata: campaign.metadata.clone(),
+        pacing:   campaign.pacing_report(),
     }))
 }
 
@@ -1437,6 +1443,17 @@ async fn handle_campaign_diagnostics(
     let stored_id = ns(&auth, &campaign_id);
     state.db.campaign_diagnostics(&stored_id)
         .map(|mut d| { d.campaign_id = campaign_id; Json(d) })
+        .map_err(map_engine_err)
+}
+
+async fn handle_campaign_pacing(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(campaign_id): Path<String>,
+) -> Result<Json<Option<PacingReport>>, AppError> {
+    let stored_id = ns(&auth, &campaign_id);
+    state.db.campaign_pacing_report(&stored_id)
+        .map(Json)
         .map_err(map_engine_err)
 }
 
@@ -1636,6 +1653,47 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
         }
     }
     out.push('\n');
+
+    let mut pacing_metrics = Vec::new();
+    for (cid, campaign) in campaigns.iter() {
+        if let Some(pacing) = campaign.pacing_report() {
+            for res in pacing.resources {
+                pacing_metrics.push((prom_label(cid), prom_label(&res.name), res.budget, res.consumed, res.remaining, res.lambda, res.utilization));
+            }
+        }
+    }
+    if !pacing_metrics.is_empty() {
+        out.push_str("# HELP banditdb_pacing_budget Initial resource budget\n");
+        out.push_str("# TYPE banditdb_pacing_budget gauge\n");
+        for (cid, rname, budget, _, _, _, _) in &pacing_metrics {
+            out.push_str(&format!("banditdb_pacing_budget{{campaign=\"{cid}\",resource=\"{rname}\"}} {budget}\n"));
+        }
+        out.push('\n');
+        out.push_str("# HELP banditdb_pacing_consumed Total resource consumed\n");
+        out.push_str("# TYPE banditdb_pacing_consumed counter\n");
+        for (cid, rname, _, consumed, _, _, _) in &pacing_metrics {
+            out.push_str(&format!("banditdb_pacing_consumed{{campaign=\"{cid}\",resource=\"{rname}\"}} {consumed}\n"));
+        }
+        out.push('\n');
+        out.push_str("# HELP banditdb_pacing_remaining Remaining resource budget\n");
+        out.push_str("# TYPE banditdb_pacing_remaining gauge\n");
+        for (cid, rname, _, _, remaining, _, _) in &pacing_metrics {
+            out.push_str(&format!("banditdb_pacing_remaining{{campaign=\"{cid}\",resource=\"{rname}\"}} {remaining}\n"));
+        }
+        out.push('\n');
+        out.push_str("# HELP banditdb_pacing_lambda Current Lagrangian shadow price\n");
+        out.push_str("# TYPE banditdb_pacing_lambda gauge\n");
+        for (cid, rname, _, _, _, lambda, _) in &pacing_metrics {
+            out.push_str(&format!("banditdb_pacing_lambda{{campaign=\"{cid}\",resource=\"{rname}\"}} {lambda}\n"));
+        }
+        out.push('\n');
+        out.push_str("# HELP banditdb_pacing_utilization Resource utilization ratio\n");
+        out.push_str("# TYPE banditdb_pacing_utilization gauge\n");
+        for (cid, rname, _, _, _, _, util) in &pacing_metrics {
+            out.push_str(&format!("banditdb_pacing_utilization{{campaign=\"{cid}\",resource=\"{rname}\"}} {util}\n"));
+        }
+        out.push('\n');
+    }
     drop(campaigns);
 
     if process_wide {
@@ -1852,6 +1910,7 @@ async fn main() {
         .route("/campaign/:id",             get(handle_campaign_info))
         .route("/campaign/:id/report",      get(handle_campaign_report))
         .route("/campaign/:id/diagnostics", get(handle_campaign_diagnostics))
+        .route("/campaign/:id/pacing",      get(handle_campaign_pacing))
         .route("/health/detail",            get(handle_health_detail))
         .route("/export",                   get(handle_export))
         .route("/limits",                   get(handle_limits));

@@ -1,4 +1,5 @@
 ---
+name: banditdb
 description: Operate BanditDB — the Intuition Database. Create campaigns, get intuition, record outcomes, diagnose learning.
 ---
 

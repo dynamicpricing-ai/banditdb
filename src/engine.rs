@@ -1,4 +1,4 @@
-use crate::state::{Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord, WarmStart, MAX_WARM_START_STRENGTH};
+use crate::state::{Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord, PacingCheckpoint, PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH};
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
 #[cfg(feature = "neural")]
@@ -133,8 +133,14 @@ fn read_wal_slice(
                 Box::new(file)
             };
             for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                if let Ok(e) = serde_json::from_str::<DbEvent>(&line) {
-                    events.push(e);
+                match serde_json::from_str::<DbEvent>(&line) {
+                    Ok(DbEvent::Unknown) => {
+                        tracing::warn!("wal replay: unknown event variant encountered; skipping");
+                    }
+                    Ok(e) => events.push(e),
+                    Err(err) => {
+                        tracing::warn!(line = %line, error = %err, "wal replay: skipping unparseable record");
+                    }
                 }
             }
         }
@@ -146,8 +152,14 @@ fn read_wal_slice(
                 let len = u32::from_le_bytes(len_buf) as usize;
                 let mut bytes = vec![0u8; len];
                 if reader.read_exact(&mut bytes).is_err() { break; }
-                if let Ok(e) = rmp_serde::from_slice::<DbEvent>(&bytes) {
-                    events.push(e);
+                match rmp_serde::from_slice::<DbEvent>(&bytes) {
+                    Ok(DbEvent::Unknown) => {
+                        tracing::warn!("wal replay: unknown binary event variant encountered; skipping");
+                    }
+                    Ok(e) => events.push(e),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "wal replay: skipping unparseable binary record");
+                    }
                 }
             }
         }
@@ -283,6 +295,8 @@ pub struct Campaign {
     /// If set, A_inv and b are rescaled at each checkpoint to implement exponential
     /// forgetting over wall-clock time. None = no forgetting.
     pub decay_half_life_hours: Option<f64>,
+    /// Live Lagrangian pacing / capacity constraints runtime state. None = unconstrained.
+    pub pacing: Option<PacingState>,
 }
 
 impl Campaign {
@@ -295,6 +309,7 @@ impl Campaign {
         challenger_arms:       Option<RwLock<HashMap<String, ArmState>>>,
         metadata:              Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
+        pacing:                Option<PacingState>,
     ) -> Self {
         // When challenger_arms is not explicitly provided (new campaign path), derive them
         // from the algorithm config so the caller doesn't have to duplicate the logic.
@@ -368,6 +383,7 @@ impl Campaign {
             archived:                AtomicBool::new(false),
             last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
             decay_half_life_hours,
+            pacing,
         }
     }
 
@@ -398,6 +414,37 @@ impl Campaign {
             }
         }
         Ok(())
+    }
+
+    #[inline(always)]
+    pub fn is_arm_masked(&self, arm_id: &str) -> bool {
+        match &self.pacing {
+            Some(p) => p.is_arm_masked(arm_id),
+            None => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn arm_price(&self, arm_id: &str) -> f64 {
+        match &self.pacing {
+            Some(p) => p.total_price(arm_id),
+            None => 0.0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_consumption(&self, arm_id: &str) {
+        if let Some(p) = &self.pacing {
+            p.record_consumption(arm_id);
+        }
+    }
+
+    pub fn pacing_report(&self) -> Option<PacingReport> {
+        self.pacing.as_ref().map(|p| p.report())
+    }
+
+    pub fn pacing_checkpoint(&self) -> Option<PacingCheckpoint> {
+        self.pacing.as_ref().map(|p| p.checkpoint())
     }
 
     /// Returns the embedding of `context` for Algorithm 1 scoring.
@@ -1253,7 +1300,8 @@ impl BanditDB {
 
                 for (campaign_id, camp) in checkpoint.campaigns {
                     let challenger_arms = camp.challenger_arms.map(RwLock::new);
-                    let campaign = Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), challenger_arms, camp.metadata, camp.decay_half_life_hours);
+                    let pacing_state = camp.pacing.map(PacingState::from_checkpoint);
+                    let campaign = Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), challenger_arms, camp.metadata, camp.decay_half_life_hours, pacing_state);
                     campaign.challenger_traffic_bps.store(camp.challenger_traffic_bps, Ordering::Relaxed);
                     campaign.tournament_wins.store(camp.tournament_wins, Ordering::Relaxed);
                     campaign.archived.store(camp.archived, Ordering::Relaxed);
@@ -1492,6 +1540,7 @@ impl BanditDB {
                         metadata:               campaign.metadata.clone(),
                         entropy_snapshot:       Some(entropy_at_checkpoint),
                         decay_half_life_hours:  campaign.decay_half_life_hours,
+                        pacing:                 campaign.pacing_checkpoint(),
                     })
                 }).collect()
             };
@@ -1672,14 +1721,14 @@ impl BanditDB {
     /// and from WAL replay during recovery. Takes a reference — callers own the Arc.
     fn apply_event_to_memory(&self, event: &DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours } => {
+            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours, pacing } => {
                 let arms_map: HashMap<String, ArmState> = arms.iter()
                     .map(|arm| (arm.clone(), ArmState::new(*feature_dim)))
                     .collect();
                 // challenger_arms derived by Campaign::new from algorithm (None = derive).
                 self.campaigns.write().insert(
                     campaign_id.clone(),
-                    Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone(), *decay_half_life_hours),
+                    Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone(), *decay_half_life_hours, pacing.clone().map(PacingState::new)),
                 );
             }
             DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, is_reemit } => {
@@ -1705,6 +1754,10 @@ impl BanditDB {
                 // SKIP re-emitted predictions: they were already counted live and are
                 // captured in the checkpoint snapshot, so counting them here would
                 // double-count after a checkpoint+rotation cycle.
+                //
+                // NOTE: pacing consumption is intentionally NOT replayed here. Pacing
+                // state is owned exclusively by PacingConsumed events — having two
+                // event types both call record_consumption would double-count budget.
                 if !is_reemit {
                     if let Some(campaign) = self.campaigns.read().get(campaign_id) {
                         if let Some(arm_state) = campaign.arms.read().get(arm_id.as_str()) {
@@ -1827,6 +1880,21 @@ impl BanditDB {
                 }
             }
             DbEvent::WalStart { .. } => {}
+            DbEvent::PacingConsumed { campaign_id, arm_id, .. } => {
+                // Sole owner of pacing replay: restores consumed, decisions, and lambda
+                // for the given arm. Costs are looked up from the campaign's live
+                // PacingState — they are stable config, not per-event data.
+                //
+                // Guarded by `is_arm_masked` check deliberately omitted here: replay
+                // must faithfully reconstruct what happened live, even if the arm would
+                // be masked now (e.g. budget already exhausted by earlier replay events).
+                if let Some(campaign) = self.campaigns.read().get(campaign_id.as_str()) {
+                    campaign.record_consumption(arm_id);
+                }
+            }
+            DbEvent::Unknown => {
+                tracing::warn!("apply_event_to_memory: ignoring unknown event variant");
+            }
         }
     }
 
@@ -2006,6 +2074,57 @@ impl BanditDB {
         Ok(())
     }
 
+    fn validate_pacing(pacing: &PacingConfig) -> Result<(), EngineError> {
+        let mut names = std::collections::HashSet::new();
+        for r in &pacing.resources {
+            if r.name.trim().is_empty() {
+                return Err(EngineError::BadRequest("resource constraint name cannot be empty".to_string()));
+            }
+            if !names.insert(&r.name) {
+                return Err(EngineError::BadRequest(format!("duplicate resource constraint name: '{}'", r.name)));
+            }
+            if !r.budget.is_finite() || r.budget <= 0.0 {
+                return Err(EngineError::BadRequest(format!(
+                    "resource '{}' budget must be finite and positive, got {}", r.name, r.budget
+                )));
+            }
+            if r.horizon == 0 {
+                return Err(EngineError::BadRequest(format!(
+                    "resource '{}' horizon must be positive, got 0", r.name
+                )));
+            }
+            if let Some(step) = r.step_size {
+                if !step.is_finite() || step <= 0.0 {
+                    return Err(EngineError::BadRequest(format!(
+                        "resource '{}' step_size must be finite and positive, got {step}", r.name
+                    )));
+                }
+            }
+            if let Some(lmax) = r.lambda_max {
+                if !lmax.is_finite() || lmax <= 0.0 {
+                    return Err(EngineError::BadRequest(format!(
+                        "resource '{}' lambda_max must be finite and positive, got {lmax}", r.name
+                    )));
+                }
+            }
+            if let Some(l0) = r.initial_lambda {
+                if !l0.is_finite() || l0 < 0.0 {
+                    return Err(EngineError::BadRequest(format!(
+                        "resource '{}' initial_lambda must be finite and non-negative, got {l0}", r.name
+                    )));
+                }
+            }
+            for (arm, cost) in &r.arm_costs {
+                if !cost.is_finite() || *cost < 0.0 {
+                    return Err(EngineError::BadRequest(format!(
+                        "resource '{}' arm '{}' cost must be finite and non-negative, got {}", r.name, arm, cost
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create a campaign. Returns once the record is durable.
     ///
     /// Async for the same reason as `reward`: it awaits the WAL fsync covering its
@@ -2021,6 +2140,32 @@ impl BanditDB {
         algorithm:            Algorithm,
         metadata:             Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
+    ) -> Result<(), EngineError> {
+
+        self.add_campaign_pacing(
+            campaign_id,
+            arms,
+            feature_dim,
+            alpha,
+            algorithm,
+            metadata,
+            decay_half_life_hours,
+            None,
+        ).await
+    }
+
+    /// Create a campaign with optional Lagrangian pacing / capacity constraints. Returns once the record is durable.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_campaign_pacing(
+        &self,
+        campaign_id:          &str,
+        arms:                 Vec<String>,
+        feature_dim:          usize,
+        alpha:                f64,
+        algorithm:            Algorithm,
+        metadata:             Option<serde_json::Value>,
+        decay_half_life_hours: Option<f64>,
+        pacing:               Option<PacingConfig>,
     ) -> Result<(), EngineError> {
         // Admission control runs on the create path ONLY. Recovery and WAL replay
         // deliberately bypass it — see `apply_event_to_memory`. Lowering a limit
@@ -2054,6 +2199,9 @@ impl BanditDB {
                 )));
             }
         }
+        if let Some(p) = &pacing {
+            Self::validate_pacing(p)?;
+        }
         Self::validate_algorithm(&algorithm, self.max_feature_dim)?;
 
         // Size check. Campaign count alone is a poor bound: the same count can mean
@@ -2072,7 +2220,7 @@ impl BanditDB {
             }
         }
         let event = Arc::new(DbEvent::CampaignCreated {
-            campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours,
+            campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours, pacing,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
         let ack = self.log_and_apply(event, Durability::Acked)?;
@@ -2274,16 +2422,16 @@ impl BanditDB {
                 _ => context_arr,
             };
 
-            // Candidate set for this one request: active arms the filter allows.
+            // Candidate set for this one request: active arms the filter allows and capacity constraints permit.
             // Everything downstream — scores, argmax, propensities — sees only these,
             // so the logged propensities describe the policy that actually ran.
             let eligible: Vec<(&String, &ArmState)> = arms_guard.iter()
-                .filter(|(arm_id, state)| state.is_active() && filter.allows(arm_id))
+                .filter(|(arm_id, state)| state.is_active() && filter.allows(arm_id) && !campaign.is_arm_masked(arm_id))
                 .collect();
             if eligible.is_empty() {
                 return Err(EngineError::BadRequest(format!(
                     "campaign '{campaign_id}' has no eligible arms for this request — \
-                     every arm is paused, retired, or excluded by the request filter"
+                     every arm is paused, retired, excluded by the request filter, or constrained by exhausted capacity"
                 )));
             }
 
@@ -2292,7 +2440,8 @@ impl BanditDB {
                     Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => state.score_ts(&features, campaign.alpha),
                     _ => state.score(&features, campaign.alpha),
                 };
-                ((*arm_id).clone(), score)
+                let price = campaign.arm_price(arm_id);
+                ((*arm_id).clone(), score - price)
             }).collect();
 
             let best_arm = scores.iter()
@@ -2318,7 +2467,7 @@ impl BanditDB {
                     *counts.entry(best_arm.clone()).or_insert(0) += 1;
                     for _ in 1..n {
                         if let Some((winner, _)) = eligible.iter()
-                            .map(|(id, state)| ((*id).clone(), state.score_ts(&features, campaign.alpha)))
+                            .map(|(id, state)| ((*id).clone(), state.score_ts(&features, campaign.alpha) - campaign.arm_price(id)))
                             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                         {
                             *counts.entry(winner).or_insert(0) += 1;
@@ -2331,7 +2480,20 @@ impl BanditDB {
             };
 
             (best_arm, arm_propensities)
-            // All guards dropped here.
+            // All guards (campaigns, arms_guard) are dropped here.
+        };
+
+        // Record consumption AFTER all locks are dropped: the pacing CAS loops
+        // must not run while holding campaigns.read(), as that forces concurrent
+        // predictions to spin under a shared reader slot.
+        let has_pacing = {
+            let campaigns = self.campaigns.read();
+            if let Some(campaign) = campaigns.get(campaign_id) {
+                campaign.record_consumption(&best_arm);
+                campaign.pacing.is_some()
+            } else {
+                false
+            }
         };
 
         let interaction_id = Uuid::new_v4().to_string();
@@ -2353,6 +2515,25 @@ impl BanditDB {
         // incremented during scoring above, so an enqueue failure used to leave the
         // counter ahead of the log while returning an error to the client.
         let logged = self.wal_send(Arc::clone(&event), Durability::BestEffort)?;
+
+        // Emit a PacingConsumed WAL event to make budget consumption durable across
+        // WAL rotation and crash recovery. This is the exclusive source of truth for
+        // pacing replay — the Predicted handler intentionally does NOT call
+        // record_consumption to avoid double-counting.
+        //
+        // Same BestEffort durability as Predicted: if the WAL is saturated, both
+        // records are dropped together, preserving the invariant that pacing state
+        // and prediction counts stay in sync (both lose the same decision).
+        if has_pacing {
+            self.wal_send(
+                Arc::new(DbEvent::PacingConsumed {
+                    campaign_id:    campaign_id.to_string(),
+                    arm_id:         best_arm.clone(),
+                    timestamp_secs: now,
+                }),
+                Durability::BestEffort,
+            )?;
+        }
 
         // Direct cache insert — no lock needed. We skip apply_event_to_memory here
         // because the prediction_count was already incremented above.
@@ -2643,6 +2824,7 @@ impl BanditDB {
             converged,
             likely_cause,
             suggested_action,
+            pacing:               campaign.pacing_report(),
         })
     }
 
@@ -2761,7 +2943,15 @@ impl BanditDB {
             converged,
             challenger_traffic_pct,
             tournament_win_streak,
+            pacing:              campaign.pacing_report(),
         })
+    }
+
+    /// Retrieve pacing report for a campaign if pacing is configured.
+    pub fn campaign_pacing_report(&self, campaign_id: &str) -> Result<Option<PacingReport>, EngineError> {
+        let campaigns = self.campaigns.read();
+        let campaign = campaigns.get(campaign_id).ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+        Ok(campaign.pacing_report())
     }
 
     /// Run Algorithm 2 for one campaign: retrain the MLP on its replay buffer, then

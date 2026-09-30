@@ -412,6 +412,320 @@ pub struct CompletedInteraction {
     pub propensity:     Option<f64>,
 }
 
+// ---------------------------------------------------------------------------
+// Capacity Constraints & Lagrangian Pacing
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ResourceConstraint {
+    pub name: String,
+    /// Total resource budget over the horizon window (B_j > 0).
+    pub budget: f64,
+    /// Number of decisions in this window (T > 0). Default: 10,000.
+    #[serde(default = "default_pacing_horizon")]
+    pub horizon: u64,
+    /// Dual gradient descent step size (eta). Default: auto-tuned from horizon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_size: Option<f64>,
+    /// Maximum shadow price multiplier (lambda_max). Default: auto-tuned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lambda_max: Option<f64>,
+    /// Initial shadow price multiplier (lambda_0). Default: 0.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_lambda: Option<f64>,
+    /// Per-arm resource consumption (c_{j, a} >= 0). Default 0.0 for unlisted arms.
+    #[serde(default)]
+    pub arm_costs: HashMap<String, f64>,
+}
+
+pub fn default_pacing_horizon() -> u64 { 10_000 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PacingConfig {
+    pub resources: Vec<ResourceConstraint>,
+    /// Whether to use adaptive target pacing rate (B_rem / T_rem) vs uniform (B / T).
+    /// Default: true (recommended baseline).
+    #[serde(default = "default_pacing_adaptive")]
+    pub adaptive: bool,
+}
+
+pub fn default_pacing_adaptive() -> bool { true }
+
+/// Live runtime state for an individual constrained resource knapsack.
+#[derive(Debug)]
+pub struct ResourceState {
+    pub name:           String,
+    pub budget:         f64,
+    pub horizon:        u64,
+    pub step_size:      f64,
+    pub lambda_max:     f64,
+    pub arm_costs:      HashMap<String, f64>,
+    pub consumed:       AtomicU64,  // f64::to_bits
+    pub lambda:         AtomicU64,  // f64::to_bits
+    pub decisions:      AtomicU64,  // total decisions evaluated in this window
+}
+
+impl ResourceState {
+    pub fn new(cfg: &ResourceConstraint) -> Self {
+        let budget = cfg.budget.max(1e-6);
+        let horizon = cfg.horizon.max(1);
+
+        // If step_size is not specified, derive variance-normalized step size:
+        // eta = 2.0 / sqrt(horizon) (Section 5.2 / Section 4.6 of lagrangian_pacing_mathematics.md)
+        let step_size = cfg.step_size.unwrap_or_else(|| {
+            (2.0 / (horizon as f64).sqrt()).max(1e-5)
+        });
+
+        let min_cost = cfg.arm_costs.values()
+            .copied()
+            .filter(|&c| c > 0.0)
+            .fold(f64::INFINITY, f64::min);
+        let lambda_max = cfg.lambda_max.unwrap_or_else(|| {
+            if min_cost.is_finite() && min_cost > 0.0 {
+                (1.0 / min_cost).max(1.0)
+            } else {
+                1.0
+            }
+        });
+
+        let init_lambda = cfg.initial_lambda.unwrap_or(0.0).clamp(0.0, lambda_max);
+
+        Self {
+            name: cfg.name.clone(),
+            budget,
+            horizon,
+            step_size,
+            lambda_max,
+            arm_costs: cfg.arm_costs.clone(),
+            consumed: AtomicU64::new(0.0f64.to_bits()),
+            lambda: AtomicU64::new(init_lambda.to_bits()),
+            decisions: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    pub fn cost(&self, arm_id: &str) -> f64 {
+        self.arm_costs.get(arm_id).copied().unwrap_or(0.0)
+    }
+
+    #[inline(always)]
+    pub fn consumed(&self) -> f64 {
+        f64::from_bits(self.consumed.load(Ordering::Relaxed))
+    }
+
+    #[inline(always)]
+    pub fn lambda(&self) -> f64 {
+        f64::from_bits(self.lambda.load(Ordering::Relaxed))
+    }
+
+    #[inline(always)]
+    pub fn remaining_budget(&self) -> f64 {
+        (self.budget - self.consumed()).max(0.0)
+    }
+
+    /// Hard feasibility mask M_t:
+    /// Returns true if arm consumes this resource and remaining capacity is insufficient.
+    #[inline(always)]
+    pub fn is_masked(&self, arm_id: &str) -> bool {
+        let c = self.cost(arm_id);
+        c > 0.0 && self.remaining_budget() < c
+    }
+
+    /// Target consumption rate per decision epoch rho_{j, t}.
+    ///
+    /// When called without a snapshot, reads `decisions` from the atomic. Prefer
+    /// `target_rate_at` when the epoch is already known to avoid a second load.
+    pub fn target_rate(&self, adaptive: bool) -> f64 {
+        self.target_rate_at(self.decisions.load(Ordering::Relaxed), adaptive)
+    }
+
+    /// Compute target rate at a specific epoch `t` (number of decisions already taken).
+    /// Used by `record_and_update` to avoid a double-load race where `fetch_add`
+    /// returns `t` but a bare `load` would see `t+1`.
+    fn target_rate_at(&self, t: u64, adaptive: bool) -> f64 {
+        if !adaptive {
+            self.budget / (self.horizon.max(1) as f64)
+        } else {
+            let rem_h = self.horizon.saturating_sub(t);
+            // Endgame freeze boundary:
+            // When (T - t) < max(50, 0.05 * T), clamp remaining horizon to avoid singularity.
+            let min_rem = (50u64).max((self.horizon as f64 * 0.05) as u64);
+            let clamped_rem = rem_h.max(min_rem) as f64;
+            self.remaining_budget() / clamped_rem
+        }
+    }
+
+    /// Dual projected gradient descent step on consumption:
+    /// lambda_{j, t+1} = \Pi_{[0, lambda_max]} [ lambda_j + eta * (c_{j, a} - rho_{j, t}) ]
+    ///
+    /// `t` is snapshotted via `fetch_add` and used consistently for both the endgame
+    /// freeze guard and `target_rate_at`, eliminating the double-load race where the
+    /// atomic would return `t` from `fetch_add` but `t+1` from a subsequent `load`.
+    pub fn record_and_update(&self, consumed_amount: f64, adaptive: bool) {
+        // t = epoch BEFORE this decision (fetch_add returns the old value).
+        let t = self.decisions.fetch_add(1, Ordering::Relaxed);
+
+        if consumed_amount > 0.0 {
+            let mut cur = self.consumed.load(Ordering::Relaxed);
+            loop {
+                let next = (f64::from_bits(cur) + consumed_amount).to_bits();
+                match self.consumed.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(b) => cur = b,
+                }
+            }
+        }
+
+        // Freeze dual multiplier in the endgame window to avoid singularity.
+        // Use the same epoch `t` that drives the target_rate below — consistency matters.
+        let min_rem = (50u64).max((self.horizon as f64 * 0.05) as u64);
+        if self.horizon > min_rem && t >= self.horizon - min_rem {
+            return;
+        }
+
+        // Use target_rate_at(t) so both the freeze guard and the gradient step
+        // reference the pre-increment epoch, not t+1.
+        let rho = self.target_rate_at(t, adaptive);
+        let delta = consumed_amount - rho;
+        let mut cur_lambda = self.lambda.load(Ordering::Relaxed);
+        loop {
+            let updated = (f64::from_bits(cur_lambda) + self.step_size * delta).clamp(0.0, self.lambda_max);
+            match self.lambda.compare_exchange_weak(cur_lambda, updated.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(b) => cur_lambda = b,
+            }
+        }
+    }
+}
+
+/// Live runtime state for all constraints on a campaign.
+#[derive(Debug)]
+pub struct PacingState {
+    pub resources: Vec<ResourceState>,
+    pub adaptive:  bool,
+}
+
+impl PacingState {
+    pub fn new(cfg: PacingConfig) -> Self {
+        Self {
+            resources: cfg.resources.iter().map(ResourceState::new).collect(),
+            adaptive:  cfg.adaptive,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_arm_masked(&self, arm_id: &str) -> bool {
+        self.resources.iter().any(|r| r.is_masked(arm_id))
+    }
+
+    #[inline(always)]
+    pub fn total_price(&self, arm_id: &str) -> f64 {
+        self.resources.iter().map(|r| r.lambda() * r.cost(arm_id)).sum()
+    }
+
+    pub fn record_consumption(&self, arm_id: &str) {
+        for r in &self.resources {
+            let cost = r.cost(arm_id);
+            r.record_and_update(cost, self.adaptive);
+        }
+    }
+
+    pub fn report(&self) -> PacingReport {
+        PacingReport {
+            adaptive: self.adaptive,
+            resources: self.resources.iter().map(|r| {
+                let consumed = r.consumed();
+                let budget = r.budget;
+                let remaining = r.remaining_budget();
+                let utilization = if budget > 0.0 { (consumed / budget).clamp(0.0, 1.0) } else { 0.0 };
+                ResourceReport {
+                    name: r.name.clone(),
+                    budget,
+                    consumed,
+                    remaining,
+                    utilization,
+                    lambda: r.lambda(),
+                    horizon: r.horizon,
+                    decisions: r.decisions.load(Ordering::Relaxed),
+                    is_exhausted: remaining <= 0.0,
+                }
+            }).collect(),
+        }
+    }
+
+    pub fn checkpoint(&self) -> PacingCheckpoint {
+        PacingCheckpoint {
+            adaptive: self.adaptive,
+            resources: self.resources.iter().map(|r| ResourceCheckpoint {
+                name: r.name.clone(),
+                budget: r.budget,
+                horizon: r.horizon,
+                step_size: r.step_size,
+                lambda_max: r.lambda_max,
+                arm_costs: r.arm_costs.clone(),
+                consumed: r.consumed(),
+                lambda: r.lambda(),
+                decisions: r.decisions.load(Ordering::Relaxed),
+            }).collect(),
+        }
+    }
+
+    pub fn from_checkpoint(chk: PacingCheckpoint) -> Self {
+        Self {
+            adaptive: chk.adaptive,
+            resources: chk.resources.into_iter().map(|r| ResourceState {
+                name: r.name,
+                budget: r.budget,
+                horizon: r.horizon,
+                step_size: r.step_size,
+                lambda_max: r.lambda_max,
+                arm_costs: r.arm_costs,
+                consumed: AtomicU64::new(r.consumed.to_bits()),
+                lambda: AtomicU64::new(r.lambda.to_bits()),
+                decisions: AtomicU64::new(r.decisions),
+            }).collect(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ResourceCheckpoint {
+    pub name:         String,
+    pub budget:       f64,
+    pub horizon:      u64,
+    pub step_size:    f64,
+    pub lambda_max:   f64,
+    pub arm_costs:    HashMap<String, f64>,
+    pub consumed:     f64,
+    pub lambda:       f64,
+    pub decisions:    u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PacingCheckpoint {
+    pub resources: Vec<ResourceCheckpoint>,
+    pub adaptive:  bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ResourceReport {
+    pub name:         String,
+    pub budget:       f64,
+    pub consumed:     f64,
+    pub remaining:    f64,
+    pub utilization:  f64,
+    pub lambda:       f64,
+    pub horizon:      u64,
+    pub decisions:    u64,
+    pub is_exhausted: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PacingReport {
+    pub adaptive:  bool,
+    pub resources: Vec<ResourceReport>,
+}
+
 // --- Checkpoint structs ---
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -442,6 +756,9 @@ pub struct CampaignCheckpoint {
     /// Half-life for time-aware checkpoint decay. None = no forgetting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decay_half_life_hours: Option<f64>,
+    /// Lagrangian pacing / capacity constraints checkpoint state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingCheckpoint>,
 }
 
 // --- Campaign report (business-level convergence signal) ---
@@ -496,6 +813,8 @@ pub struct CampaignReport {
     /// Current tournament win streak (Progressive only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tournament_win_streak:  Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingReport>,
 }
 
 // --- Per-arm and campaign diagnostics ---
@@ -564,6 +883,8 @@ pub struct CampaignDiagnosticsData {
     pub likely_cause:         Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_action:     Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingReport>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -608,6 +929,8 @@ pub enum DbEvent {
         metadata: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decay_half_life_hours: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pacing: Option<PacingConfig>,
     },
     Predicted {
         interaction_id: String,
@@ -688,4 +1011,32 @@ pub enum DbEvent {
     WalStart {
         generation: u64,
     },
+    /// Records that a prediction selected `arm_id` and the campaign's pacing
+    /// budget was charged accordingly.
+    ///
+    /// Emitted with `BestEffort` durability alongside every `Predicted` event for
+    /// campaigns that have `pacing` configured. Separating it from `Predicted` means:
+    ///
+    /// 1. WAL replay can restore pacing counters (`consumed`, `lambda`, `decisions`)
+    ///    independently of whether the `Predicted` record survived — WAL rotation and
+    ///    budget saturation can drop `Predicted` while this still lands.
+    /// 2. The replay handler for `Predicted` does NOT call `record_consumption`;
+    ///    only this variant does. There is therefore no double-count risk.
+    /// 3. Rollback safety: binaries that pre-date this variant deserialise it as
+    ///    `Unknown` and skip it with a warning — the existing `#[serde(other)]`
+    ///    guard covers this automatically.
+    ///
+    /// Arm costs are intentionally NOT stored here; they are derived from the
+    /// campaign's live `PacingState::arm_costs` at replay time. This means the
+    /// event is a compact "what happened" record that does not embed a snapshot of
+    /// the cost table (which can be large for multi-arm campaigns).
+    PacingConsumed {
+        campaign_id:    String,
+        arm_id:         String,
+        #[serde(default)]
+        timestamp_secs: u64,
+    },
+    /// Unknown / future variant for forward-compatibility during rollback
+    #[serde(other)]
+    Unknown,
 }
