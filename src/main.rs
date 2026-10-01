@@ -1821,7 +1821,20 @@ async fn handle_campaign_pacing(
         .map_err(map_engine_err)
 }
 
-async fn handle_checkpoint(State(state): State<Arc<AppState>>) -> Result<Json<String>, AppError> {
+/// Operator only. A checkpoint snapshots and rewrites every tenant's state and
+/// reports instance-wide totals, so a tenant key — at any role — must not be
+/// able to trigger one.
+async fn handle_checkpoint(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<String>, AppError> {
+    if auth.tenant_id.is_some() {
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            "checkpoints are process-wide — an operator key, not a tenant key, is required"
+                .into(),
+        ));
+    }
     state
         .db
         .checkpoint()

@@ -305,6 +305,24 @@ fn public_metrics_carry_no_campaign_labels() {
     );
 }
 
+/// A checkpoint is a process-wide operation: it snapshots and rewrites every
+/// tenant's state and reports instance-wide totals. A tenant key — even at admin
+/// role — must not be able to trigger it, or one tenant can drive disk I/O for
+/// all of them and read how many campaigns and pending predictions exist.
+#[test]
+fn only_an_operator_can_checkpoint() {
+    let keys = keys_with_operator();
+    let srv = server_or_skip!(18311, &[("BANDITDB_API_KEYS", keys.as_str())]);
+    assert_eq!(srv.create_campaign(ADMIN_A, "camp_a"), 200);
+
+    let (status, body) = srv.post("/checkpoint", Some(ADMIN_A), "{}").expect("reachable");
+    assert_eq!(status, 403, "a tenant admin must not trigger a process-wide checkpoint: {body}");
+    assert!(!body.contains("campaigns"), "the refusal must not report instance totals: {body}");
+
+    let (status, body) = srv.post("/checkpoint", Some(OPERATOR), "{}").expect("reachable");
+    assert_eq!(status, 200, "the operator can checkpoint: {body}");
+}
+
 // ---------------------------------------------------------------------------
 // Tenant isolation
 // ---------------------------------------------------------------------------
@@ -369,7 +387,8 @@ fn campaign_reads_are_tenant_scoped() {
 
 #[test]
 fn export_listing_is_tenant_scoped() {
-    let srv = server_or_skip!(18306, &[]);
+    let keys = keys_with_operator();
+    let srv = server_or_skip!(18306, &[("BANDITDB_API_KEYS", keys.as_str())]);
     assert_eq!(srv.create_campaign(ADMIN_A, "exp_a"), 200);
     let iid = srv.predict(ADMIN_A, "exp_a").expect("predict");
     srv.post(
@@ -378,8 +397,11 @@ fn export_listing_is_tenant_scoped() {
         &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#),
     )
     .expect("reward");
-    srv.post("/checkpoint", Some(ADMIN_A), "{}")
+    // Checkpoints are operator-only; a tenant key would get a 403 and write nothing.
+    let (status, body) = srv
+        .post("/checkpoint", Some(OPERATOR), "{}")
         .expect("checkpoint writes parquet");
+    assert_eq!(status, 200, "operator checkpoint failed: {body}");
 
     let (status, body) = srv.get("/export", Some(ADMIN_B)).expect("reachable");
     // 404 is acceptable when no exports exist at all; 200 must not name tenant A.

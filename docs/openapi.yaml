@@ -686,13 +686,15 @@ paths:
       description: |
         Atomically: flushes the WAL, exports Parquet shards, runs neural retrain +
         tournament evaluation (if applicable), writes checkpoint.json, and rotates the WAL.
-        Requires admin role.
+        Requires an operator key: admin role and bound to no tenant. A checkpoint is
+        process-wide, so tenant keys are refused at any role.
       responses:
         "200":
           description: Checkpoint complete
           content:
             application/json:
               schema: { type: string }
+        "403": { description: Tenant key — checkpoints require an operator key }
         "500": { description: Checkpoint failed }
 
   /export:

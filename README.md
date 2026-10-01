@@ -238,7 +238,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 | `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. Accepts optional `eligible_arms` / `exclude_arms` for per-request exclusion. |
 | `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
 | `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
-| `POST` | `/checkpoint` | admin | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. |
+| `POST` | `/checkpoint` | admin, operator only | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. Process-wide, so tenant keys are refused at any role. |
 | `GET` | `/export` | reader | List per-campaign Parquet files in the `exports/` directory. |
 
 Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
