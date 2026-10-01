@@ -14,8 +14,8 @@
 //!   * idle — before the writer parks, so a lone reward is not left unsynced
 //!     waiting for company. This keeps RPO near zero when traffic is light.
 
-use banditdb::BanditDB;
 use banditdb::state::Algorithm;
+use banditdb::BanditDB;
 use std::fs;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -24,8 +24,17 @@ async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db
 }
 
@@ -86,12 +95,14 @@ async fn predictions_alone_do_not_force_a_sync() {
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
     for i in 0..50 {
-        db.predict("c", vec![(i % 7) as f64 / 7.0, 0.5]).expect("predict");
+        db.predict("c", vec![(i % 7) as f64 / 7.0, 0.5])
+            .expect("predict");
     }
     settle().await;
 
     assert_eq!(
-        db.wal_fsyncs.load(Ordering::Relaxed), before,
+        db.wal_fsyncs.load(Ordering::Relaxed),
+        before,
         "predictions are best-effort; issuing an fsync for them would put a disk round \
          trip back on the serving path that P0.4 removed"
     );
@@ -114,7 +125,9 @@ async fn concurrent_rewards_share_syncs() {
     // Collect interactions first so the rewards can be issued all at once.
     let mut iids = Vec::new();
     for i in 0..400 {
-        let (_, iid) = db.predict("c", vec![(i % 11) as f64 / 11.0, 0.3]).expect("predict");
+        let (_, iid) = db
+            .predict("c", vec![(i % 11) as f64 / 11.0, 0.3])
+            .expect("predict");
         iids.push(iid);
     }
 

@@ -17,15 +17,27 @@ async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db
 }
 
 /// Flush the WAL and return its contents.
 async fn wal_contents(db: &BanditDB, dir: &str) -> String {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    db.event_tx.send(WalMessage::Checkpoint { reply: tx }).await.unwrap();
+    db.event_tx
+        .send(WalMessage::Checkpoint { reply: tx })
+        .await
+        .unwrap();
     rx.await.unwrap();
     fs::read_to_string(format!("{dir}/wal.jsonl")).unwrap()
 }
@@ -33,7 +45,9 @@ async fn wal_contents(db: &BanditDB, dir: &str) -> String {
 fn reward_count(db: &BanditDB, campaign: &str) -> u64 {
     let campaigns = db.campaigns.read();
     let arms = campaigns.get(campaign).unwrap().arms.read();
-    arms.values().map(|a| a.reward_count.load(Ordering::Relaxed)).sum()
+    arms.values()
+        .map(|a| a.reward_count.load(Ordering::Relaxed))
+        .sum()
 }
 
 #[tokio::test]
@@ -44,13 +58,17 @@ async fn interact_rejects_wrong_context_dimension_before_logging() {
     for ctx in [vec![1.0], vec![1.0, 2.0, 3.0]] {
         let len = ctx.len();
         let res = db.interact("c", "A", ctx, 1.0).await;
-        assert!(matches!(res, Err(EngineError::BadRequest(_))),
-            "context of length {len} on a dim-2 campaign must be rejected, got {res:?}");
+        assert!(
+            matches!(res, Err(EngineError::BadRequest(_))),
+            "context of length {len} on a dim-2 campaign must be rejected, got {res:?}"
+        );
     }
 
     let wal = wal_contents(&db, dir).await;
-    assert!(!wal.contains("Predicted") && !wal.contains("Rewarded"),
-        "a rejected interact must not reach the WAL:\n{wal}");
+    assert!(
+        !wal.contains("Predicted") && !wal.contains("Rewarded"),
+        "a rejected interact must not reach the WAL:\n{wal}"
+    );
     assert_eq!(db.rewarded_count.load(Ordering::Relaxed), 0);
 
     // The valid shape still works.
@@ -65,11 +83,16 @@ async fn interact_rejects_unknown_arm_before_logging() {
     let db = setup(dir).await;
 
     let res = db.interact("c", "ghost", vec![0.5, 0.5], 1.0).await;
-    assert!(matches!(res, Err(EngineError::NotFound(_))),
-        "an arm the campaign does not have must be rejected, got {res:?}");
+    assert!(
+        matches!(res, Err(EngineError::NotFound(_))),
+        "an arm the campaign does not have must be rejected, got {res:?}"
+    );
 
     let wal = wal_contents(&db, dir).await;
-    assert!(!wal.contains("ghost"), "a rejected interact must not reach the WAL:\n{wal}");
+    assert!(
+        !wal.contains("ghost"),
+        "a rejected interact must not reach the WAL:\n{wal}"
+    );
     assert_eq!(db.rewarded_count.load(Ordering::Relaxed), 0);
     let _ = fs::remove_dir_all(dir);
 }
@@ -80,8 +103,10 @@ async fn predict_rejects_wrong_context_dimension() {
     let db = setup(dir).await;
 
     let res = db.predict("c", vec![1.0, 2.0, 3.0]);
-    assert!(matches!(res, Err(EngineError::BadRequest(_))),
-        "context of length 3 on a dim-2 campaign must be rejected, got {res:?}");
+    assert!(
+        matches!(res, Err(EngineError::BadRequest(_))),
+        "context of length 3 on a dim-2 campaign must be rejected, got {res:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -92,18 +117,37 @@ async fn neural_interact_checks_input_dimension_not_arm_dimension() {
     let dir = "/tmp/banditdb_interact_neural_dim";
     let db = setup(dir).await;
     let cfg = NeuralLinUCBConfig {
-        context_dim: 4, embed_dim: 8, hidden_dim: 16, hidden_layers: 2,
-        retrain_every: 1000, retrain_steps: 5, learning_rate: 1e-3, lambda: 1.0,
+        context_dim: 4,
+        embed_dim: 8,
+        hidden_dim: 16,
+        hidden_layers: 2,
+        retrain_every: 1000,
+        retrain_steps: 5,
+        learning_rate: 1e-3,
+        lambda: 1.0,
     };
-    db.add_campaign("n", vec!["A".into()], cfg.embed_dim, 1.0,
-                    Algorithm::NeuralLinUCB(cfg), None, None).await.unwrap();
+    db.add_campaign(
+        "n",
+        vec!["A".into()],
+        cfg.embed_dim,
+        1.0,
+        Algorithm::NeuralLinUCB(cfg),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let res = db.interact("n", "A", vec![0.1; 8], 1.0).await;
-    assert!(matches!(res, Err(EngineError::BadRequest(_))),
-        "an embedding-length context must be rejected on a context_dim=4 campaign, got {res:?}");
+    assert!(
+        matches!(res, Err(EngineError::BadRequest(_))),
+        "an embedding-length context must be rejected on a context_dim=4 campaign, got {res:?}"
+    );
     let res = db.predict("n", vec![0.1; 8]);
-    assert!(matches!(res, Err(EngineError::BadRequest(_))),
-        "predict must apply the same rule, got {res:?}");
+    assert!(
+        matches!(res, Err(EngineError::BadRequest(_))),
+        "predict must apply the same rule, got {res:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -124,6 +168,10 @@ async fn recovery_skips_reward_with_wrong_dimension() {
     )).unwrap();
 
     let db = BanditDB::new(&wal, dir);
-    assert_eq!(reward_count(&db, "c"), 1, "only the well-formed reward should be applied");
+    assert_eq!(
+        reward_count(&db, "c"),
+        1,
+        "only the well-formed reward should be applied"
+    );
     let _ = fs::remove_dir_all(dir);
 }

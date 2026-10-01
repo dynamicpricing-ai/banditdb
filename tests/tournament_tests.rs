@@ -1,7 +1,7 @@
 #![cfg(feature = "neural")]
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, NeuralLinUCBConfig, ProgressiveConfig};
+use banditdb::BanditDB;
 use ndarray::Array1;
 use std::fs;
 use std::sync::atomic::Ordering;
@@ -12,7 +12,11 @@ use std::sync::atomic::Ordering;
 
 fn linear_reward(arm: &str, ctx: &[f64]) -> f64 {
     let best = if ctx[0] + ctx[1] > 1.0 { "A" } else { "B" };
-    if arm == best { 1.0 } else { 0.0 }
+    if arm == best {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 #[allow(dead_code)]
@@ -20,27 +24,36 @@ fn xor_reward(arm: &str, ctx: &[f64]) -> f64 {
     let a = ctx[0] > 0.5;
     let b = ctx[1] > 0.5;
     let correct = if a ^ b { "B" } else { "A" };
-    if arm == correct { 1.0 } else { 0.0 }
+    if arm == correct {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Small fast NeuralLinUCB challenger config for tests.
 fn neural_cfg(retrain_every: usize) -> NeuralLinUCBConfig {
     NeuralLinUCBConfig {
-        context_dim:   2,
-        embed_dim:     8,
-        hidden_dim:    32,
+        context_dim: 2,
+        embed_dim: 8,
+        hidden_dim: 32,
         hidden_layers: 2,
         retrain_every,
         retrain_steps: 50,
         learning_rate: 1e-3,
-        lambda:        1.0,
+        lambda: 1.0,
     }
 }
 
-fn progressive_algo(min_obs: usize, required_wins: usize, step_bps: u32, retrain_every: usize) -> Algorithm {
+fn progressive_algo(
+    min_obs: usize,
+    required_wins: usize,
+    step_bps: u32,
+    retrain_every: usize,
+) -> Algorithm {
     Algorithm::Progressive(ProgressiveConfig {
-        base:          Box::new(Algorithm::Linucb),
-        challenger:    Box::new(Algorithm::NeuralLinUCB(neural_cfg(retrain_every))),
+        base: Box::new(Algorithm::Linucb),
+        challenger: Box::new(Algorithm::NeuralLinUCB(neural_cfg(retrain_every))),
         min_obs,
         required_wins,
         step_bps,
@@ -59,7 +72,7 @@ fn progressive_algo(min_obs: usize, required_wins: usize, step_bps: u32, retrain
 #[cfg(feature = "neural")]
 async fn test_no_spurious_promotion_on_linear() {
     let data_dir = "/tmp/banditdb_tourney_linear";
-    let wal      = format!("{}/wal.jsonl", data_dir);
+    let wal = format!("{}/wal.jsonl", data_dir);
     let _ = fs::remove_dir_all(data_dir);
     fs::create_dir_all(data_dir).unwrap();
 
@@ -67,12 +80,14 @@ async fn test_no_spurious_promotion_on_linear() {
     db.add_campaign(
         "linear",
         vec!["A".to_string(), "B".to_string()],
-        2,   // base arm matrices are 2-dimensional
+        2, // base arm matrices are 2-dimensional
         0.1,
         progressive_algo(10, 3, 1000, 20),
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Balanced contexts that span the decision boundary clearly
     let contexts: &[Vec<f64>] = &[
@@ -89,11 +104,18 @@ async fn test_no_spurious_promotion_on_linear() {
                 let _ = db.reward(&iid, linear_reward(&arm, ctx)).await;
             }
         }
-        if i % 20 == 0 { let _ = db.checkpoint().await; }
+        if i % 20 == 0 {
+            let _ = db.checkpoint().await;
+        }
     }
 
-    let bps = db.campaigns.read().get("linear").unwrap()
-        .challenger_traffic_bps.load(Ordering::Relaxed);
+    let bps = db
+        .campaigns
+        .read()
+        .get("linear")
+        .unwrap()
+        .challenger_traffic_bps
+        .load(Ordering::Relaxed);
 
     assert!(
         bps < 9000,
@@ -116,7 +138,7 @@ async fn test_no_spurious_promotion_on_linear() {
 #[cfg(feature = "neural")]
 async fn test_checkpoint_recovery_preserves_tournament_state() {
     let data_dir = "/tmp/banditdb_tourney_recovery";
-    let wal      = format!("{}/wal.jsonl", data_dir);
+    let wal = format!("{}/wal.jsonl", data_dir);
     let _ = fs::remove_dir_all(data_dir);
     fs::create_dir_all(data_dir).unwrap();
 
@@ -138,15 +160,21 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
             progressive_algo(5, 1, 1000, 20), // required_wins=1 for fast progress
             None,
             None,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         for i in 1..=100 {
             for (ctx, target) in xor_data {
                 if let Ok((arm, iid)) = db.predict("camp", ctx.clone()) {
-                    let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 }).await;
+                    let _ = db
+                        .reward(&iid, if &arm == target { 1.0 } else { 0.0 })
+                        .await;
                 }
             }
-            if i % 25 == 0 { let _ = db.checkpoint().await; }
+            if i % 25 == 0 {
+                let _ = db.checkpoint().await;
+            }
         }
         db.checkpoint().await.unwrap();
 
@@ -159,24 +187,32 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
     };
 
     // Phase 2: recover and verify state is identical
-    let db2      = BanditDB::new(&wal, data_dir);
+    let db2 = BanditDB::new(&wal, data_dir);
     let campaigns = db2.campaigns.read();
-    let c         = campaigns.get("camp").expect("campaign must survive recovery");
+    let c = campaigns
+        .get("camp")
+        .expect("campaign must survive recovery");
 
     assert_eq!(
-        c.challenger_traffic_bps.load(Ordering::Relaxed), pre_bps,
+        c.challenger_traffic_bps.load(Ordering::Relaxed),
+        pre_bps,
         "challenger_traffic_bps mismatch after restart: got {} expected {}",
-        c.challenger_traffic_bps.load(Ordering::Relaxed), pre_bps
+        c.challenger_traffic_bps.load(Ordering::Relaxed),
+        pre_bps
     );
     assert_eq!(
-        c.tournament_wins.load(Ordering::Relaxed), pre_wins,
+        c.tournament_wins.load(Ordering::Relaxed),
+        pre_wins,
         "tournament_wins mismatch after restart: got {} expected {}",
-        c.tournament_wins.load(Ordering::Relaxed), pre_wins
+        c.tournament_wins.load(Ordering::Relaxed),
+        pre_wins
     );
 
     drop(campaigns);
-    assert!(db2.predict("camp", vec![0.0, 0.0]).is_ok(),
-        "predictions must work post-recovery");
+    assert!(
+        db2.predict("camp", vec![0.0, 0.0]).is_ok(),
+        "predictions must work post-recovery"
+    );
 
     let _ = fs::remove_dir_all(data_dir);
 }
@@ -197,7 +233,7 @@ async fn test_checkpoint_recovery_preserves_tournament_state() {
 #[ignore = "stochastic: neural init unseedable on CPU"]
 async fn test_gradual_traffic_ramp() {
     let data_dir = "/tmp/banditdb_tourney_ramp";
-    let wal      = format!("{}/wal.jsonl", data_dir);
+    let wal = format!("{}/wal.jsonl", data_dir);
     let _ = fs::remove_dir_all(data_dir);
     fs::create_dir_all(data_dir).unwrap();
 
@@ -212,7 +248,9 @@ async fn test_gradual_traffic_ramp() {
         progressive_algo(5, 1, STEP, 20), // required_wins=1 for fastest possible ramp
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let xor_data: &[(Vec<f64>, &str)] = &[
         (vec![0.0, 0.0], "A"),
@@ -226,14 +264,21 @@ async fn test_gradual_traffic_ramp() {
     for i in 1..=500 {
         for (ctx, target) in xor_data {
             if let Ok((arm, iid)) = db.predict("xor", ctx.clone()) {
-                let _ = db.reward(&iid, if &arm == target { 1.0 } else { 0.0 }).await;
+                let _ = db
+                    .reward(&iid, if &arm == target { 1.0 } else { 0.0 })
+                    .await;
             }
         }
 
         if i % 25 == 0 {
             let _ = db.checkpoint().await;
-            let bps = db.campaigns.read().get("xor").unwrap()
-                .challenger_traffic_bps.load(Ordering::Relaxed);
+            let bps = db
+                .campaigns
+                .read()
+                .get("xor")
+                .unwrap()
+                .challenger_traffic_bps
+                .load(Ordering::Relaxed);
 
             // Traffic may increase by at most one step or decrease by at most one step
             // per checkpoint (required_wins=1 means one win = one step_bps change).
@@ -241,7 +286,10 @@ async fn test_gradual_traffic_ramp() {
             assert!(
                 delta <= STEP,
                 "Traffic changed by more than step_bps in one checkpoint: {} → {} (Δ={}, step={})",
-                prev_bps, bps, delta, STEP
+                prev_bps,
+                bps,
+                delta,
+                STEP
             );
             assert!(bps <= 9000, "Traffic exceeded 9000bp hard cap: {}", bps);
 
@@ -249,8 +297,13 @@ async fn test_gradual_traffic_ramp() {
         }
     }
 
-    let final_bps = db.campaigns.read().get("xor").unwrap()
-        .challenger_traffic_bps.load(Ordering::Relaxed);
+    let final_bps = db
+        .campaigns
+        .read()
+        .get("xor")
+        .unwrap()
+        .challenger_traffic_bps
+        .load(Ordering::Relaxed);
     assert!(
         final_bps > 1000,
         "Neural never earned any extra traffic on XOR after 500 iterations ({}bp). \
@@ -275,7 +328,7 @@ async fn test_gradual_traffic_ramp() {
 #[ignore = "stochastic: neural init unseedable on CPU"]
 async fn test_reward_continuity_across_transition() {
     let data_dir = "/tmp/banditdb_tourney_continuity";
-    let wal      = format!("{}/wal.jsonl", data_dir);
+    let wal = format!("{}/wal.jsonl", data_dir);
     let _ = fs::remove_dir_all(data_dir);
     fs::create_dir_all(data_dir).unwrap();
 
@@ -288,7 +341,9 @@ async fn test_reward_continuity_across_transition() {
         progressive_algo(5, 1, 1000, 20),
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let xor_data: &[(Vec<f64>, &str)] = &[
         (vec![0.0, 0.0], "A"),
@@ -303,34 +358,40 @@ async fn test_reward_continuity_across_transition() {
 
     for i in 1..=TOTAL {
         let mut sum = 0.0f64;
-        let mut n   = 0usize;
+        let mut n = 0usize;
         for (ctx, target) in xor_data {
             if let Ok((arm, iid)) = db.predict("xor", ctx.clone()) {
                 let r = if &arm == target { 1.0 } else { 0.0 };
                 let _ = db.reward(&iid, r).await;
                 sum += r;
-                n   += 1;
+                n += 1;
             }
         }
-        if n > 0 { per_iter_reward.push(sum / n as f64); }
+        if n > 0 {
+            per_iter_reward.push(sum / n as f64);
+        }
 
-        if i % 25 == 0 { let _ = db.checkpoint().await; }
+        if i % 25 == 0 {
+            let _ = db.checkpoint().await;
+        }
     }
 
-    let pre_mean:  f64 = per_iter_reward[..WINDOW].iter().sum::<f64>() / WINDOW as f64;
+    let pre_mean: f64 = per_iter_reward[..WINDOW].iter().sum::<f64>() / WINDOW as f64;
     let post_mean: f64 = per_iter_reward[TOTAL - WINDOW..].iter().sum::<f64>() / WINDOW as f64;
 
     assert!(
         post_mean >= pre_mean - 0.10,
         "Reward degraded across tournament transition: pre={:.3} post={:.3} (drop > 10pp). \
          The transition introduced a performance cliff.",
-        pre_mean, post_mean
+        pre_mean,
+        post_mean
     );
     assert!(
         post_mean > pre_mean,
         "Reward did not improve after tournament promotion: pre={:.3} post={:.3}. \
          Neural should outperform linear on XOR after sufficient training.",
-        pre_mean, post_mean
+        pre_mean,
+        post_mean
     );
 
     let _ = fs::remove_dir_all(data_dir);
@@ -356,7 +417,7 @@ async fn test_reward_continuity_across_transition() {
 #[ignore = "stochastic: neural init unseedable on CPU"]
 async fn test_rollback_on_challenger_degradation() {
     let data_dir = "/tmp/banditdb_tourney_rollback";
-    let wal      = format!("{}/wal.jsonl", data_dir);
+    let wal = format!("{}/wal.jsonl", data_dir);
     let _ = fs::remove_dir_all(data_dir);
     fs::create_dir_all(data_dir).unwrap();
 
@@ -369,36 +430,42 @@ async fn test_rollback_on_challenger_degradation() {
         Algorithm::Progressive(ProgressiveConfig {
             base: Box::new(Algorithm::Linucb),
             challenger: Box::new(Algorithm::NeuralLinUCB(NeuralLinUCBConfig {
-                context_dim:   2,
-                embed_dim:     8,
-                hidden_dim:    32,
+                context_dim: 2,
+                embed_dim: 8,
+                hidden_dim: 32,
                 hidden_layers: 2,
                 retrain_every: 100_000,
                 retrain_steps: 50,
                 learning_rate: 1e-3,
-                lambda:        1.0,
+                lambda: 1.0,
             })),
-            min_obs:       5,
-            required_wins: 1,   
-            step_bps:      1000,
+            min_obs: 5,
+            required_wins: 1,
+            step_bps: 1000,
         }),
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Contexts where A is best and B is best
     let ctx_a = vec![0.9, 0.9];
     let ctx_b = vec![-0.9, -0.9];
 
-    db.campaigns.read().get("rollback").unwrap()
-        .challenger_traffic_bps.store(7000, Ordering::Relaxed);
+    db.campaigns
+        .read()
+        .get("rollback")
+        .unwrap()
+        .challenger_traffic_bps
+        .store(7000, Ordering::Relaxed);
 
     // Populate buffer with perfectly uniform logged data.
     // For each context, log both arms equally so any policy has full coverage.
     for _ in 0..10 {
         let _ = db.interact("rollback", "A", ctx_a.clone(), 1.0).await; // Correct
         let _ = db.interact("rollback", "B", ctx_a.clone(), 0.0).await; // Wrong
-        
+
         let _ = db.interact("rollback", "B", ctx_b.clone(), 1.0).await; // Correct
         let _ = db.interact("rollback", "A", ctx_b.clone(), 0.0).await; // Wrong
     }
@@ -411,7 +478,7 @@ async fn test_rollback_on_challenger_degradation() {
         arms.get_mut("A").unwrap().theta = Array1::from_vec(vec![1.0, 1.0]);
         arms.get_mut("B").unwrap().theta = Array1::from_vec(vec![-1.0, -1.0]);
     }
-    
+
     // Force challenger to be anti-perfect. Since we don't know the MLP features,
     // we can't easily set theta. But wait! We can just force the Challenger to
     // pick the WRONG arm by setting its theta dynamically in evaluate_tournament?
@@ -430,15 +497,20 @@ async fn test_rollback_on_challenger_degradation() {
         let c = campaigns.get("rollback").unwrap();
         if let Some(c_arms) = &c.challenger_arms {
             let mut arms = c_arms.write();
-            arms.get_mut("A").unwrap().theta = Array1::from_elem(8,  1e6_f64);
+            arms.get_mut("A").unwrap().theta = Array1::from_elem(8, 1e6_f64);
             arms.get_mut("B").unwrap().theta = Array1::from_elem(8, -1e6_f64);
         }
     }
 
     db.checkpoint().await.unwrap();
 
-    let final_bps = db.campaigns.read().get("rollback").unwrap()
-        .challenger_traffic_bps.load(Ordering::Relaxed);
+    let final_bps = db
+        .campaigns
+        .read()
+        .get("rollback")
+        .unwrap()
+        .challenger_traffic_bps
+        .load(Ordering::Relaxed);
 
     assert!(
         final_bps < 7000,

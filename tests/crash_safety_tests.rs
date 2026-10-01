@@ -10,8 +10,8 @@
 //!   2. Recovery collapsed a parse failure into "no checkpoint", started empty, and
 //!      reported healthy — then overwrote the evidence at the next checkpoint.
 
-use banditdb::{BanditDB, engine::CheckpointLoad};
 use banditdb::state::Algorithm;
+use banditdb::{engine::CheckpointLoad, BanditDB};
 use std::fs;
 use std::path::Path;
 
@@ -23,8 +23,17 @@ fn fresh(dir: &str) {
 /// Build a campaign, drive traffic, and checkpoint it.
 async fn seeded_db(dir: &str, rewards: usize) -> BanditDB {
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     for i in 0..rewards {
         let ctx = vec![(i % 5) as f64 / 5.0, (i % 3) as f64 / 3.0];
         if let Ok((arm, iid)) = db.predict("c", ctx) {
@@ -79,7 +88,10 @@ async fn checkpoint_leaves_no_temp_files_behind() {
 fn empty_data_dir_is_fresh_not_corrupt() {
     let dir = "/tmp/banditdb_p02_fresh";
     fresh(dir);
-    assert!(matches!(BanditDB::load_checkpoint(dir), CheckpointLoad::Fresh));
+    assert!(matches!(
+        BanditDB::load_checkpoint(dir),
+        CheckpointLoad::Fresh
+    ));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -90,7 +102,11 @@ async fn corrupt_checkpoint_without_fallback_is_reported_corrupt() {
     let _db = seeded_db(dir, 20).await;
 
     // Truncated JSON — the classic outcome of a crash mid-write on the old code path.
-    fs::write(format!("{dir}/checkpoint.json"), "{\"wal_offset\": 12, \"campai").unwrap();
+    fs::write(
+        format!("{dir}/checkpoint.json"),
+        "{\"wal_offset\": 12, \"campai",
+    )
+    .unwrap();
 
     match BanditDB::load_checkpoint(dir) {
         CheckpointLoad::Corrupt(e) => assert!(e.contains("parse"), "unexpected reason: {e}"),
@@ -107,14 +123,19 @@ async fn corrupt_checkpoint_falls_back_to_previous_generation() {
     let dir = "/tmp/banditdb_p02_fallback";
     fresh(dir);
     let db = seeded_db(dir, 20).await;
-    db.checkpoint().await.expect("second checkpoint creates .prev");
+    db.checkpoint()
+        .await
+        .expect("second checkpoint creates .prev");
     drop(db);
 
     fs::write(format!("{dir}/checkpoint.json"), "not json at all").unwrap();
 
     match BanditDB::load_checkpoint(dir) {
         CheckpointLoad::Loaded(cp) => {
-            assert!(cp.campaigns.contains_key("c"), "fallback checkpoint lost the campaign");
+            assert!(
+                cp.campaigns.contains_key("c"),
+                "fallback checkpoint lost the campaign"
+            );
         }
         other => panic!("expected fallback to checkpoint.prev, got {other:?}"),
     }
@@ -159,7 +180,8 @@ async fn rotation_resets_the_replay_offset() {
     let raw = fs::read_to_string(format!("{dir}/checkpoint.json")).unwrap();
     let cp: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(
-        cp["wal_offset"].as_u64(), Some(0),
+        cp["wal_offset"].as_u64(),
+        Some(0),
         "checkpoint records a replay offset into a WAL that rotation has already \
          rewritten; recovery would skip everything before it"
     );
@@ -169,7 +191,9 @@ async fn rotation_resets_the_replay_offset() {
     for i in 0..60 {
         let ctx = vec![(i % 7) as f64 / 7.0, (i % 4) as f64 / 4.0];
         if let Ok((arm, iid)) = db.predict("c", ctx) {
-            db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+            db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 })
+                .await
+                .expect("reward");
         }
     }
     let before = db.campaign_report("c").unwrap().total_rewards;
@@ -199,10 +223,15 @@ async fn recovered_database_serves_predictions_after_fallback() {
 
     let recovered = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
     let campaigns = recovered.campaigns.read();
-    assert!(campaigns.contains_key("c"), "campaign lost during fallback recovery");
+    assert!(
+        campaigns.contains_key("c"),
+        "campaign lost during fallback recovery"
+    );
     drop(campaigns);
 
-    let (arm, _) = recovered.predict("c", vec![0.4, 0.6]).expect("predict after recovery");
+    let (arm, _) = recovered
+        .predict("c", vec![0.4, 0.6])
+        .expect("predict after recovery");
     assert!(arm == "A" || arm == "B");
     let _ = fs::remove_dir_all(dir);
 }

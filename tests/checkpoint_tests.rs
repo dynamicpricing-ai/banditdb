@@ -32,23 +32,24 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // Phase 1 — Train the model
     // ===================================================================
     let db = BanditDB::new(&wal_path, data_dir);
-    let _ = db.add_campaign(
-        "routing",
-        vec!["fast".to_string(), "cheap".to_string()],
-        2,
-        1.0,
-        Algorithm::Linucb,
-        None,
-        None,
-    ).await;
+    let _ = db
+        .add_campaign(
+            "routing",
+            vec!["fast".to_string(), "cheap".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     // Deterministic reward signal so the test is reproducible
     let true_theta = [3.0_f64, -2.0_f64];
     for i in 0..30_usize {
         let angle = i as f64 * 0.2;
         let ctx = vec![angle.sin(), angle.cos()];
-        let reward =
-            (true_theta[0] * ctx[0] + true_theta[1] * ctx[1]).clamp(0.0, 1.0);
+        let reward = (true_theta[0] * ctx[0] + true_theta[1] * ctx[1]).clamp(0.0, 1.0);
         if let Ok((_, iid)) = db.predict("routing", ctx) {
             let _ = db.reward(&iid, reward).await;
         }
@@ -58,7 +59,9 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // The Checkpoint message guarantees every Event sent before it is on disk.
     let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
     db.event_tx
-        .send(WalMessage::Checkpoint { reply: ftx }).await.unwrap();
+        .send(WalMessage::Checkpoint { reply: ftx })
+        .await
+        .unwrap();
     let wal_size_before = frx.await.unwrap();
     assert!(wal_size_before > 0, "WAL must be non-empty after training");
 
@@ -69,11 +72,7 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         let c = campaigns.get("routing").unwrap();
         let arms = c.arms.read();
         let fast = arms.get("fast").unwrap();
-        (
-            fast.theta.clone(),
-            fast.b.clone(),
-            fast.a_inv.clone(),
-        )
+        (fast.theta.clone(), fast.b.clone(), fast.a_inv.clone())
     };
 
     // ===================================================================
@@ -95,9 +94,8 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // ===================================================================
     // Phase 3 — Verify checkpoint.json
     // ===================================================================
-    let ckpt_raw =
-        std::fs::read_to_string(format!("{}/checkpoint.json", data_dir))
-            .expect("checkpoint.json must exist after checkpoint()");
+    let ckpt_raw = std::fs::read_to_string(format!("{}/checkpoint.json", data_dir))
+        .expect("checkpoint.json must exist after checkpoint()");
     let ckpt: CheckpointData =
         serde_json::from_str(&ckpt_raw).expect("checkpoint.json must be valid JSON");
 
@@ -119,11 +117,21 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     );
 
     let ckpt_camp = &ckpt.campaigns["routing"];
-    assert!(ckpt_camp.arms.contains_key("fast"), "fast arm must be in checkpoint");
-    assert!(ckpt_camp.arms.contains_key("cheap"), "cheap arm must be in checkpoint");
+    assert!(
+        ckpt_camp.arms.contains_key("fast"),
+        "fast arm must be in checkpoint"
+    );
+    assert!(
+        ckpt_camp.arms.contains_key("cheap"),
+        "cheap arm must be in checkpoint"
+    );
 
     let ckpt_fast = &ckpt_camp.arms["fast"];
-    assert_eq!(ckpt_fast.theta.len(), 2, "theta must have feature_dim=2 elements");
+    assert_eq!(
+        ckpt_fast.theta.len(),
+        2,
+        "theta must have feature_dim=2 elements"
+    );
     assert_eq!(ckpt_fast.b.len(), 2, "b must have feature_dim=2 elements");
     assert_eq!(ckpt_fast.a_inv.shape(), &[2, 2], "A_inv must be 2×2");
 
@@ -132,18 +140,25 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
         assert!(
             (ckpt_fast.theta[i] - pre_theta[i]).abs() < 1e-12,
             "theta[{}] mismatch: checkpoint={:.9} memory={:.9}",
-            i, ckpt_fast.theta[i], pre_theta[i]
+            i,
+            ckpt_fast.theta[i],
+            pre_theta[i]
         );
         assert!(
             (ckpt_fast.b[i] - pre_b[i]).abs() < 1e-12,
             "b[{}] mismatch: checkpoint={:.9} memory={:.9}",
-            i, ckpt_fast.b[i], pre_b[i]
+            i,
+            ckpt_fast.b[i],
+            pre_b[i]
         );
         for j in 0..2 {
             assert!(
                 (ckpt_fast.a_inv[[i, j]] - pre_a_inv[[i, j]]).abs() < 1e-12,
                 "A_inv[{},{}] mismatch: checkpoint={:.9} memory={:.9}",
-                i, j, ckpt_fast.a_inv[[i, j]], pre_a_inv[[i, j]]
+                i,
+                j,
+                ckpt_fast.a_inv[[i, j]],
+                pre_a_inv[[i, j]]
             );
         }
     }
@@ -186,12 +201,24 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
     // larger than the new WAL file (which only holds this one small event),
     // so recovery must detect that and seek to 0 instead.
     // ===================================================================
-    let _ = db.add_campaign("post_ckpt", vec!["x".to_string()], 1, 1.0, Algorithm::Linucb, None, None).await;
+    let _ = db
+        .add_campaign(
+            "post_ckpt",
+            vec!["x".to_string()],
+            1,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     // Flush the post-checkpoint event to disk before we drop the handle
     let (ftx2, frx2) = tokio::sync::oneshot::channel::<u64>();
     db.event_tx
-        .send(WalMessage::Checkpoint { reply: ftx2 }).await.unwrap();
+        .send(WalMessage::Checkpoint { reply: ftx2 })
+        .await
+        .unwrap();
     let tail_size = frx2.await.unwrap();
     assert!(
         tail_size > 0,
@@ -234,39 +261,62 @@ async fn test_4_1_checkpoint_wal_meta_recovery_cycle() {
 
         assert_eq!(fast2.theta.len(), 2, "theta dim must be 2 after recovery");
         assert_eq!(fast2.b.len(), 2, "b dim must be 2 after recovery");
-        assert_eq!(fast2.a_inv.shape(), &[2, 2], "A_inv shape must be 2×2 after recovery");
+        assert_eq!(
+            fast2.a_inv.shape(),
+            &[2, 2],
+            "A_inv shape must be 2×2 after recovery"
+        );
 
         for i in 0..2 {
             assert!(
                 (fast2.theta[i] - pre_theta[i]).abs() < 1e-12,
                 "theta[{}] must be bit-exact after recovery: got={:.9} want={:.9}",
-                i, fast2.theta[i], pre_theta[i]
+                i,
+                fast2.theta[i],
+                pre_theta[i]
             );
             assert!(
                 (fast2.b[i] - pre_b[i]).abs() < 1e-12,
                 "b[{}] must be bit-exact after recovery: got={:.9} want={:.9}",
-                i, fast2.b[i], pre_b[i]
+                i,
+                fast2.b[i],
+                pre_b[i]
             );
             for j in 0..2 {
                 assert!(
                     (fast2.a_inv[[i, j]] - pre_a_inv[[i, j]]).abs() < 1e-12,
                     "A_inv[{},{}] must be bit-exact after recovery: got={:.9} want={:.9}",
-                    i, j, fast2.a_inv[[i, j]], pre_a_inv[[i, j]]
+                    i,
+                    j,
+                    fast2.a_inv[[i, j]],
+                    pre_a_inv[[i, j]]
                 );
             }
         }
 
         // All values must be finite — NaN/Inf indicates a corrupt replay
-        assert!(fast2.theta.iter().all(|v| v.is_finite()), "theta contains non-finite value after recovery");
-        assert!(fast2.b.iter().all(|v| v.is_finite()), "b contains non-finite value after recovery");
-        assert!(fast2.a_inv.iter().all(|v| v.is_finite()), "A_inv contains non-finite value after recovery");
+        assert!(
+            fast2.theta.iter().all(|v| v.is_finite()),
+            "theta contains non-finite value after recovery"
+        );
+        assert!(
+            fast2.b.iter().all(|v| v.is_finite()),
+            "b contains non-finite value after recovery"
+        );
+        assert!(
+            fast2.a_inv.iter().all(|v| v.is_finite()),
+            "A_inv contains non-finite value after recovery"
+        );
     }
 
     // ===================================================================
     // Phase 9 — Post-recovery predictions are functional
     // ===================================================================
     let pred_routing = db2.predict("routing", vec![1.0, 0.0]);
-    assert!(pred_routing.is_ok(), "predict must work on routing after recovery");
+    assert!(
+        pred_routing.is_ok(),
+        "predict must work on routing after recovery"
+    );
     let (arm_id, iid) = pred_routing.unwrap();
     assert!(
         arm_id == "fast" || arm_id == "cheap",
@@ -309,20 +359,24 @@ async fn test_4_2_prediction_count_survives_wal_replay() {
         let campaigns = db.campaigns.read();
         let c = campaigns.get(campaign).unwrap();
         let arms = c.arms.read();
-        arms.values().map(|s| s.prediction_count.load(Ordering::Relaxed)).sum()
+        arms.values()
+            .map(|s| s.prediction_count.load(Ordering::Relaxed))
+            .sum()
     }
 
     // ── Phase 1 — predict N times; reward only a subset ───────────────────────
     let db = BanditDB::new(&wal_path, data_dir);
-    let _ = db.add_campaign(
-        "routing",
-        vec!["fast".to_string(), "cheap".to_string()],
-        2,
-        1.0,
-        Algorithm::Linucb,
-        None,
-        None,
-    ).await;
+    let _ = db
+        .add_campaign(
+            "routing",
+            vec!["fast".to_string(), "cheap".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     const N: usize = 25;
     for i in 0..N {
@@ -345,7 +399,10 @@ async fn test_4_2_prediction_count_survives_wal_replay() {
     // Flush WAL to disk via the barrier WITHOUT writing a checkpoint, so every
     // Predicted event stays in the WAL tail and recovery replays from offset 0.
     let (ftx, frx) = tokio::sync::oneshot::channel::<u64>();
-    db.event_tx.send(WalMessage::Checkpoint { reply: ftx }).await.unwrap();
+    db.event_tx
+        .send(WalMessage::Checkpoint { reply: ftx })
+        .await
+        .unwrap();
     let wal_size = frx.await.unwrap();
     assert!(wal_size > 0, "WAL must hold the predictions before restart");
 
@@ -395,19 +452,23 @@ async fn test_4_3_reemit_does_not_double_count() {
         let campaigns = db.campaigns.read();
         let c = campaigns.get(campaign).unwrap();
         let arms = c.arms.read();
-        arms.values().map(|s| s.prediction_count.load(Ordering::Relaxed)).sum()
+        arms.values()
+            .map(|s| s.prediction_count.load(Ordering::Relaxed))
+            .sum()
     }
 
     let db = BanditDB::new(&wal_path, data_dir);
-    let _ = db.add_campaign(
-        "routing",
-        vec!["fast".to_string(), "cheap".to_string()],
-        2,
-        1.0,
-        Algorithm::Linucb,
-        None,
-        None,
-    ).await;
+    let _ = db
+        .add_campaign(
+            "routing",
+            vec!["fast".to_string(), "cheap".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     // N predictions; reward only the first few so the rest stay IN-FLIGHT and get
     // re-emitted at checkpoint. Every prediction is counted exactly once (live).
@@ -421,7 +482,11 @@ async fn test_4_3_reemit_does_not_double_count() {
             let _ = db.reward(&iid, 1.0).await;
         }
     }
-    assert_eq!(total_predictions(&db, "routing"), N as u64, "live count must be N");
+    assert_eq!(
+        total_predictions(&db, "routing"),
+        N as u64,
+        "live count must be N"
+    );
 
     // Checkpoint: re-emits the N-REWARDED in-flight predictions into the WAL tail,
     // snapshots prediction_count = N into checkpoint.json, then rotates the WAL.
@@ -470,7 +535,9 @@ async fn test_checkpoint_under_concurrent_writes_applies_each_reward_once() {
         Algorithm::Linucb,
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Best-effort predictions need no fsync, so they fill the WAL quickly.
     for i in 0..50_000_usize {
@@ -479,19 +546,23 @@ async fn test_checkpoint_under_concurrent_writes_applies_each_reward_once() {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    let writers: Vec<_> = (0..8).map(|w| {
-        let db   = Arc::clone(&db);
-        let stop = Arc::clone(&stop);
-        tokio::spawn(async move {
-            let arm = if w % 2 == 0 { "a" } else { "b" };
-            let mut i = 0usize;
-            while !stop.load(Ordering::Relaxed) {
-                let x = (w * 10_000 + i) as f64 * 0.01;
-                db.interact("race", arm, vec![x.sin(), x.cos()], 0.5).await.unwrap();
-                i += 1;
-            }
+    let writers: Vec<_> = (0..8)
+        .map(|w| {
+            let db = Arc::clone(&db);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let arm = if w % 2 == 0 { "a" } else { "b" };
+                let mut i = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let x = (w * 10_000 + i) as f64 * 0.01;
+                    db.interact("race", arm, vec![x.sin(), x.cos()], 0.5)
+                        .await
+                        .unwrap();
+                    i += 1;
+                }
+            })
         })
-    }).collect();
+        .collect();
 
     // Let the writers get going so the checkpoint starts under load.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -500,15 +571,24 @@ async fn test_checkpoint_under_concurrent_writes_applies_each_reward_once() {
     let during = db.rewarded_count.load(Ordering::Relaxed) - before;
 
     stop.store(true, Ordering::Relaxed);
-    for w in writers { w.await.unwrap(); }
-    assert!(during > 0, "no writes overlapped the checkpoint — test proves nothing");
+    for w in writers {
+        w.await.unwrap();
+    }
+    assert!(
+        during > 0,
+        "no writes overlapped the checkpoint — test proves nothing"
+    );
 
     let counts = |db: &BanditDB| -> (u64, u64) {
         let campaigns = db.campaigns.read();
         let arms = campaigns.get("race").unwrap().arms.read();
         (
-            arms.values().map(|a| a.reward_count.load(Ordering::Relaxed)).sum(),
-            arms.values().map(|a| a.prediction_count.load(Ordering::Relaxed)).sum(),
+            arms.values()
+                .map(|a| a.reward_count.load(Ordering::Relaxed))
+                .sum(),
+            arms.values()
+                .map(|a| a.prediction_count.load(Ordering::Relaxed))
+                .sum(),
         )
     };
     let (live_rewards, live_predictions) = counts(&db);
@@ -517,8 +597,12 @@ async fn test_checkpoint_under_concurrent_writes_applies_each_reward_once() {
     let db2 = BanditDB::new(&wal_path, data_dir);
     let (rec_rewards, rec_predictions) = counts(&db2);
 
-    assert_eq!(rec_rewards, live_rewards,
-        "recovered reward_count differs from live ({during} rewards overlapped the checkpoint)");
-    assert_eq!(rec_predictions, live_predictions,
-        "recovered prediction_count differs from live");
+    assert_eq!(
+        rec_rewards, live_rewards,
+        "recovered reward_count differs from live ({during} rewards overlapped the checkpoint)"
+    );
+    assert_eq!(
+        rec_predictions, live_predictions,
+        "recovered prediction_count differs from live"
+    );
 }

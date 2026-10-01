@@ -13,29 +13,38 @@
 //! Validation now lives in the engine, which is the boundary every caller shares —
 //! HTTP handlers, the SDK, and embedded users alike.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, NeuralLinUCBConfig};
+use banditdb::BanditDB;
 use std::fs;
 
 async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db
 }
 
 /// Values that must never reach the matrix math, with the reason each is dangerous.
 fn hostile_values() -> Vec<(&'static str, f64)> {
     vec![
-        ("NaN",            f64::NAN),
-        ("+inf",           f64::INFINITY),
-        ("-inf",           f64::NEG_INFINITY),
-        ("1e200",          1e200),          // finite, but squares to inf
-        ("-1e200",         -1e200),
-        ("f64::MAX",       f64::MAX),
-        ("1e300",          1e300),
+        ("NaN", f64::NAN),
+        ("+inf", f64::INFINITY),
+        ("-inf", f64::NEG_INFINITY),
+        ("1e200", 1e200), // finite, but squares to inf
+        ("-1e200", -1e200),
+        ("f64::MAX", f64::MAX),
+        ("1e300", 1e300),
     ]
 }
 
@@ -86,7 +95,10 @@ async fn interact_rejects_hostile_context_values() {
         );
     }
 
-    assert!(theta_is_finite(&db, "c"), "interact corrupted the arm matrices");
+    assert!(
+        theta_is_finite(&db, "c"),
+        "interact corrupted the arm matrices"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -102,7 +114,9 @@ async fn interact_enforces_reward_range_and_campaign_existence() {
         );
     }
     assert!(
-        db.interact("missing", "A", vec![0.5, 0.5], 1.0).await.is_err(),
+        db.interact("missing", "A", vec![0.5, 0.5], 1.0)
+            .await
+            .is_err(),
         "interact accepted a reward for a campaign that does not exist"
     );
 
@@ -117,7 +131,10 @@ async fn context_dimension_limits_are_enforced() {
     let dir = "/tmp/banditdb_p06_dims";
     let db = setup(dir).await;
 
-    assert!(db.predict("c", vec![]).is_err(), "empty context must be rejected");
+    assert!(
+        db.predict("c", vec![]).is_err(),
+        "empty context must be rejected"
+    );
     assert!(
         db.predict("c", vec![0.1; db.max_feature_dim + 1]).is_err(),
         "context longer than max_feature_dim must be rejected before allocation"
@@ -132,20 +149,50 @@ async fn campaign_creation_rejects_degenerate_parameters() {
 
     for bad_alpha in [f64::NAN, f64::INFINITY, -1.0] {
         assert!(
-            db.add_campaign("x", vec!["A".into()], 2, bad_alpha, Algorithm::Linucb, None, None).await.is_err(),
+            db.add_campaign(
+                "x",
+                vec!["A".into()],
+                2,
+                bad_alpha,
+                Algorithm::Linucb,
+                None,
+                None
+            )
+            .await
+            .is_err(),
             "alpha {bad_alpha} must be rejected: it makes every score NaN or inverts exploration"
         );
     }
 
     for bad_hl in [Some(0.0), Some(-5.0), Some(f64::NAN)] {
         assert!(
-            db.add_campaign("y", vec!["A".into()], 2, 1.0, Algorithm::Linucb, None, bad_hl).await.is_err(),
+            db.add_campaign(
+                "y",
+                vec!["A".into()],
+                2,
+                1.0,
+                Algorithm::Linucb,
+                None,
+                bad_hl
+            )
+            .await
+            .is_err(),
             "decay half-life {bad_hl:?} must be rejected"
         );
     }
 
     assert!(
-        db.add_campaign("ok", vec!["A".into()], 2, 0.0, Algorithm::Linucb, None, None).await.is_ok(),
+        db.add_campaign(
+            "ok",
+            vec!["A".into()],
+            2,
+            0.0,
+            Algorithm::Linucb,
+            None,
+            None
+        )
+        .await
+        .is_ok(),
         "alpha = 0 is valid (pure exploitation) and must still be accepted"
     );
     let _ = fs::remove_dir_all(dir);
@@ -157,35 +204,69 @@ async fn neural_config_rejects_degenerate_dimensions() {
     let db = setup(dir).await;
 
     let base = NeuralLinUCBConfig {
-        context_dim: 4, embed_dim: 8, hidden_dim: 16, hidden_layers: 2,
-        retrain_every: 10, retrain_steps: 5, learning_rate: 1e-3, lambda: 1.0,
+        context_dim: 4,
+        embed_dim: 8,
+        hidden_dim: 16,
+        hidden_layers: 2,
+        retrain_every: 10,
+        retrain_steps: 5,
+        learning_rate: 1e-3,
+        lambda: 1.0,
     };
 
-    let mut zero_ctx = base.clone();          zero_ctx.context_dim = 0;
-    let mut zero_embed = base.clone();        zero_embed.embed_dim = 0;
-    let mut zero_hidden = base.clone();       zero_hidden.hidden_dim = 0;
-    let mut zero_layers = base.clone();       zero_layers.hidden_layers = 0;
-    let mut bad_lr = base.clone();            bad_lr.learning_rate = f64::NAN;
-    let mut neg_lr = base.clone();            neg_lr.learning_rate = -1.0;
-    let mut bad_lambda = base.clone();        bad_lambda.lambda = f64::INFINITY;
+    let mut zero_ctx = base.clone();
+    zero_ctx.context_dim = 0;
+    let mut zero_embed = base.clone();
+    zero_embed.embed_dim = 0;
+    let mut zero_hidden = base.clone();
+    zero_hidden.hidden_dim = 0;
+    let mut zero_layers = base.clone();
+    zero_layers.hidden_layers = 0;
+    let mut bad_lr = base.clone();
+    bad_lr.learning_rate = f64::NAN;
+    let mut neg_lr = base.clone();
+    neg_lr.learning_rate = -1.0;
+    let mut bad_lambda = base.clone();
+    bad_lambda.lambda = f64::INFINITY;
 
     for (label, cfg) in [
-        ("context_dim=0", zero_ctx), ("embed_dim=0", zero_embed),
-        ("hidden_dim=0", zero_hidden), ("hidden_layers=0", zero_layers),
-        ("learning_rate=NaN", bad_lr), ("learning_rate<0", neg_lr),
+        ("context_dim=0", zero_ctx),
+        ("embed_dim=0", zero_embed),
+        ("hidden_dim=0", zero_hidden),
+        ("hidden_layers=0", zero_layers),
+        ("learning_rate=NaN", bad_lr),
+        ("learning_rate<0", neg_lr),
         ("lambda=inf", bad_lambda),
     ] {
         assert!(
-            db.add_campaign("n", vec!["A".into()], 8, 1.0,
-                            Algorithm::NeuralLinUCB(cfg), None, None).await.is_err(),
+            db.add_campaign(
+                "n",
+                vec!["A".into()],
+                8,
+                1.0,
+                Algorithm::NeuralLinUCB(cfg),
+                None,
+                None
+            )
+            .await
+            .is_err(),
             "neural config with {label} must be rejected — zero dimensions build \
              degenerate matrices whose dot products panic on a length mismatch"
         );
     }
 
     assert!(
-        db.add_campaign("n_ok", vec!["A".into()], 8, 1.0,
-                        Algorithm::NeuralLinUCB(base), None, None).await.is_ok(),
+        db.add_campaign(
+            "n_ok",
+            vec!["A".into()],
+            8,
+            1.0,
+            Algorithm::NeuralLinUCB(base),
+            None,
+            None
+        )
+        .await
+        .is_ok(),
         "a valid neural config must still be accepted"
     );
     let _ = fs::remove_dir_all(dir);
@@ -209,12 +290,23 @@ async fn magnitude_sweep_never_corrupts_arm_state() {
         let v = 10f64.powi(exp);
         for (sign, candidate) in [("p", v), ("n", -v)] {
             let name = format!("s{sign}{exp}");
-            db.add_campaign(&name, vec!["A".into(), "B".into()], 2, 1.0,
-                            Algorithm::Linucb, None, None).await.unwrap();
+            db.add_campaign(
+                &name,
+                vec!["A".into(), "B".into()],
+                2,
+                1.0,
+                Algorithm::Linucb,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
             if let Ok((arm, iid)) = db.predict(&name, vec![candidate, 0.5]) {
                 accepted += 1;
-                db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+                db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 })
+                    .await
+                    .expect("reward");
             }
             assert!(
                 theta_is_finite(&db, &name),
@@ -224,6 +316,9 @@ async fn magnitude_sweep_never_corrupts_arm_state() {
         }
     }
 
-    assert!(accepted > 0, "the sweep rejected everything; it is not exercising the accept path");
+    assert!(
+        accepted > 0,
+        "the sweep rejected everything; it is not exercising the accept path"
+    );
     let _ = fs::remove_dir_all(dir);
 }

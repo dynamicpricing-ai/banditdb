@@ -22,16 +22,25 @@ use std::fs;
 use std::sync::atomic::Ordering;
 
 fn set_file_size_limit(limit: libc::rlim_t) {
-    let lim = libc::rlimit { rlim_cur: limit, rlim_max: libc::RLIM_INFINITY };
+    let lim = libc::rlimit {
+        rlim_cur: limit,
+        rlim_max: libc::RLIM_INFINITY,
+    };
     // SAFETY: plain syscalls with a valid, fully initialised argument.
     unsafe {
         libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
-        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &lim), 0, "setrlimit failed");
+        assert_eq!(
+            libc::setrlimit(libc::RLIMIT_FSIZE, &lim),
+            0,
+            "setrlimit failed"
+        );
     }
 }
 
 fn reward_count(db: &BanditDB) -> u64 {
-    db.campaigns.read()["c"].arms.read()["a"].reward_count.load(Ordering::Relaxed)
+    db.campaigns.read()["c"].arms.read()["a"]
+        .reward_count
+        .load(Ordering::Relaxed)
 }
 
 #[tokio::test]
@@ -42,12 +51,17 @@ async fn failed_wal_write_is_not_acknowledged_and_leaves_wal_intact() {
     fs::create_dir_all(dir).unwrap();
 
     let db = BanditDB::new(&wal, dir);
-    db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+    db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None)
+        .await
+        .unwrap();
     let iid = db.predict("c", vec![0.5, 0.5]).unwrap().1;
 
     // Flush, then forbid the WAL from growing past its current end.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    db.event_tx.send(WalMessage::Checkpoint { reply: tx }).await.unwrap();
+    db.event_tx
+        .send(WalMessage::Checkpoint { reply: tx })
+        .await
+        .unwrap();
     let len = rx.await.unwrap();
     let before = fs::read(&wal).unwrap();
     set_file_size_limit(len);
@@ -55,10 +69,19 @@ async fn failed_wal_write_is_not_acknowledged_and_leaves_wal_intact() {
     let res = db.reward(&iid, 1.0).await;
     set_file_size_limit(libc::RLIM_INFINITY);
 
-    assert!(res.is_err(), "a reward whose WAL write failed was acknowledged: {res:?}");
-    assert!(!db.wal_healthy.load(Ordering::SeqCst), "writer must report itself unhealthy");
-    assert_eq!(fs::read(&wal).unwrap(), before,
-        "a failed write must leave the WAL exactly as it was — no torn or repeated records");
+    assert!(
+        res.is_err(),
+        "a reward whose WAL write failed was acknowledged: {res:?}"
+    );
+    assert!(
+        !db.wal_healthy.load(Ordering::SeqCst),
+        "writer must report itself unhealthy"
+    );
+    assert_eq!(
+        fs::read(&wal).unwrap(),
+        before,
+        "a failed write must leave the WAL exactly as it was — no torn or repeated records"
+    );
 
     // Recovery sees a clean log: the prediction is pending, the reward never happened,
     // and the caller's retry of the reward now succeeds.

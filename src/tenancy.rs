@@ -32,9 +32,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::path::{Path, PathBuf};
 
 /// Quotas a control plane assigns to a tenant. Stored here so the engine can
 /// answer "what is this tenant allowed?" without calling back to the control
@@ -43,11 +43,11 @@ use std::path::{Path, PathBuf};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct TenantQuotas {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_campaigns:      Option<usize>,
+    pub max_campaigns: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_campaign_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_feature_dim:    Option<usize>,
+    pub max_feature_dim: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_sec: Option<u32>,
 }
@@ -56,9 +56,9 @@ pub struct TenantQuotas {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TenantKey {
     /// Lowercase hex SHA-256 of the key. The key itself is never stored.
-    pub hash:   String,
+    pub hash: String,
     /// "admin" | "writer" | "reader", matching the engine's role ladder.
-    pub role:   String,
+    pub role: String,
     /// Leading characters of the key, for display in a console. Not a secret and
     /// not used for authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,9 +75,9 @@ pub struct TenantKey {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Tenant {
-    pub id:     String,
+    pub id: String,
     #[serde(default)]
-    pub keys:   Vec<TenantKey>,
+    pub keys: Vec<TenantKey>,
     #[serde(default)]
     pub quotas: TenantQuotas,
     /// active | suspended. A suspended tenant authenticates but is refused, so
@@ -88,18 +88,22 @@ pub struct Tenant {
     pub updated_at: u64,
 }
 
-fn default_status() -> String { "active".to_string() }
+fn default_status() -> String {
+    "active".to_string()
+}
 
 impl Tenant {
-    pub fn is_active(&self) -> bool { self.status == "active" }
+    pub fn is_active(&self) -> bool {
+        self.status == "active"
+    }
 }
 
 /// What a successful lookup yields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyMatch {
     pub tenant_id: String,
-    pub role:      String,
-    pub active:    bool,
+    pub role: String,
+    pub active: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -121,12 +125,14 @@ pub struct TenantStore {
     /// change. The clock is an `Arc<AtomicU64>` so authentication can record use
     /// under a read lock — taking a write lock per request would serialise the
     /// whole auth path.
-    index:   HashMap<String, (String, String, Arc<AtomicU64>)>,
-    path:    Option<PathBuf>,
+    index: HashMap<String, (String, String, Arc<AtomicU64>)>,
+    path: Option<PathBuf>,
 }
 
 impl TenantStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Load from `<data_dir>/tenants.json`, or start empty if absent.
     ///
@@ -135,14 +141,18 @@ impl TenantStore {
     /// write would overwrite the evidence.
     pub fn load(data_dir: &str) -> Result<Self, String> {
         let path = Path::new(data_dir).join("tenants.json");
-        let mut store = Self { tenants: HashMap::new(), index: HashMap::new(), path: Some(path.clone()) };
+        let mut store = Self {
+            tenants: HashMap::new(),
+            index: HashMap::new(),
+            path: Some(path.clone()),
+        };
         if !path.exists() {
             return Ok(store);
         }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| format!("tenants.json unreadable: {e}"))?;
-        let parsed: StoreFile = serde_json::from_str(&raw)
-            .map_err(|e| format!("tenants.json is corrupt: {e}"))?;
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| format!("tenants.json unreadable: {e}"))?;
+        let parsed: StoreFile =
+            serde_json::from_str(&raw).map_err(|e| format!("tenants.json is corrupt: {e}"))?;
         for t in parsed.tenants {
             store.tenants.insert(t.id.clone(), t);
         }
@@ -153,7 +163,9 @@ impl TenantStore {
     fn reindex(&mut self) {
         // Preserve in-memory usage across a reindex: an upsert that rewrites a
         // tenant's keys must not reset the clock on keys that still exist.
-        let previous: HashMap<String, Arc<AtomicU64>> = self.index.iter()
+        let previous: HashMap<String, Arc<AtomicU64>> = self
+            .index
+            .iter()
             .map(|(hash, (_, _, clock))| (hash.clone(), Arc::clone(clock)))
             .collect();
 
@@ -161,17 +173,21 @@ impl TenantStore {
         for t in self.tenants.values() {
             for k in &t.keys {
                 let hash = k.hash.to_lowercase();
-                let clock = previous.get(&hash)
+                let clock = previous
+                    .get(&hash)
                     .map(Arc::clone)
                     .unwrap_or_else(|| Arc::new(AtomicU64::new(k.last_used_at)));
-                self.index.insert(hash, (t.id.clone(), k.role.clone(), clock));
+                self.index
+                    .insert(hash, (t.id.clone(), k.role.clone(), clock));
             }
         }
     }
 
     /// Fold in-memory usage onto `tenants` before they are serialised.
     fn fold_last_used(&self, tenants: &mut HashMap<String, Tenant>) {
-        let seen: HashMap<String, u64> = self.index.iter()
+        let seen: HashMap<String, u64> = self
+            .index
+            .iter()
             .map(|(hash, (_, _, clock))| (hash.clone(), clock.load(Ordering::Relaxed)))
             .collect();
         for t in tenants.values_mut() {
@@ -199,10 +215,14 @@ impl TenantStore {
     }
 
     fn write(&self, tenants: &HashMap<String, Tenant>) -> Result<(), String> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let mut sorted: Vec<&Tenant> = tenants.values().collect();
-        sorted.sort_by(|a, b| a.id.cmp(&b.id));      // stable file, readable diffs
-        let file = StoreFile { tenants: sorted.into_iter().cloned().collect() };
+        sorted.sort_by(|a, b| a.id.cmp(&b.id)); // stable file, readable diffs
+        let file = StoreFile {
+            tenants: sorted.into_iter().cloned().collect(),
+        };
         let json = serde_json::to_string_pretty(&file)
             .map_err(|e| format!("tenant serialisation failed: {e}"))?;
 
@@ -218,7 +238,8 @@ impl TenantStore {
         write_tmp().map_err(|e| format!("tenant write failed: {e}"))?;
         std::fs::rename(&tmp, path).map_err(|e| format!("tenant rename failed: {e}"))?;
         if let Some(dir) = path.parent() {
-            std::fs::File::open(dir).and_then(|d| d.sync_all())
+            std::fs::File::open(dir)
+                .and_then(|d| d.sync_all())
                 .map_err(|e| format!("tenant directory sync failed: {e}"))?;
         }
         Ok(())
@@ -230,12 +251,19 @@ impl TenantStore {
         if tenant.id.is_empty() || tenant.id.len() > 128 {
             return Err("tenant id must be 1–128 characters".into());
         }
-        if !tenant.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !tenant
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err("tenant id may only contain ASCII letters, digits, '-', and '_'".into());
         }
         for k in &tenant.keys {
             if k.hash.len() != 64 || !k.hash.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("key hash must be 64 hex characters, got {:?}", k.hash));
+                return Err(format!(
+                    "key hash must be 64 hex characters, got {:?}",
+                    k.hash
+                ));
             }
             if !matches!(k.role.as_str(), "admin" | "writer" | "reader") {
                 return Err(format!("unknown role {:?}", k.role));
@@ -271,8 +299,16 @@ impl TenantStore {
         let digest = hash_key(presented);
         let (tenant_id, role, clock) = self.index.get(&digest)?;
         clock.store(now_secs(), Ordering::Relaxed);
-        let active = self.tenants.get(tenant_id).map(|t| t.is_active()).unwrap_or(false);
-        Some(KeyMatch { tenant_id: tenant_id.clone(), role: role.clone(), active })
+        let active = self
+            .tenants
+            .get(tenant_id)
+            .map(|t| t.is_active())
+            .unwrap_or(false);
+        Some(KeyMatch {
+            tenant_id: tenant_id.clone(),
+            role: role.clone(),
+            active,
+        })
     }
 
     /// A tenant with live usage folded in, for the console's key list.
@@ -286,9 +322,15 @@ impl TenantStore {
         Some(t)
     }
 
-    pub fn get(&self, tenant_id: &str) -> Option<&Tenant> { self.tenants.get(tenant_id) }
-    pub fn len(&self) -> usize { self.tenants.len() }
-    pub fn is_empty(&self) -> bool { self.tenants.is_empty() }
+    pub fn get(&self, tenant_id: &str) -> Option<&Tenant> {
+        self.tenants.get(tenant_id)
+    }
+    pub fn len(&self) -> usize {
+        self.tenants.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.tenants.is_empty()
+    }
     pub fn ids(&self) -> Vec<String> {
         let mut v: Vec<String> = self.tenants.keys().cloned().collect();
         v.sort();

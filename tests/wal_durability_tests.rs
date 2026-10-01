@@ -6,8 +6,8 @@
 //! recoverable — the interaction cache holds them — so they are now dropped and
 //! counted instead. Rewards and campaign lifecycle events keep a hard guarantee.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, EngineError};
+use banditdb::BanditDB;
 use std::fs;
 use std::sync::atomic::Ordering;
 
@@ -15,8 +15,17 @@ async fn fresh(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db
 }
 
@@ -42,8 +51,10 @@ async fn prediction_survives_a_saturated_wal_and_is_counted() {
     let db = fresh(dir).await;
 
     if !saturate_wal(&db) {
-        eprintln!("SKIPPED prediction_survives_a_saturated_wal_and_is_counted: \
-                   writer drained faster than the test could fill the channel");
+        eprintln!(
+            "SKIPPED prediction_survives_a_saturated_wal_and_is_counted: \
+                   writer drained faster than the test could fill the channel"
+        );
         let _ = fs::remove_dir_all(dir);
         return;
     }
@@ -111,7 +122,8 @@ async fn interact_treats_its_paired_events_as_durable() {
         "interact must fail rather than half-log a paired prediction/reward"
     );
     assert_eq!(
-        db.wal_dropped.load(Ordering::Relaxed), before,
+        db.wal_dropped.load(Ordering::Relaxed),
+        before,
         "interact must not silently drop its prediction record as best-effort"
     );
 
@@ -134,18 +146,36 @@ async fn campaign_lifecycle_is_durable_before_returning() {
     // the observable: a lifecycle op that skipped durability would not advance it.
     let before = db.wal_fsyncs.load(Ordering::Relaxed);
 
-    db.add_campaign("lifecycle", vec!["A".into(), "B".into()], 2, 1.0,
-                    Algorithm::Linucb, None, None).await.expect("create");
+    db.add_campaign(
+        "lifecycle",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .expect("create");
     let after_create = db.wal_fsyncs.load(Ordering::Relaxed);
-    assert!(after_create > before, "create returned without an fsync covering it");
+    assert!(
+        after_create > before,
+        "create returned without an fsync covering it"
+    );
 
     db.archive_campaign("lifecycle").await.expect("archive");
     let after_archive = db.wal_fsyncs.load(Ordering::Relaxed);
-    assert!(after_archive > after_create, "archive returned without an fsync covering it");
+    assert!(
+        after_archive > after_create,
+        "archive returned without an fsync covering it"
+    );
 
     db.restore_campaign("lifecycle").await.expect("restore");
     let after_restore = db.wal_fsyncs.load(Ordering::Relaxed);
-    assert!(after_restore > after_archive, "restore returned without an fsync covering it");
+    assert!(
+        after_restore > after_archive,
+        "restore returned without an fsync covering it"
+    );
 
     db.delete_campaign("lifecycle").await.expect("delete");
     assert!(
@@ -163,8 +193,17 @@ async fn created_campaign_survives_immediate_restart() {
     let dir = "/tmp/banditdb_p13_restart";
     let db = fresh(dir).await;
 
-    db.add_campaign("survivor", vec!["A".into(), "B".into()], 2, 1.0,
-                    Algorithm::Linucb, None, None).await.expect("create");
+    db.add_campaign(
+        "survivor",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .expect("create");
     // No checkpoint: recovery must find it by replaying the WAL alone.
     drop(db);
 
@@ -186,11 +225,14 @@ async fn healthy_wal_drops_nothing() {
     for i in 0..200 {
         let ctx = vec![(i % 9) as f64 / 9.0, (i % 4) as f64 / 4.0];
         let (arm, iid) = db.predict("c", ctx).expect("predict");
-        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 })
+            .await
+            .expect("reward");
     }
 
     assert_eq!(
-        db.wal_dropped.load(Ordering::Relaxed), 0,
+        db.wal_dropped.load(Ordering::Relaxed),
+        0,
         "no records should be dropped under normal load"
     );
 

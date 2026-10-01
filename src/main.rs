@@ -1,29 +1,32 @@
 use axum::{
-    extract::{ConnectInfo, DefaultBodyLimit, Extension, Path, State, Json},
-    http::{HeaderMap, StatusCode, Method},
-    middleware::{self, Next},
     extract::Request,
+    extract::{ConnectInfo, DefaultBodyLimit, Extension, Json, Path, State},
+    http::{HeaderMap, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
-use tower_http::cors::{CorsLayer, Any};
-use banditdb::state::{Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, PacingConfig, PacingReport, WarmStart, DEFAULT_ALPHA};
 use banditdb::engine::ArmFilter;
-use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
 use banditdb::reqlog::{RequestLog, RequestRecord};
-use parking_lot::RwLock;
+use banditdb::state::{
+    Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, PacingConfig, PacingReport,
+    WarmStart, DEFAULT_ALPHA,
+};
+use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
 use banditdb::BanditDB;
-use governor::{Quota, RateLimiter, state::keyed::DefaultKeyedStateStore, clock::DefaultClock};
+use governor::{clock::DefaultClock, state::keyed::DefaultKeyedStateStore, Quota, RateLimiter};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 // ---------------------------------------------------------------------------
 // Build identity
@@ -42,8 +45,11 @@ const BUILD_FEATURES: &[&str] = &[
 ];
 
 fn build_features_str() -> String {
-    if BUILD_FEATURES.is_empty() { "no optional features".to_string() }
-    else { BUILD_FEATURES.join(",") }
+    if BUILD_FEATURES.is_empty() {
+        "no optional features".to_string()
+    } else {
+        BUILD_FEATURES.join(",")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -56,13 +62,15 @@ pub enum Role {
     /// fails every role gate. Ordered below Reader so `role >= min` refuses it
     /// without a special case at each call site.
     Suspended = 0,
-    Reader = 1, Writer = 2, Admin = 3,
+    Reader = 1,
+    Writer = 2,
+    Admin = 3,
 }
 
 /// Per-request auth context — injected by `auth_middleware`, read by handlers.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    pub role:      Role,
+    pub role: Role,
     /// None = global access (admin with no tenant restriction).
     /// Some(t) = restricted to the `t/` namespace when tenant mode is active.
     pub tenant_id: Option<String>,
@@ -76,7 +84,7 @@ pub struct AuthContext {
 ///
 /// BANDITDB_API_KEY (legacy) — treated as an admin key with no tenant restriction.
 pub struct KeyRegistry {
-    keys:        Vec<(Vec<u8>, Role, Option<String>)>,
+    keys: Vec<(Vec<u8>, Role, Option<String>)>,
     tenant_mode: bool,
     /// Tenants provisioned at runtime by a control plane. Separate from `keys`
     /// because the two answer the same question with different trade-offs: the
@@ -84,7 +92,7 @@ pub struct KeyRegistry {
     /// is an O(1) digest lookup that can hold thousands and change without a
     /// restart. Env keys are checked first so a local operator key keeps working
     /// even if the store is empty or unreadable.
-    tenants:     RwLock<TenantStore>,
+    tenants: RwLock<TenantStore>,
     /// True when BANDITDB_PROVISION_KEY is configured, i.e. a control plane owns
     /// this engine's tenants.
     ///
@@ -109,13 +117,13 @@ impl KeyRegistry {
                     // spec = "role" or "role:tenant_id"
                     let (role_str, tenant_id) = match spec.split_once(':') {
                         Some((r, t)) => (r.trim(), Some(t.trim().to_string())),
-                        None         => (spec.trim(), None),
+                        None => (spec.trim(), None),
                     };
                     let role = match role_str {
-                        "admin"  => Role::Admin,
+                        "admin" => Role::Admin,
                         "writer" => Role::Writer,
                         "reader" => Role::Reader,
-                        _        => continue,
+                        _ => continue,
                     };
                     if !k.trim().is_empty() {
                         keys.push((k.trim().as_bytes().to_vec(), role, tenant_id));
@@ -134,7 +142,12 @@ impl KeyRegistry {
         let provisioned = std::env::var("BANDITDB_PROVISION_KEY")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
-        Self { keys, tenant_mode, tenants: RwLock::new(TenantStore::new()), provisioned }
+        Self {
+            keys,
+            tenant_mode,
+            tenants: RwLock::new(TenantStore::new()),
+            provisioned,
+        }
     }
 
     /// Same as `from_env`, plus the tenant store persisted in `data_dir`.
@@ -153,13 +166,17 @@ impl KeyRegistry {
         self.tenants.write().remove(tenant_id)
     }
 
-    pub fn tenant_ids(&self) -> Vec<String> { self.tenants.read().ids() }
+    pub fn tenant_ids(&self) -> Vec<String> {
+        self.tenants.read().ids()
+    }
 
     pub fn tenant_quotas(&self, tenant_id: &str) -> Option<TenantQuotas> {
         self.tenants.read().get(tenant_id).map(|t| t.quotas.clone())
     }
 
-    pub fn tenant_count(&self) -> usize { self.tenants.read().len() }
+    pub fn tenant_count(&self) -> usize {
+        self.tenants.read().len()
+    }
 
     pub fn tenant_detail(&self, tenant_id: &str) -> Option<Tenant> {
         self.tenants.read().detail(tenant_id)
@@ -171,18 +188,21 @@ impl KeyRegistry {
         // workflows depend on — but never on an engine a control plane manages,
         // whose tenant list is empty only until the first signup.
         if !self.provisioned && self.keys.is_empty() && self.tenants.read().is_empty() {
-            return Some(AuthContext { role: Role::Admin, tenant_id: None });
+            return Some(AuthContext {
+                role: Role::Admin,
+                tenant_id: None,
+            });
         }
-        let presented = provided;                 // keep the &str for the digest lookup
-        let provided  = provided.as_bytes();
-        let mut found:     u8              = 0u8;
-        let mut role_val:  u8              = 0u8;
-        let mut tenant_id: Option<String>  = None;
+        let presented = provided; // keep the &str for the digest lookup
+        let provided = provided.as_bytes();
+        let mut found: u8 = 0u8;
+        let mut role_val: u8 = 0u8;
+        let mut tenant_id: Option<String> = None;
 
         for (key_bytes, role, tid) in &self.keys {
             let matched = provided.ct_eq(key_bytes.as_slice()).unwrap_u8();
-            let update  = matched & (!found & 1);
-            role_val   |= update.wrapping_neg() & (*role as u8);
+            let update = matched & (!found & 1);
+            role_val |= update.wrapping_neg() & (*role as u8);
             if matched == 1 && found == 0 {
                 tenant_id = tid.clone();
             }
@@ -195,7 +215,10 @@ impl KeyRegistry {
                 2 => Role::Writer,
                 _ => Role::Reader,
             };
-            return Some(AuthContext { role, tenant_id: if self.tenant_mode { tenant_id } else { None } });
+            return Some(AuthContext {
+                role,
+                tenant_id: if self.tenant_mode { tenant_id } else { None },
+            });
         }
 
         // Not a statically configured key — try the provisioned tenants.
@@ -203,22 +226,32 @@ impl KeyRegistry {
         if !matched.active {
             // Suspended tenants authenticate and are then refused by role, so a
             // lapsed subscription reads as "forbidden" rather than "bad key".
-            return Some(AuthContext { role: Role::Suspended, tenant_id: Some(matched.tenant_id) });
+            return Some(AuthContext {
+                role: Role::Suspended,
+                tenant_id: Some(matched.tenant_id),
+            });
         }
         let role = match matched.role.as_str() {
-            "admin"  => Role::Admin,
+            "admin" => Role::Admin,
             "writer" => Role::Writer,
-            _        => Role::Reader,
+            _ => Role::Reader,
         };
         // A provisioned tenant is ALWAYS namespace-scoped, whatever
         // BANDITDB_TENANT_MODE says. Hosted tenants sharing a process without
         // isolation would be a cross-tenant data leak, and it must not be
         // possible to switch that off with an environment variable.
-        Some(AuthContext { role, tenant_id: Some(matched.tenant_id) })
+        Some(AuthContext {
+            role,
+            tenant_id: Some(matched.tenant_id),
+        })
     }
 
-    pub fn is_open(&self) -> bool { self.keys.is_empty() && !self.provisioned }
-    pub fn key_count(&self) -> usize { self.keys.len() }
+    pub fn is_open(&self) -> bool {
+        self.keys.is_empty() && !self.provisioned
+    }
+    pub fn key_count(&self) -> usize {
+        self.keys.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,15 +262,18 @@ impl KeyRegistry {
 fn ns(auth: &AuthContext, campaign_id: &str) -> String {
     match &auth.tenant_id {
         Some(t) => format!("{t}/{campaign_id}"),
-        None    => campaign_id.to_string(),
+        None => campaign_id.to_string(),
     }
 }
 
 /// Strip tenant prefix from a stored campaign ID for API responses.
 fn strip_ns(auth: &AuthContext, stored_id: &str) -> String {
     match &auth.tenant_id {
-        Some(t) => stored_id.strip_prefix(&format!("{t}/")).unwrap_or(stored_id).to_string(),
-        None    => stored_id.to_string(),
+        Some(t) => stored_id
+            .strip_prefix(&format!("{t}/"))
+            .unwrap_or(stored_id)
+            .to_string(),
+        None => stored_id.to_string(),
     }
 }
 
@@ -245,7 +281,7 @@ fn strip_ns(auth: &AuthContext, stored_id: &str) -> String {
 fn owns(auth: &AuthContext, stored_id: &str) -> bool {
     match &auth.tenant_id {
         Some(t) => stored_id.starts_with(&format!("{t}/")),
-        None    => true,
+        None => true,
     }
 }
 
@@ -261,32 +297,32 @@ type ApiKeyLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, Default
 
 const LATENCY_BOUNDS: [f64; 10] = [0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
-const EP_PREDICT:  usize = 0;
-const EP_BATCH:    usize = 1;
-const EP_REWARD:   usize = 2;
+const EP_PREDICT: usize = 0;
+const EP_BATCH: usize = 1;
+const EP_REWARD: usize = 2;
 const EP_CAMPAIGN: usize = 3;
-const EP_OTHER:    usize = 4;
+const EP_OTHER: usize = 4;
 const N_EP: usize = 5;
 const EP_NAMES: [&str; N_EP] = ["predict", "batch_predict", "reward", "campaign", "other"];
 
 pub struct EndpointMetrics {
-    pub req_2xx:      AtomicU64,
-    pub req_4xx:      AtomicU64,
-    pub req_5xx:      AtomicU64,
-    pub lat_bucket:   [AtomicU64; 10],
+    pub req_2xx: AtomicU64,
+    pub req_4xx: AtomicU64,
+    pub req_5xx: AtomicU64,
+    pub lat_bucket: [AtomicU64; 10],
     pub lat_sum_bits: AtomicU64,
-    pub lat_count:    AtomicU64,
+    pub lat_count: AtomicU64,
 }
 
 impl Default for EndpointMetrics {
     fn default() -> Self {
         Self {
-            req_2xx:      AtomicU64::new(0),
-            req_4xx:      AtomicU64::new(0),
-            req_5xx:      AtomicU64::new(0),
-            lat_bucket:   std::array::from_fn(|_| AtomicU64::new(0)),
+            req_2xx: AtomicU64::new(0),
+            req_4xx: AtomicU64::new(0),
+            req_5xx: AtomicU64::new(0),
+            lat_bucket: std::array::from_fn(|_| AtomicU64::new(0)),
             lat_sum_bits: AtomicU64::new(0),
-            lat_count:    AtomicU64::new(0),
+            lat_count: AtomicU64::new(0),
         }
     }
 }
@@ -297,15 +333,17 @@ pub struct HttpMetrics {
 
 impl Default for HttpMetrics {
     fn default() -> Self {
-        Self { by_endpoint: std::array::from_fn(|_| EndpointMetrics::default()) }
+        Self {
+            by_endpoint: std::array::from_fn(|_| EndpointMetrics::default()),
+        }
     }
 }
 
 fn classify_endpoint(path: &str) -> usize {
     match path {
-        "/predict"       => EP_PREDICT,
+        "/predict" => EP_PREDICT,
         "/batch_predict" => EP_BATCH,
-        "/reward"        => EP_REWARD,
+        "/reward" => EP_REWARD,
         _ if path.starts_with("/campaign") => EP_CAMPAIGN,
         _ => EP_OTHER,
     }
@@ -315,7 +353,10 @@ fn atomic_add_f64(atom: &AtomicU64, val: f64) {
     loop {
         let old = atom.load(Ordering::Relaxed);
         let new = (f64::from_bits(old) + val).to_bits();
-        if atom.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        if atom
+            .compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             break;
         }
     }
@@ -326,14 +367,14 @@ fn atomic_add_f64(atom: &AtomicU64, val: f64) {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
-    pub db:             Arc<BanditDB>,
+    pub db: Arc<BanditDB>,
     /// Recent requests per tenant, for a console's request inspector. Bounded and
     /// in memory: a debugging window, not an audit trail.
-    pub request_log:    RequestLog,
-    pub registry:       Arc<KeyRegistry>,
-    pub rate_limiter:   Option<Arc<ApiKeyLimiter>>,
+    pub request_log: RequestLog,
+    pub registry: Arc<KeyRegistry>,
+    pub rate_limiter: Option<Arc<ApiKeyLimiter>>,
     pub metrics_public: bool,
-    pub http_metrics:   HttpMetrics,
+    pub http_metrics: HttpMetrics,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,23 +386,25 @@ struct AppError(StatusCode, String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
-        struct Body { error: String }
+        struct Body {
+            error: String,
+        }
         (self.0, Json(Body { error: self.1 })).into_response()
     }
 }
 
 fn map_engine_err(e: EngineError) -> AppError {
     let status = match &e {
-        EngineError::NotFound(_)      => StatusCode::NOT_FOUND,
+        EngineError::NotFound(_) => StatusCode::NOT_FOUND,
         EngineError::AlreadyExists(_) => StatusCode::CONFLICT,
-        EngineError::Archived(_)      => StatusCode::NOT_FOUND,
-        EngineError::WalFull          => StatusCode::SERVICE_UNAVAILABLE,
-        EngineError::WalUnavailable   => StatusCode::SERVICE_UNAVAILABLE,
-        EngineError::BadRequest(_)    => StatusCode::BAD_REQUEST,
+        EngineError::Archived(_) => StatusCode::NOT_FOUND,
+        EngineError::WalFull => StatusCode::SERVICE_UNAVAILABLE,
+        EngineError::WalUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        EngineError::BadRequest(_) => StatusCode::BAD_REQUEST,
         // 403, not 400: the request is valid and the client cannot fix it by
         // changing the payload — an operator has to raise the limit or free space.
         EngineError::LimitExceeded(_) => StatusCode::FORBIDDEN,
-        EngineError::Internal(_)      => StatusCode::INTERNAL_SERVER_ERROR,
+        EngineError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     AppError(status, e.to_string())
 }
@@ -372,18 +415,27 @@ fn map_engine_err(e: EngineError) -> AppError {
 
 fn validate_id(s: &str, field: &str) -> Result<(), AppError> {
     if s.is_empty() || s.len() > 128 {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("{field} must be 1–128 characters")));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be 1–128 characters"),
+        ));
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("{field} may only contain ASCII letters, digits, '-', and '_'")));
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!("{field} may only contain ASCII letters, digits, '-', and '_'"),
+        ));
     }
     Ok(())
 }
 
 fn prom_label(s: &str) -> String {
-    s.chars().filter(|&c| c != '"' && c != '\n' && c != '\\').collect()
+    s.chars()
+        .filter(|&c| c != '"' && c != '\n' && c != '\\')
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -393,19 +445,21 @@ fn prom_label(s: &str) -> String {
 #[derive(Deserialize)]
 struct CreateCampaignRequest {
     campaign_id: String,
-    arms:        Vec<String>,
+    arms: Vec<String>,
     feature_dim: usize,
     #[serde(default = "default_alpha")]
-    alpha:       f64,
+    alpha: f64,
     #[serde(default)]
-    algorithm:   Algorithm,
-    metadata:             Option<serde_json::Value>,
+    algorithm: Algorithm,
+    metadata: Option<serde_json::Value>,
     decay_half_life_hours: Option<f64>,
     #[serde(default)]
-    pacing:               Option<PacingConfig>,
+    pacing: Option<PacingConfig>,
 }
 
-fn default_alpha() -> f64 { DEFAULT_ALPHA }
+fn default_alpha() -> f64 {
+    DEFAULT_ALPHA
+}
 
 #[derive(Deserialize)]
 struct AddArmRequest {
@@ -413,28 +467,33 @@ struct AddArmRequest {
     /// Hierarchy label. Arms sharing a group lend their θ to new members through
     /// `warm_start: {"from": "group"}`.
     #[serde(default)]
-    group:  Option<String>,
+    group: Option<String>,
     #[serde(default)]
     warm_start: WarmStart,
 }
 
 #[derive(Deserialize)]
-struct ArmStatusRequest { status: ArmStatus }
+struct ArmStatusRequest {
+    status: ArmStatus,
+}
 
 #[derive(Deserialize)]
 struct PredictRequest {
     campaign_id: String,
-    context:     Vec<f64>,
+    context: Vec<f64>,
     /// Restrict this request to these arms. Absent = every active arm.
     #[serde(default)]
     eligible_arms: Option<Vec<String>>,
     /// Drop these arms from this request. Applied after `eligible_arms`.
     #[serde(default)]
-    exclude_arms:  Option<Vec<String>>,
+    exclude_arms: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
-struct PredictResponse { arm_id: String, interaction_id: String }
+struct PredictResponse {
+    arm_id: String,
+    interaction_id: String,
+}
 
 #[derive(Deserialize)]
 struct BatchPredictItem {
@@ -443,30 +502,35 @@ struct BatchPredictItem {
     #[serde(default)]
     eligible_arms: Option<Vec<String>>,
     #[serde(default)]
-    exclude_arms:  Option<Vec<String>>,
+    exclude_arms: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
-struct BatchPredictRequest { predictions: Vec<BatchPredictItem> }
+struct BatchPredictRequest {
+    predictions: Vec<BatchPredictItem>,
+}
 
 #[derive(Serialize)]
 struct BatchPredictResult {
     #[serde(skip_serializing_if = "Option::is_none")]
-    arm_id:         Option<String>,
+    arm_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interaction_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error:          Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct RewardRequest { interaction_id: String, reward: f64 }
+struct RewardRequest {
+    interaction_id: String,
+    reward: f64,
+}
 
 #[derive(Deserialize)]
 struct InteractRequest {
     context: Vec<f64>,
-    arm_id:  String,
-    reward:  f64,
+    arm_id: String,
+    reward: f64,
 }
 
 async fn handle_interact(
@@ -477,59 +541,67 @@ async fn handle_interact(
 ) -> Result<Json<PredictResponse>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
     validate_id(&payload.arm_id, "arm_id")?;
-    
-    let interaction_id = state.db.interact(
-        &ns(&auth, &campaign_id),
-        &payload.arm_id,
-        payload.context,
-        payload.reward,
-    )
-    .await
-    .map_err(map_engine_err)?;
 
-    Ok(Json(PredictResponse { arm_id: payload.arm_id, interaction_id }))
+    let interaction_id = state
+        .db
+        .interact(
+            &ns(&auth, &campaign_id),
+            &payload.arm_id,
+            payload.context,
+            payload.reward,
+        )
+        .await
+        .map_err(map_engine_err)?;
+
+    Ok(Json(PredictResponse {
+        arm_id: payload.arm_id,
+        interaction_id,
+    }))
 }
 
 #[derive(Serialize)]
 struct CampaignEntropyHealth {
     entropy: f64,
-    status:  EntropyStatus,
+    status: EntropyStatus,
 }
 
 /// Public liveness payload. Carries no campaign data — see `handle_health`.
 #[derive(Serialize)]
 struct HealthResponse {
-    status:    &'static str,
-    version:   &'static str,
+    status: &'static str,
+    version: &'static str,
     /// Cargo features this binary was compiled with. Empty means a plain build:
     /// neural algorithms are unavailable and will be rejected at campaign creation.
-    features:  &'static [&'static str],
+    features: &'static [&'static str],
 }
 
 /// Authenticated health payload, scoped to the caller's tenant.
 #[derive(Serialize)]
 struct HealthDetailResponse {
-    status:    &'static str,
-    version:   &'static str,
-    features:  &'static [&'static str],
+    status: &'static str,
+    version: &'static str,
+    features: &'static [&'static str],
     campaigns: HashMap<String, CampaignEntropyHealth>,
 }
 
 #[derive(Serialize)]
 struct CampaignSummary {
     campaign_id: String,
-    alpha:       f64,
-    algorithm:   Algorithm,
-    arm_count:   usize,
-    archived:    bool,
+    alpha: f64,
+    algorithm: Algorithm,
+    arm_count: usize,
+    archived: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    metadata:    Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 struct ArmInfo {
-    theta: Vec<f64>, theta_norm: f64,
-    prediction_count: u64, reward_count: u64, avg_reward: Option<f64>,
+    theta: Vec<f64>,
+    theta_norm: f64,
+    prediction_count: u64,
+    reward_count: u64,
+    avg_reward: Option<f64>,
     status: ArmStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     group: Option<String>,
@@ -537,8 +609,12 @@ struct ArmInfo {
 
 #[derive(Serialize)]
 struct CampaignInfo {
-    campaign_id: String, alpha: f64, algorithm: Algorithm, archived: bool,
-    total_predictions: u64, total_rewards: u64,
+    campaign_id: String,
+    alpha: f64,
+    algorithm: Algorithm,
+    archived: bool,
+    total_predictions: u64,
+    total_rewards: u64,
     arms: HashMap<String, ArmInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<serde_json::Value>,
@@ -547,7 +623,10 @@ struct CampaignInfo {
 }
 
 #[derive(Serialize)]
-struct ExportResponse { export_dir: String, shards: HashMap<String, Vec<String>> }
+struct ExportResponse {
+    export_dir: String,
+    shards: HashMap<String, Vec<String>>,
+}
 
 // ---------------------------------------------------------------------------
 // Auth + rate-limit middleware
@@ -559,28 +638,40 @@ async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let provided = req.headers().get("X-Api-Key")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let provided = req
+        .headers()
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     let auth = match state.registry.authenticate(provided) {
         Some(a) => a,
-        None    => return AppError(StatusCode::UNAUTHORIZED, "Unauthorized".into()).into_response(),
+        None => return AppError(StatusCode::UNAUTHORIZED, "Unauthorized".into()).into_response(),
     };
 
     // Suspension is enforced here rather than in `require_role`, because not every
     // route group carries a role gate — reader routes are reachable by anyone who
     // authenticates. One choke point cannot be forgotten when a route is added.
     if auth.role == Role::Suspended {
-        return AppError(StatusCode::FORBIDDEN,
-            "Tenant suspended — the key is valid but the account is not active".into())
-            .into_response();
+        return AppError(
+            StatusCode::FORBIDDEN,
+            "Tenant suspended — the key is valid but the account is not active".into(),
+        )
+        .into_response();
     }
 
     if let Some(limiter) = &state.rate_limiter {
-        let key = if provided.is_empty() { addr.ip().to_string() } else { provided.to_string() };
+        let key = if provided.is_empty() {
+            addr.ip().to_string()
+        } else {
+            provided.to_string()
+        };
         if limiter.check_key(&key).is_err() {
-            return AppError(StatusCode::TOO_MANY_REQUESTS,
-                "Rate limit exceeded — retry after 1 second".into()).into_response();
+            return AppError(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded — retry after 1 second".into(),
+            )
+            .into_response();
         }
     }
 
@@ -588,13 +679,24 @@ async fn auth_middleware(
     next.run(req).await
 }
 
-async fn require_role(min: Role, Extension(auth): Extension<AuthContext>, req: Request, next: Next) -> Response {
+async fn require_role(
+    min: Role,
+    Extension(auth): Extension<AuthContext>,
+    req: Request,
+    next: Next,
+) -> Response {
     if auth.role == Role::Suspended {
-        return AppError(StatusCode::FORBIDDEN,
-            "Tenant suspended — the key is valid but the account is not active".into()).into_response();
+        return AppError(
+            StatusCode::FORBIDDEN,
+            "Tenant suspended — the key is valid but the account is not active".into(),
+        )
+        .into_response();
     }
-    if auth.role >= min { next.run(req).await }
-    else { AppError(StatusCode::FORBIDDEN, "Insufficient permissions".into()).into_response() }
+    if auth.role >= min {
+        next.run(req).await
+    } else {
+        AppError(StatusCode::FORBIDDEN, "Insufficient permissions".into()).into_response()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,10 +704,14 @@ async fn require_role(min: Role, Extension(auth): Extension<AuthContext>, req: R
 // ---------------------------------------------------------------------------
 
 /// Overall status shared by the public probe and the authenticated detail view.
-fn health_status(state: &AppState) -> (StatusCode, &'static str, Vec<(String, f64, EntropyStatus)>) {
-    let wal_ok   = state.db.wal_healthy.load(Ordering::Relaxed);
+fn health_status(
+    state: &AppState,
+) -> (StatusCode, &'static str, Vec<(String, f64, EntropyStatus)>) {
+    let wal_ok = state.db.wal_healthy.load(Ordering::Relaxed);
     let statuses = state.db.entropy_status_all();
-    let degraded = statuses.iter().any(|(_, _, s)| !matches!(s, EntropyStatus::Ok));
+    let degraded = statuses
+        .iter()
+        .any(|(_, _, s)| !matches!(s, EntropyStatus::Ok));
 
     let (code, overall) = if !wal_ok {
         (StatusCode::SERVICE_UNAVAILABLE, "degraded: wal unavailable")
@@ -626,11 +732,14 @@ fn health_status(state: &AppState) -> (StatusCode, &'static str, Vec<(String, f6
 /// `/health/detail`, which requires a reader key.
 async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
     let (code, overall, _) = health_status(&state);
-    (code, Json(HealthResponse {
-        status: overall,
-        version: env!("CARGO_PKG_VERSION"),
-        features: BUILD_FEATURES,
-    }))
+    (
+        code,
+        Json(HealthResponse {
+            status: overall,
+            version: env!("CARGO_PKG_VERSION"),
+            features: BUILD_FEATURES,
+        }),
+    )
 }
 
 /// Authenticated health detail: per-campaign entropy, scoped to the caller's tenant.
@@ -639,16 +748,25 @@ async fn handle_health_detail(
     Extension(auth): Extension<AuthContext>,
 ) -> (StatusCode, Json<HealthDetailResponse>) {
     let (code, overall, statuses) = health_status(&state);
-    let campaigns = statuses.into_iter()
+    let campaigns = statuses
+        .into_iter()
         .filter(|(id, _, _)| owns(&auth, id))
-        .map(|(id, entropy, status)| (strip_ns(&auth, &id), CampaignEntropyHealth { entropy, status }))
+        .map(|(id, entropy, status)| {
+            (
+                strip_ns(&auth, &id),
+                CampaignEntropyHealth { entropy, status },
+            )
+        })
         .collect();
-    (code, Json(HealthDetailResponse {
-        status: overall,
-        version: env!("CARGO_PKG_VERSION"),
-        features: BUILD_FEATURES,
-        campaigns,
-    }))
+    (
+        code,
+        Json(HealthDetailResponse {
+            status: overall,
+            version: env!("CARGO_PKG_VERSION"),
+            features: BUILD_FEATURES,
+            campaigns,
+        }),
+    )
 }
 
 /// True if `algorithm` — or either side of a Progressive tournament — needs an
@@ -669,21 +787,38 @@ async fn handle_create_campaign(
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&payload.campaign_id, "campaign_id")?;
     if payload.arms.is_empty() {
-        return Err(AppError(StatusCode::BAD_REQUEST, "Campaign must have at least one arm".into()));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "Campaign must have at least one arm".into(),
+        ));
     }
     if payload.arms.len() > state.db.max_arms {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("arm count {} exceeds BANDITDB_MAX_ARMS={}", payload.arms.len(), state.db.max_arms)));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "arm count {} exceeds BANDITDB_MAX_ARMS={}",
+                payload.arms.len(),
+                state.db.max_arms
+            ),
+        ));
     }
-    for arm in &payload.arms { validate_id(arm, "arm_id")?; }
+    for arm in &payload.arms {
+        validate_id(arm, "arm_id")?;
+    }
     if let Some(meta) = &payload.metadata {
         if serde_json::to_string(meta).map(|s| s.len()).unwrap_or(0) > 64 * 1024 {
-            return Err(AppError(StatusCode::BAD_REQUEST, "metadata exceeds 64 KB limit".into()));
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "metadata exceeds 64 KB limit".into(),
+            ));
         }
     }
     if let Some(hl) = payload.decay_half_life_hours {
         if hl <= 0.0 {
-            return Err(AppError(StatusCode::BAD_REQUEST, "decay_half_life_hours must be > 0".into()));
+            return Err(AppError(
+                StatusCode::BAD_REQUEST,
+                "decay_half_life_hours must be > 0".into(),
+            ));
         }
     }
 
@@ -692,36 +827,59 @@ async fn handle_create_campaign(
     // silently run plain LinUCB under a neural label. Reject instead.
     #[cfg(not(feature = "neural"))]
     if needs_neural(&payload.algorithm) {
-        return Err(AppError(StatusCode::BAD_REQUEST,
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
             "neural algorithms require a binary built with --features neural; \
-             this build has none (see GET /health `features`)".into()));
+             this build has none (see GET /health `features`)"
+                .into(),
+        ));
     }
 
     let arm_dim = match &payload.algorithm {
         Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => cfg.embed_dim,
         _ => {
             if payload.feature_dim == 0 {
-                return Err(AppError(StatusCode::BAD_REQUEST, "feature_dim must be > 0".into()));
+                return Err(AppError(
+                    StatusCode::BAD_REQUEST,
+                    "feature_dim must be > 0".into(),
+                ));
             }
             payload.feature_dim
         }
     };
     if arm_dim > state.db.max_feature_dim {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("feature_dim {arm_dim} exceeds BANDITDB_MAX_FEATURE_DIM={}", state.db.max_feature_dim)));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "feature_dim {arm_dim} exceeds BANDITDB_MAX_FEATURE_DIM={}",
+                state.db.max_feature_dim
+            ),
+        ));
     }
 
-    enforce_tenant_quotas(&state, &auth, payload.arms.len(), arm_dim, &payload.algorithm)?;
+    enforce_tenant_quotas(
+        &state,
+        &auth,
+        payload.arms.len(),
+        arm_dim,
+        &payload.algorithm,
+    )?;
 
-    state.db.add_campaign_pacing(
-        &ns(&auth, &payload.campaign_id),
-        payload.arms, arm_dim, payload.alpha, payload.algorithm, payload.metadata,
-        payload.decay_half_life_hours,
-        payload.pacing,
-    )
-    .await
-    .map(|_| Json("Campaign Created"))
-    .map_err(map_engine_err)
+    state
+        .db
+        .add_campaign_pacing(
+            &ns(&auth, &payload.campaign_id),
+            payload.arms,
+            arm_dim,
+            payload.alpha,
+            payload.algorithm,
+            payload.metadata,
+            payload.decay_half_life_hours,
+            payload.pacing,
+        )
+        .await
+        .map(|_| Json("Campaign Created"))
+        .map_err(map_engine_err)
 }
 
 async fn handle_delete_campaign(
@@ -730,7 +888,9 @@ async fn handle_delete_campaign(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
-    state.db.delete_campaign(&ns(&auth, &campaign_id))
+    state
+        .db
+        .delete_campaign(&ns(&auth, &campaign_id))
         .await
         .map(|_| Json("Campaign Deleted"))
         .map_err(map_engine_err)
@@ -742,7 +902,9 @@ async fn handle_archive_campaign(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
-    state.db.archive_campaign(&ns(&auth, &campaign_id))
+    state
+        .db
+        .archive_campaign(&ns(&auth, &campaign_id))
         .await
         .map(|_| Json("Campaign Archived"))
         .map_err(map_engine_err)
@@ -754,7 +916,9 @@ async fn handle_restore_campaign(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
-    state.db.restore_campaign(&ns(&auth, &campaign_id))
+    state
+        .db
+        .restore_campaign(&ns(&auth, &campaign_id))
         .await
         .map(|_| Json("Campaign Restored"))
         .map_err(map_engine_err)
@@ -779,7 +943,8 @@ async fn require_provision_key(req: Request, next: Next) -> Response {
     if expected.is_empty() {
         return AppError(StatusCode::NOT_FOUND, "Not found".into()).into_response();
     }
-    let presented = req.headers()
+    let presented = req
+        .headers()
         .get("X-Provision-Key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -794,21 +959,23 @@ async fn require_provision_key(req: Request, next: Next) -> Response {
 #[derive(Deserialize)]
 struct ProvisionTenantRequest {
     #[serde(default)]
-    keys:   Vec<ProvisionKey>,
+    keys: Vec<ProvisionKey>,
     #[serde(default)]
     quotas: TenantQuotas,
     #[serde(default = "default_tenant_status")]
     status: String,
 }
 
-fn default_tenant_status() -> String { "active".to_string() }
+fn default_tenant_status() -> String {
+    "active".to_string()
+}
 
 #[derive(Deserialize)]
 struct ProvisionKey {
     /// SHA-256 of the API key, hex. The plaintext key never reaches the engine —
     /// the control plane hashes it at mint time and shows it to the user once.
-    hash:   String,
-    role:   String,
+    hash: String,
+    role: String,
     #[serde(default)]
     prefix: Option<String>,
 }
@@ -816,8 +983,8 @@ struct ProvisionKey {
 #[derive(Serialize)]
 struct TenantResponse {
     tenant_id: String,
-    keys:      usize,
-    status:    String,
+    keys: usize,
+    status: String,
 }
 
 async fn handle_put_tenant(
@@ -827,25 +994,40 @@ async fn handle_put_tenant(
 ) -> Result<Json<TenantResponse>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
     if !matches!(payload.status.as_str(), "active" | "suspended") {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            "status must be \"active\" or \"suspended\"".into()));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            "status must be \"active\" or \"suspended\"".into(),
+        ));
     }
     let tenant = Tenant {
-        id:     tenant_id.clone(),
-        keys:   payload.keys.into_iter().map(|k| banditdb::tenancy::TenantKey {
-                    hash: k.hash, role: k.role, prefix: k.prefix, last_used_at: 0,
-                }).collect(),
+        id: tenant_id.clone(),
+        keys: payload
+            .keys
+            .into_iter()
+            .map(|k| banditdb::tenancy::TenantKey {
+                hash: k.hash,
+                role: k.role,
+                prefix: k.prefix,
+                last_used_at: 0,
+            })
+            .collect(),
         quotas: payload.quotas,
         status: payload.status.clone(),
         updated_at: 0,
     };
     let key_count = tenant.keys.len();
-    state.registry.upsert_tenant(tenant)
+    state
+        .registry
+        .upsert_tenant(tenant)
         .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
 
     tracing::info!(tenant = %tenant_id, keys = key_count, status = %payload.status,
         "tenant provisioned");
-    Ok(Json(TenantResponse { tenant_id, keys: key_count, status: payload.status }))
+    Ok(Json(TenantResponse {
+        tenant_id,
+        keys: key_count,
+        status: payload.status,
+    }))
 }
 
 /// A tenant's keys and quotas, including live usage.
@@ -860,8 +1042,12 @@ async fn handle_get_tenant(
     Path(tenant_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
-    let tenant = state.registry.tenant_detail(&tenant_id)
-        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("Tenant '{tenant_id}' not found")))?;
+    let tenant = state.registry.tenant_detail(&tenant_id).ok_or_else(|| {
+        AppError(
+            StatusCode::NOT_FOUND,
+            format!("Tenant '{tenant_id}' not found"),
+        )
+    })?;
     Ok(Json(serde_json::json!({
         "tenant_id": tenant.id,
         "status":    tenant.status,
@@ -885,10 +1071,10 @@ async fn handle_get_tenant(
 #[derive(Serialize)]
 struct TenantCampaignSummary {
     campaign_id: String,
-    alpha:       f64,
-    algorithm:   Algorithm,
-    arm_count:   usize,
-    archived:    bool,
+    alpha: f64,
+    algorithm: Algorithm,
+    arm_count: usize,
+    archived: bool,
     context_dim: usize,
     /// What this campaign reserves against the tenant's memory budget.
     ///
@@ -898,7 +1084,7 @@ struct TenantCampaignSummary {
     /// refuses the campaign.
     bytes_reserved: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    metadata:    Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
 }
 
 async fn handle_tenant_campaigns(
@@ -908,7 +1094,8 @@ async fn handle_tenant_campaigns(
     validate_id(&tenant_id, "tenant_id")?;
     let prefix = format!("{tenant_id}/");
     let campaigns = state.db.campaigns.read();
-    let mut list: Vec<TenantCampaignSummary> = campaigns.iter()
+    let mut list: Vec<TenantCampaignSummary> = campaigns
+        .iter()
         .filter(|(id, _)| id.starts_with(&prefix))
         .map(|(id, c)| {
             let arms = c.arms.read();
@@ -920,15 +1107,17 @@ async fn handle_tenant_campaigns(
             let context_dim = banditdb::engine::expected_context_dim(base_algo, arm_dim);
             TenantCampaignSummary {
                 campaign_id: id[prefix.len()..].to_string(),
-                alpha:       c.alpha,
-                algorithm:   c.algorithm.clone(),
-                arm_count:   arms.len(),
-                archived:    c.archived.load(Ordering::Relaxed),
+                alpha: c.alpha,
+                algorithm: c.algorithm.clone(),
+                arm_count: arms.len(),
+                archived: c.archived.load(Ordering::Relaxed),
                 context_dim,
                 bytes_reserved: banditdb::engine::campaign_memory_estimate(
-                    arms.len(), arm_dim, &c.algorithm,
+                    arms.len(),
+                    arm_dim,
+                    &c.algorithm,
                 ),
-                metadata:    c.metadata.clone(),
+                metadata: c.metadata.clone(),
             }
         })
         .collect();
@@ -942,9 +1131,11 @@ async fn handle_tenant_campaign_report(
 ) -> Result<Json<CampaignReport>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
     validate_id(&campaign_id, "campaign_id")?;
-    let mut report = state.db.campaign_report(&format!("{tenant_id}/{campaign_id}"))
+    let mut report = state
+        .db
+        .campaign_report(&format!("{tenant_id}/{campaign_id}"))
         .map_err(map_engine_err)?;
-    report.campaign_id = campaign_id;          // hide the namespace from the console
+    report.campaign_id = campaign_id; // hide the namespace from the console
     Ok(Json(report))
 }
 
@@ -954,7 +1145,9 @@ async fn handle_tenant_campaign_diagnostics(
 ) -> Result<Json<banditdb::state::CampaignDiagnosticsData>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
     validate_id(&campaign_id, "campaign_id")?;
-    let mut diag = state.db.campaign_diagnostics(&format!("{tenant_id}/{campaign_id}"))
+    let mut diag = state
+        .db
+        .campaign_diagnostics(&format!("{tenant_id}/{campaign_id}"))
         .map_err(map_engine_err)?;
     diag.campaign_id = campaign_id;
     Ok(Json(diag))
@@ -981,7 +1174,11 @@ async fn handle_purge_tenant_campaigns(
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_id(&tenant_id, "tenant_id")?;
     let prefix = format!("{tenant_id}/");
-    let ids: Vec<String> = state.db.campaigns.read().keys()
+    let ids: Vec<String> = state
+        .db
+        .campaigns
+        .read()
+        .keys()
         .filter(|k| k.starts_with(&prefix))
         .cloned()
         .collect();
@@ -991,16 +1188,20 @@ async fn handle_purge_tenant_campaigns(
         // Each deletion is WAL-logged and awaited, so a purge that reports
         // success has actually reached disk.
         match state.db.delete_campaign(id).await {
-            Ok(())  => deleted += 1,
-            Err(e)  => tracing::warn!(campaign = %id, error = %e, "purge: delete failed"),
+            Ok(()) => deleted += 1,
+            Err(e) => tracing::warn!(campaign = %id, error = %e, "purge: delete failed"),
         }
     }
     tracing::info!(tenant = %tenant_id, deleted, "tenant campaigns purged");
-    Ok(Json(serde_json::json!({ "deleted": deleted, "requested": ids.len() })))
+    Ok(Json(
+        serde_json::json!({ "deleted": deleted, "requested": ids.len() }),
+    ))
 }
 
 #[derive(Deserialize)]
-struct AdminPredictRequest { context: Vec<f64> }
+struct AdminPredictRequest {
+    context: Vec<f64>,
+}
 
 /// Predict on a tenant's behalf, for the console's playground.
 ///
@@ -1019,8 +1220,18 @@ async fn handle_tenant_predict(
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || db.predict(&cid, payload.context))
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("scoring task failed: {e}")))?
-        .map(|(arm_id, interaction_id)| Json(PredictResponse { arm_id, interaction_id }))
+        .map_err(|e| {
+            AppError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("scoring task failed: {e}"),
+            )
+        })?
+        .map(|(arm_id, interaction_id)| {
+            Json(PredictResponse {
+                arm_id,
+                interaction_id,
+            })
+        })
         .map_err(map_engine_err)
 }
 
@@ -1034,10 +1245,19 @@ async fn handle_tenant_reward(
     // provisioning credential cannot be pointed at another tenant's id.
     match state.db.interaction_campaign(&payload.interaction_id) {
         Some(cid) if cid.starts_with(&format!("{tenant_id}/")) => {}
-        _ => return Err(AppError(StatusCode::NOT_FOUND,
-            format!("Interaction '{}' not found or already rewarded", payload.interaction_id))),
+        _ => {
+            return Err(AppError(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "Interaction '{}' not found or already rewarded",
+                    payload.interaction_id
+                ),
+            ))
+        }
     }
-    state.db.reward(&payload.interaction_id, payload.reward)
+    state
+        .db
+        .reward(&payload.interaction_id, payload.reward)
         .await
         .map(|_| Json("OK"))
         .map_err(map_engine_err)
@@ -1051,10 +1271,15 @@ async fn handle_delete_tenant(
     // Only the keys are revoked here. Campaign data under the `tenant/` namespace
     // is deliberately left intact: deleting a tenant's models as a side effect of
     // a credential change would make an accidental call unrecoverable.
-    let existed = state.registry.remove_tenant(&tenant_id)
+    let existed = state
+        .registry
+        .remove_tenant(&tenant_id)
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !existed {
-        return Err(AppError(StatusCode::NOT_FOUND, format!("Tenant '{tenant_id}' not found")));
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("Tenant '{tenant_id}' not found"),
+        ));
     }
     state.request_log.forget(&tenant_id);
     tracing::info!(tenant = %tenant_id, "tenant keys revoked");
@@ -1062,7 +1287,10 @@ async fn handle_delete_tenant(
 }
 
 #[derive(Serialize)]
-struct TenantListResponse { tenants: Vec<String>, count: usize }
+struct TenantListResponse {
+    tenants: Vec<String>,
+    count: usize,
+}
 
 async fn handle_list_tenants(State(state): State<Arc<AppState>>) -> Json<TenantListResponse> {
     let tenants = state.registry.tenant_ids();
@@ -1076,16 +1304,16 @@ async fn handle_list_tenants(State(state): State<Arc<AppState>>) -> Json<TenantL
 /// numbers, so a developer never has to guess why a create was refused.
 #[derive(Serialize)]
 struct LimitsResponse {
-    tenant_id:         Option<String>,
-    campaigns_used:    usize,
-    max_campaigns:     Option<usize>,
+    tenant_id: Option<String>,
+    campaigns_used: usize,
+    max_campaigns: Option<usize>,
     max_campaign_bytes: Option<u64>,
-    max_feature_dim:   Option<usize>,
+    max_feature_dim: Option<usize>,
     rate_limit_per_sec: Option<u32>,
     /// Sum of what this tenant's campaigns reserve. Without it a caller sees the
     /// ceiling and not the distance to it, which is the only part anyone can act
     /// on before a create is refused.
-    bytes_reserved:    u64,
+    bytes_reserved: u64,
 }
 
 async fn handle_limits(
@@ -1095,21 +1323,30 @@ async fn handle_limits(
     let used = match &auth.tenant_id {
         Some(t) => {
             let prefix = format!("{t}/");
-            state.db.campaigns.read().keys().filter(|k| k.starts_with(&prefix)).count()
+            state
+                .db
+                .campaigns
+                .read()
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .count()
         }
         None => state.db.campaigns.read().len(),
     };
-    let q = auth.tenant_id.as_ref().and_then(|t| state.registry.tenant_quotas(t));
+    let q = auth
+        .tenant_id
+        .as_ref()
+        .and_then(|t| state.registry.tenant_quotas(t));
     Json(LimitsResponse {
-        tenant_id:          auth.tenant_id.clone(),
-        campaigns_used:     used,
-        max_campaigns:      q.as_ref().and_then(|q| q.max_campaigns),
+        tenant_id: auth.tenant_id.clone(),
+        campaigns_used: used,
+        max_campaigns: q.as_ref().and_then(|q| q.max_campaigns),
         max_campaign_bytes: q.as_ref().and_then(|q| q.max_campaign_bytes),
-        max_feature_dim:    q.as_ref().and_then(|q| q.max_feature_dim),
+        max_feature_dim: q.as_ref().and_then(|q| q.max_feature_dim),
         rate_limit_per_sec: q.as_ref().and_then(|q| q.rate_limit_per_sec),
-        bytes_reserved:     match &auth.tenant_id {
+        bytes_reserved: match &auth.tenant_id {
             Some(t) => tenant_reserved_bytes(&state, t),
-            None    => 0,
+            None => 0,
         },
     })
 }
@@ -1128,7 +1365,11 @@ async fn handle_limits(
 /// process's actual resident size, and the console says so.
 fn tenant_reserved_bytes(state: &AppState, tenant_id: &str) -> u64 {
     let prefix = format!("{tenant_id}/");
-    state.db.campaigns.read().iter()
+    state
+        .db
+        .campaigns
+        .read()
+        .iter()
         .filter(|(id, _)| id.starts_with(&prefix))
         .map(|(_, campaign)| {
             let arms = campaign.arms.read();
@@ -1145,28 +1386,40 @@ fn tenant_reserved_bytes(state: &AppState, tenant_id: &str) -> u64 {
 /// `AuthContext` does.
 fn enforce_tenant_quotas(
     state: &AppState,
-    auth:  &AuthContext,
-    arms:  usize,
+    auth: &AuthContext,
+    arms: usize,
     arm_dim: usize,
     algorithm: &Algorithm,
 ) -> Result<(), AppError> {
-    let Some(tenant_id) = &auth.tenant_id else { return Ok(()) };
-    let Some(q) = state.registry.tenant_quotas(tenant_id) else { return Ok(()) };
+    let Some(tenant_id) = &auth.tenant_id else {
+        return Ok(());
+    };
+    let Some(q) = state.registry.tenant_quotas(tenant_id) else {
+        return Ok(());
+    };
 
     if let Some(max_dim) = q.max_feature_dim {
         if arm_dim > max_dim {
-            return Err(AppError(StatusCode::FORBIDDEN, format!(
-                "feature_dim {arm_dim} exceeds your plan limit of {max_dim}"
-            )));
+            return Err(AppError(
+                StatusCode::FORBIDDEN,
+                format!("feature_dim {arm_dim} exceeds your plan limit of {max_dim}"),
+            ));
         }
     }
     if let Some(max) = q.max_campaigns {
         let prefix = format!("{tenant_id}/");
-        let used = state.db.campaigns.read().keys().filter(|k| k.starts_with(&prefix)).count();
+        let used = state
+            .db
+            .campaigns
+            .read()
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .count();
         if used >= max {
-            return Err(AppError(StatusCode::FORBIDDEN, format!(
-                "campaign limit reached: {used} of {max} used on your plan"
-            )));
+            return Err(AppError(
+                StatusCode::FORBIDDEN,
+                format!("campaign limit reached: {used} of {max} used on your plan"),
+            ));
         }
     }
     // Byte budget. This is what actually bounds a tenant's footprint: campaign
@@ -1179,11 +1432,16 @@ fn enforce_tenant_quotas(
         let wanted = banditdb::engine::campaign_memory_estimate(arms, arm_dim, algorithm);
         if reserved + wanted > budget {
             let mb = |b: u64| b as f64 / 1_048_576.0;
-            return Err(AppError(StatusCode::FORBIDDEN, format!(
-                "memory budget exceeded: this campaign reserves {:.1} MB, you have \
+            return Err(AppError(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "memory budget exceeded: this campaign reserves {:.1} MB, you have \
                  {:.1} MB of {:.1} MB left on your plan",
-                mb(wanted), mb(budget.saturating_sub(reserved)), mb(budget)
-            )));
+                    mb(wanted),
+                    mb(budget.saturating_sub(reserved)),
+                    mb(budget)
+                ),
+            ));
         }
     }
     Ok(())
@@ -1195,27 +1453,45 @@ fn enforce_tenant_quotas(
 /// it is held to the same budget. Without this a tenant could create a one-arm
 /// campaign inside its budget and add arms until the process ran out of memory,
 /// taking every other tenant on the instance down with it.
-fn enforce_arm_budget(state: &AppState, auth: &AuthContext, campaign_id: &str) -> Result<(), AppError> {
-    let Some(tenant_id) = &auth.tenant_id else { return Ok(()) };
-    let Some(budget) = state.registry.tenant_quotas(tenant_id).and_then(|q| q.max_campaign_bytes) else {
+fn enforce_arm_budget(
+    state: &AppState,
+    auth: &AuthContext,
+    campaign_id: &str,
+) -> Result<(), AppError> {
+    let Some(tenant_id) = &auth.tenant_id else {
+        return Ok(());
+    };
+    let Some(budget) = state
+        .registry
+        .tenant_quotas(tenant_id)
+        .and_then(|q| q.max_campaign_bytes)
+    else {
         return Ok(());
     };
     // An unknown campaign is the engine's to report.
     let Some(wanted) = state.db.campaigns.read().get(campaign_id).map(|campaign| {
         let arms = campaign.arms.read();
         let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
-        let estimate = |n| banditdb::engine::campaign_memory_estimate(n, arm_dim, &campaign.algorithm);
+        let estimate =
+            |n| banditdb::engine::campaign_memory_estimate(n, arm_dim, &campaign.algorithm);
         estimate(arms.len() + 1).saturating_sub(estimate(arms.len()))
-    }) else { return Ok(()) };
+    }) else {
+        return Ok(());
+    };
 
     let reserved = tenant_reserved_bytes(state, tenant_id);
     if reserved + wanted > budget {
         let mb = |b: u64| b as f64 / 1_048_576.0;
-        return Err(AppError(StatusCode::FORBIDDEN, format!(
-            "memory budget exceeded: this arm reserves {:.1} MB, you have \
+        return Err(AppError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "memory budget exceeded: this arm reserves {:.1} MB, you have \
              {:.1} MB of {:.1} MB left on your plan",
-            mb(wanted), mb(budget.saturating_sub(reserved)), mb(budget)
-        )));
+                mb(wanted),
+                mb(budget.saturating_sub(reserved)),
+                mb(budget)
+            ),
+        ));
     }
     Ok(())
 }
@@ -1228,21 +1504,27 @@ async fn handle_add_arm(
 ) -> Result<Json<&'static str>, AppError> {
     validate_id(&campaign_id, "campaign_id")?;
     validate_id(&payload.arm_id, "arm_id")?;
-    if let Some(group) = &payload.group { validate_id(group, "group")?; }
+    if let Some(group) = &payload.group {
+        validate_id(group, "group")?;
+    }
     if let WarmStart::Arms { arms, .. } = &payload.warm_start {
-        for arm in arms { validate_id(arm, "warm_start.arms")?; }
+        for arm in arms {
+            validate_id(arm, "warm_start.arms")?;
+        }
     }
     enforce_arm_budget(&state, &auth, &ns(&auth, &campaign_id))?;
 
-    state.db.add_arm(
-        &ns(&auth, &campaign_id),
-        &payload.arm_id,
-        payload.group,
-        &payload.warm_start,
-    )
-    .await
-    .map(|_| Json("Arm Added"))
-    .map_err(map_engine_err)
+    state
+        .db
+        .add_arm(
+            &ns(&auth, &campaign_id),
+            &payload.arm_id,
+            payload.group,
+            &payload.warm_start,
+        )
+        .await
+        .map(|_| Json("Arm Added"))
+        .map_err(map_engine_err)
 }
 
 async fn handle_set_arm_status(
@@ -1254,7 +1536,9 @@ async fn handle_set_arm_status(
     validate_id(&campaign_id, "campaign_id")?;
     validate_id(&arm_id, "arm_id")?;
 
-    state.db.set_arm_status(&ns(&auth, &campaign_id), &arm_id, payload.status)
+    state
+        .db
+        .set_arm_status(&ns(&auth, &campaign_id), &arm_id, payload.status)
         .await
         .map(|_| Json("Arm Status Updated"))
         .map_err(map_engine_err)
@@ -1264,10 +1548,14 @@ async fn handle_set_arm_status(
 /// a 400 rather than as a silently narrower candidate set.
 fn arm_filter(
     eligible: Option<Vec<String>>,
-    exclude:  Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
 ) -> Result<ArmFilter, AppError> {
-    for arm in eligible.iter().flatten() { validate_id(arm, "eligible_arms")?; }
-    for arm in exclude.iter().flatten()  { validate_id(arm, "exclude_arms")?; }
+    for arm in eligible.iter().flatten() {
+        validate_id(arm, "eligible_arms")?;
+    }
+    for arm in exclude.iter().flatten() {
+        validate_id(arm, "exclude_arms")?;
+    }
     Ok(ArmFilter {
         include: eligible.map(|v| v.into_iter().collect()),
         exclude: exclude.unwrap_or_default().into_iter().collect(),
@@ -1280,16 +1568,32 @@ async fn handle_predict(
     Json(payload): Json<PredictRequest>,
 ) -> Result<Json<PredictResponse>, AppError> {
     if payload.context.len() > state.db.max_feature_dim {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("context length {} exceeds BANDITDB_MAX_FEATURE_DIM={}", payload.context.len(), state.db.max_feature_dim)));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "context length {} exceeds BANDITDB_MAX_FEATURE_DIM={}",
+                payload.context.len(),
+                state.db.max_feature_dim
+            ),
+        ));
     }
     let filter = arm_filter(payload.eligible_arms, payload.exclude_arms)?;
-    let db  = Arc::clone(&state.db);
+    let db = Arc::clone(&state.db);
     let cid = ns(&auth, &payload.campaign_id);
     tokio::task::spawn_blocking(move || db.predict_filtered(&cid, payload.context, &filter))
         .await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("scoring task failed: {e}")))?
-        .map(|(arm_id, interaction_id)| Json(PredictResponse { arm_id, interaction_id }))
+        .map_err(|e| {
+            AppError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("scoring task failed: {e}"),
+            )
+        })?
+        .map(|(arm_id, interaction_id)| {
+            Json(PredictResponse {
+                arm_id,
+                interaction_id,
+            })
+        })
         .map_err(map_engine_err)
 }
 
@@ -1300,30 +1604,57 @@ async fn handle_batch_predict(
 ) -> Result<Json<Vec<BatchPredictResult>>, AppError> {
     const MAX_BATCH: usize = 100;
     if payload.predictions.len() > MAX_BATCH {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("batch size {} exceeds maximum {MAX_BATCH}", payload.predictions.len())));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "batch size {} exceeds maximum {MAX_BATCH}",
+                payload.predictions.len()
+            ),
+        ));
     }
-    let db      = Arc::clone(&state.db);
+    let db = Arc::clone(&state.db);
     let max_dim = state.db.max_feature_dim;
     // Namespace campaign IDs upfront before moving into spawn_blocking.
-    let mut namespaced: Vec<(String, Vec<f64>, ArmFilter)> = Vec::with_capacity(payload.predictions.len());
+    let mut namespaced: Vec<(String, Vec<f64>, ArmFilter)> =
+        Vec::with_capacity(payload.predictions.len());
     for item in payload.predictions {
         let filter = arm_filter(item.eligible_arms, item.exclude_arms)?;
         namespaced.push((ns(&auth, &item.campaign_id), item.context, filter));
     }
 
     let results = tokio::task::spawn_blocking(move || {
-        namespaced.into_iter().map(|(cid, context, filter)| {
-            if context.len() > max_dim {
-                return BatchPredictResult { arm_id: None, interaction_id: None,
-                    error: Some(format!("context length {} exceeds limit", context.len())) };
-            }
-            match db.predict_filtered(&cid, context, &filter) {
-                Ok((arm_id, iid)) => BatchPredictResult { arm_id: Some(arm_id), interaction_id: Some(iid), error: None },
-                Err(e)            => BatchPredictResult { arm_id: None, interaction_id: None, error: Some(e.to_string()) },
-            }
-        }).collect::<Vec<_>>()
-    }).await.map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("batch task failed: {e}")))?;
+        namespaced
+            .into_iter()
+            .map(|(cid, context, filter)| {
+                if context.len() > max_dim {
+                    return BatchPredictResult {
+                        arm_id: None,
+                        interaction_id: None,
+                        error: Some(format!("context length {} exceeds limit", context.len())),
+                    };
+                }
+                match db.predict_filtered(&cid, context, &filter) {
+                    Ok((arm_id, iid)) => BatchPredictResult {
+                        arm_id: Some(arm_id),
+                        interaction_id: Some(iid),
+                        error: None,
+                    },
+                    Err(e) => BatchPredictResult {
+                        arm_id: None,
+                        interaction_id: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| {
+        AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("batch task failed: {e}"),
+        )
+    })?;
 
     Ok(Json(results))
 }
@@ -1334,8 +1665,13 @@ async fn handle_reward(
     Json(payload): Json<RewardRequest>,
 ) -> Result<Json<&'static str>, AppError> {
     if !(0.0..=1.0).contains(&payload.reward) {
-        return Err(AppError(StatusCode::BAD_REQUEST,
-            format!("reward {} is outside required range [0.0, 1.0]", payload.reward)));
+        return Err(AppError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "reward {} is outside required range [0.0, 1.0]",
+                payload.reward
+            ),
+        ));
     }
     // Tenant check. This route names its target by interaction id alone, so without
     // resolving the owning campaign a tenant could reward another tenant's
@@ -1345,8 +1681,13 @@ async fn handle_reward(
     if auth.tenant_id.is_some() {
         if let Some(cid) = state.db.interaction_campaign(&payload.interaction_id) {
             if !owns(&auth, &cid) {
-                return Err(AppError(StatusCode::NOT_FOUND,
-                    format!("Interaction '{}' not found or already rewarded", payload.interaction_id)));
+                return Err(AppError(
+                    StatusCode::NOT_FOUND,
+                    format!(
+                        "Interaction '{}' not found or already rewarded",
+                        payload.interaction_id
+                    ),
+                ));
             }
         }
     }
@@ -1354,7 +1695,9 @@ async fn handle_reward(
     // Awaited directly rather than via spawn_blocking: reward() is now async
     // because it waits on the WAL fsync, and its CPU cost is a single rank-one
     // matrix update. Handing it to a blocking thread would only add a hop.
-    state.db.reward(&payload.interaction_id, payload.reward)
+    state
+        .db
+        .reward(&payload.interaction_id, payload.reward)
         .await
         .map(|_| Json("OK"))
         .map_err(map_engine_err)
@@ -1370,11 +1713,11 @@ async fn handle_list_campaigns(
         .filter(|(id, _)| owns(&auth, id))
         .map(|(id, campaign)| CampaignSummary {
             campaign_id: strip_ns(&auth, id),
-            alpha:       campaign.alpha,
-            algorithm:   campaign.algorithm.clone(),
-            arm_count:   campaign.arms.read().len(),
-            archived:    campaign.archived.load(Ordering::Relaxed),
-            metadata:    campaign.metadata.clone(),
+            alpha: campaign.alpha,
+            algorithm: campaign.algorithm.clone(),
+            arm_count: campaign.arms.read().len(),
+            archived: campaign.archived.load(Ordering::Relaxed),
+            metadata: campaign.metadata.clone(),
         })
         .collect();
     list.sort_by(|a, b| a.campaign_id.cmp(&b.campaign_id));
@@ -1387,40 +1730,49 @@ async fn handle_campaign_info(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<CampaignInfo>, AppError> {
     let stored_id = ns(&auth, &campaign_id);
-    let campaigns  = state.db.campaigns.read();
-    let campaign   = campaigns.get(&stored_id).ok_or_else(|| {
-        AppError(StatusCode::NOT_FOUND, format!("Campaign '{campaign_id}' not found"))
+    let campaigns = state.db.campaigns.read();
+    let campaign = campaigns.get(&stored_id).ok_or_else(|| {
+        AppError(
+            StatusCode::NOT_FOUND,
+            format!("Campaign '{campaign_id}' not found"),
+        )
     })?;
 
     let arms_guard = campaign.arms.read();
-    let mut total_preds   = 0u64;
+    let mut total_preds = 0u64;
     let mut total_rewards = 0u64;
-    let mut arms          = HashMap::new();
+    let mut arms = HashMap::new();
 
     for (arm_id, s) in arms_guard.iter() {
-        let p  = s.prediction_count.load(Ordering::Relaxed);
-        let r  = s.reward_count.load(Ordering::Relaxed);
+        let p = s.prediction_count.load(Ordering::Relaxed);
+        let r = s.reward_count.load(Ordering::Relaxed);
         let tr = f64::from_bits(s.total_reward.load(Ordering::Relaxed));
-        total_preds   += p;
+        total_preds += p;
         total_rewards += r;
-        arms.insert(arm_id.clone(), ArmInfo {
-            theta: s.theta.to_vec(), theta_norm: s.theta.dot(&s.theta).sqrt(),
-            prediction_count: p, reward_count: r,
-            avg_reward: if r > 0 { Some(tr / r as f64) } else { None },
-            status: s.status(), group: s.group.clone(),
-        });
+        arms.insert(
+            arm_id.clone(),
+            ArmInfo {
+                theta: s.theta.to_vec(),
+                theta_norm: s.theta.dot(&s.theta).sqrt(),
+                prediction_count: p,
+                reward_count: r,
+                avg_reward: if r > 0 { Some(tr / r as f64) } else { None },
+                status: s.status(),
+                group: s.group.clone(),
+            },
+        );
     }
 
     Ok(Json(CampaignInfo {
         campaign_id, // return caller-supplied name, not namespaced
-        alpha:       campaign.alpha,
-        algorithm:   campaign.algorithm.clone(),
-        archived:    campaign.archived.load(Ordering::Relaxed),
+        alpha: campaign.alpha,
+        algorithm: campaign.algorithm.clone(),
+        archived: campaign.archived.load(Ordering::Relaxed),
         total_predictions: total_preds,
         total_rewards,
         arms,
         metadata: campaign.metadata.clone(),
-        pacing:   campaign.pacing_report(),
+        pacing: campaign.pacing_report(),
     }))
 }
 
@@ -1430,8 +1782,13 @@ async fn handle_campaign_report(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<CampaignReport>, AppError> {
     let stored_id = ns(&auth, &campaign_id);
-    state.db.campaign_report(&stored_id)
-        .map(|mut r| { r.campaign_id = campaign_id; Json(r) }) // strip namespace from response
+    state
+        .db
+        .campaign_report(&stored_id)
+        .map(|mut r| {
+            r.campaign_id = campaign_id;
+            Json(r)
+        }) // strip namespace from response
         .map_err(map_engine_err)
 }
 
@@ -1441,8 +1798,13 @@ async fn handle_campaign_diagnostics(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<banditdb::state::CampaignDiagnosticsData>, AppError> {
     let stored_id = ns(&auth, &campaign_id);
-    state.db.campaign_diagnostics(&stored_id)
-        .map(|mut d| { d.campaign_id = campaign_id; Json(d) })
+    state
+        .db
+        .campaign_diagnostics(&stored_id)
+        .map(|mut d| {
+            d.campaign_id = campaign_id;
+            Json(d)
+        })
         .map_err(map_engine_err)
 }
 
@@ -1452,13 +1814,18 @@ async fn handle_campaign_pacing(
     Path(campaign_id): Path<String>,
 ) -> Result<Json<Option<PacingReport>>, AppError> {
     let stored_id = ns(&auth, &campaign_id);
-    state.db.campaign_pacing_report(&stored_id)
+    state
+        .db
+        .campaign_pacing_report(&stored_id)
         .map(Json)
         .map_err(map_engine_err)
 }
 
 async fn handle_checkpoint(State(state): State<Arc<AppState>>) -> Result<Json<String>, AppError> {
-    state.db.checkpoint().await
+    state
+        .db
+        .checkpoint()
+        .await
         .map(Json)
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
@@ -1474,18 +1841,25 @@ async fn handle_export(
     let mut shards: HashMap<String, Vec<String>> = HashMap::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".parquet") { continue; }
+        if !name.ends_with(".parquet") {
+            continue;
+        }
         let stem = name.strip_suffix(".parquet").unwrap_or(&name);
-        let cid  = stem.rfind('_')
+        let cid = stem
+            .rfind('_')
             .filter(|&pos| stem[pos + 1..].chars().all(|c| c.is_ascii_digit()))
             .map(|pos| stem[..pos].to_string())
             .unwrap_or_else(|| stem.to_string());
         // Shard filenames embed the namespaced campaign id, so listing them
         // unfiltered exposed every tenant's campaign names to any reader key.
-        if !owns(&auth, &cid) { continue; }
+        if !owns(&auth, &cid) {
+            continue;
+        }
         shards.entry(strip_ns(&auth, &cid)).or_default().push(name);
     }
-    for v in shards.values_mut() { v.sort(); }
+    for v in shards.values_mut() {
+        v.sort();
+    }
     Ok(Json(ExportResponse { export_dir, shards }))
 }
 
@@ -1497,8 +1871,10 @@ async fn metrics_middleware(
     let ep_idx = classify_endpoint(req.uri().path());
     // Captured before the request is consumed, for the per-tenant request ring.
     let method = req.method().as_str().to_string();
-    let path   = req.uri().path().to_string();
-    let api_key = req.headers().get("X-Api-Key")
+    let path = req.uri().path().to_string();
+    let api_key = req
+        .headers()
+        .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
@@ -1508,12 +1884,18 @@ async fn metrics_middleware(
     let status = resp.status().as_u16();
 
     let ep = &state.http_metrics.by_endpoint[ep_idx];
-    if status < 400      { ep.req_2xx.fetch_add(1, Ordering::Relaxed); }
-    else if status < 500 { ep.req_4xx.fetch_add(1, Ordering::Relaxed); }
-    else                 { ep.req_5xx.fetch_add(1, Ordering::Relaxed); }
+    if status < 400 {
+        ep.req_2xx.fetch_add(1, Ordering::Relaxed);
+    } else if status < 500 {
+        ep.req_4xx.fetch_add(1, Ordering::Relaxed);
+    } else {
+        ep.req_5xx.fetch_add(1, Ordering::Relaxed);
+    }
 
     for (i, &bound) in LATENCY_BOUNDS.iter().enumerate() {
-        if elapsed <= bound { ep.lat_bucket[i].fetch_add(1, Ordering::Relaxed); }
+        if elapsed <= bound {
+            ep.lat_bucket[i].fetch_add(1, Ordering::Relaxed);
+        }
     }
     atomic_add_f64(&ep.lat_sum_bits, elapsed);
     ep.lat_count.fetch_add(1, Ordering::Relaxed);
@@ -1526,15 +1908,19 @@ async fn metrics_middleware(
         if let Some(auth) = state.registry.authenticate(&key) {
             if let Some(tenant_id) = auth.tenant_id {
                 let prefix = format!("/{tenant_id}");
-                state.request_log.record(&tenant_id, RequestRecord {
-                    at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs()).unwrap_or(0),
-                    method,
-                    path: path.strip_prefix(&prefix).unwrap_or(&path).to_string(),
-                    status,
-                    latency_us: (elapsed * 1e6) as u64,
-                });
+                state.request_log.record(
+                    &tenant_id,
+                    RequestRecord {
+                        at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                        method,
+                        path: path.strip_prefix(&prefix).unwrap_or(&path).to_string(),
+                        status,
+                        latency_us: (elapsed * 1e6) as u64,
+                    },
+                );
             }
         }
     }
@@ -1554,16 +1940,22 @@ enum MetricsScope {
     Operator,
 }
 
-async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) -> (HeaderMap, String) {
+async fn handle_metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> (HeaderMap, String) {
     let mut out = String::with_capacity(8192);
 
     // Resolved here rather than taken from the auth middleware, because the
     // public route has none: a key there still narrows or widens the view.
-    let provided = headers.get("X-Api-Key").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let provided = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let scope = match state.registry.authenticate(provided) {
         Some(a) if a.role != Role::Suspended => match a.tenant_id {
             Some(t) => MetricsScope::Tenant(format!("{t}/")),
-            None    => MetricsScope::Operator,
+            None => MetricsScope::Operator,
         },
         _ => MetricsScope::Anonymous,
     };
@@ -1571,37 +1963,59 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     // The label a campaign is shown under, or None if this caller may not see it.
     let visible = |cid: &str| -> Option<String> {
         match &scope {
-            MetricsScope::Anonymous   => None,
+            MetricsScope::Anonymous => None,
             MetricsScope::Tenant(pfx) => cid.strip_prefix(pfx.as_str()).map(prom_label),
-            MetricsScope::Operator    => Some(prom_label(cid)),
+            MetricsScope::Operator => Some(prom_label(cid)),
         }
     };
 
     if process_wide {
         // WAL health
-        let wal_ok = if state.db.wal_healthy.load(Ordering::Relaxed) { 1 } else { 0 };
+        let wal_ok = if state.db.wal_healthy.load(Ordering::Relaxed) {
+            1
+        } else {
+            0
+        };
         out.push_str("# HELP banditdb_wal_healthy WAL writer health (1=ok, 0=degraded)\n");
         out.push_str("# TYPE banditdb_wal_healthy gauge\n");
         out.push_str(&format!("banditdb_wal_healthy {wal_ok}\n\n"));
         out.push_str("# HELP banditdb_wal_channel_available Remaining WAL channel slots\n");
         out.push_str("# TYPE banditdb_wal_channel_available gauge\n");
-        out.push_str(&format!("banditdb_wal_channel_available {}\n\n", state.db.event_tx.capacity()));
+        out.push_str(&format!(
+            "banditdb_wal_channel_available {}\n\n",
+            state.db.event_tx.capacity()
+        ));
         out.push_str("# HELP banditdb_wal_dropped_total Best-effort prediction records dropped because the WAL writer fell behind\n");
         out.push_str("# TYPE banditdb_wal_dropped_total counter\n");
-        out.push_str(&format!("banditdb_wal_dropped_total {}\n\n", state.db.wal_dropped.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "banditdb_wal_dropped_total {}\n\n",
+            state.db.wal_dropped.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP banditdb_wal_fsync_total Group-commit fsyncs completed on the WAL\n");
         out.push_str("# TYPE banditdb_wal_fsync_total counter\n");
-        out.push_str(&format!("banditdb_wal_fsync_total {}\n\n", state.db.wal_fsyncs.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "banditdb_wal_fsync_total {}\n\n",
+            state.db.wal_fsyncs.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP banditdb_interactions_pending Predictions awaiting a reward\n");
         out.push_str("# TYPE banditdb_interactions_pending gauge\n");
-        out.push_str(&format!("banditdb_interactions_pending {}\n\n", state.db.interactions.entry_count()));
+        out.push_str(&format!(
+            "banditdb_interactions_pending {}\n\n",
+            state.db.interactions.entry_count()
+        ));
         out.push_str("# HELP banditdb_interactions_evicted_total Pending interactions dropped at the capacity limit; their rewards can no longer be matched\n");
         out.push_str("# TYPE banditdb_interactions_evicted_total counter\n");
-        out.push_str(&format!("banditdb_interactions_evicted_total {}\n\n", state.db.interactions_evicted.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "banditdb_interactions_evicted_total {}\n\n",
+            state.db.interactions_evicted.load(Ordering::Relaxed)
+        ));
     }
 
     // Per-arm counters + campaign gauges (single lock acquisition)
-    struct ArmCounts { p: u64, r: u64 }
+    struct ArmCounts {
+        p: u64,
+        r: u64,
+    }
     let campaigns = state.db.campaigns.read();
 
     let mut active = 0u64;
@@ -1610,19 +2024,35 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
         MetricsScope::Tenant(pfx) => cid.starts_with(pfx.as_str()),
         _ => true,
     };
-    let arm_data: Vec<(String, String, ArmCounts)> = campaigns.iter()
+    let arm_data: Vec<(String, String, ArmCounts)> = campaigns
+        .iter()
         .filter(|(cid, _)| in_scope(cid))
         .inspect(|(_, c)| {
-            if c.archived.load(Ordering::Relaxed) { archived += 1; } else { active += 1; }
+            if c.archived.load(Ordering::Relaxed) {
+                archived += 1;
+            } else {
+                active += 1;
+            }
         })
         .filter_map(|(cid, campaign)| visible(cid).map(|label| (label, campaign)))
         .flat_map(|(safe_cid, campaign)| {
-            campaign.arms.read().iter().map(|(aid, s)| (
-                safe_cid.clone(), prom_label(aid),
-                ArmCounts { p: s.prediction_count.load(Ordering::Relaxed),
-                             r: s.reward_count.load(Ordering::Relaxed) },
-            )).collect::<Vec<_>>()
-        }).collect();
+            campaign
+                .arms
+                .read()
+                .iter()
+                .map(|(aid, s)| {
+                    (
+                        safe_cid.clone(),
+                        prom_label(aid),
+                        ArmCounts {
+                            p: s.prediction_count.load(Ordering::Relaxed),
+                            r: s.reward_count.load(Ordering::Relaxed),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     out.push_str("# HELP banditdb_campaigns_active Active (non-archived) campaigns\n");
     out.push_str("# TYPE banditdb_campaigns_active gauge\n");
@@ -1634,22 +2064,32 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     out.push_str("# HELP banditdb_arm_predictions_total Predictions served per arm\n");
     out.push_str("# TYPE banditdb_arm_predictions_total counter\n");
     for (cid, aid, c) in &arm_data {
-        out.push_str(&format!("banditdb_arm_predictions_total{{campaign=\"{cid}\",arm=\"{aid}\"}} {}\n", c.p));
+        out.push_str(&format!(
+            "banditdb_arm_predictions_total{{campaign=\"{cid}\",arm=\"{aid}\"}} {}\n",
+            c.p
+        ));
     }
     out.push('\n');
     out.push_str("# HELP banditdb_arm_rewards_total Rewards recorded per arm\n");
     out.push_str("# TYPE banditdb_arm_rewards_total counter\n");
     for (cid, aid, c) in &arm_data {
-        out.push_str(&format!("banditdb_arm_rewards_total{{campaign=\"{cid}\",arm=\"{aid}\"}} {}\n", c.r));
+        out.push_str(&format!(
+            "banditdb_arm_rewards_total{{campaign=\"{cid}\",arm=\"{aid}\"}} {}\n",
+            c.r
+        ));
     }
     out.push('\n');
-    out.push_str("# HELP banditdb_tournament_traffic_bps Challenger traffic in basis points (Progressive)\n");
+    out.push_str(
+        "# HELP banditdb_tournament_traffic_bps Challenger traffic in basis points (Progressive)\n",
+    );
     out.push_str("# TYPE banditdb_tournament_traffic_bps gauge\n");
     for (cid, campaign) in campaigns.iter() {
         let Some(label) = visible(cid) else { continue };
         if matches!(&campaign.algorithm, Algorithm::Progressive(_)) {
             let bps = campaign.challenger_traffic_bps.load(Ordering::Relaxed);
-            out.push_str(&format!("banditdb_tournament_traffic_bps{{campaign=\"{label}\"}} {bps}\n"));
+            out.push_str(&format!(
+                "banditdb_tournament_traffic_bps{{campaign=\"{label}\"}} {bps}\n"
+            ));
         }
     }
     out.push('\n');
@@ -1658,7 +2098,15 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     for (cid, campaign) in campaigns.iter() {
         if let Some(pacing) = campaign.pacing_report() {
             for res in pacing.resources {
-                pacing_metrics.push((prom_label(cid), prom_label(&res.name), res.budget, res.consumed, res.remaining, res.lambda, res.utilization));
+                pacing_metrics.push((
+                    prom_label(cid),
+                    prom_label(&res.name),
+                    res.budget,
+                    res.consumed,
+                    res.remaining,
+                    res.lambda,
+                    res.utilization,
+                ));
             }
         }
     }
@@ -1666,13 +2114,17 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
         out.push_str("# HELP banditdb_pacing_budget Initial resource budget\n");
         out.push_str("# TYPE banditdb_pacing_budget gauge\n");
         for (cid, rname, budget, _, _, _, _) in &pacing_metrics {
-            out.push_str(&format!("banditdb_pacing_budget{{campaign=\"{cid}\",resource=\"{rname}\"}} {budget}\n"));
+            out.push_str(&format!(
+                "banditdb_pacing_budget{{campaign=\"{cid}\",resource=\"{rname}\"}} {budget}\n"
+            ));
         }
         out.push('\n');
         out.push_str("# HELP banditdb_pacing_consumed Total resource consumed\n");
         out.push_str("# TYPE banditdb_pacing_consumed counter\n");
         for (cid, rname, _, consumed, _, _, _) in &pacing_metrics {
-            out.push_str(&format!("banditdb_pacing_consumed{{campaign=\"{cid}\",resource=\"{rname}\"}} {consumed}\n"));
+            out.push_str(&format!(
+                "banditdb_pacing_consumed{{campaign=\"{cid}\",resource=\"{rname}\"}} {consumed}\n"
+            ));
         }
         out.push('\n');
         out.push_str("# HELP banditdb_pacing_remaining Remaining resource budget\n");
@@ -1684,13 +2136,17 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
         out.push_str("# HELP banditdb_pacing_lambda Current Lagrangian shadow price\n");
         out.push_str("# TYPE banditdb_pacing_lambda gauge\n");
         for (cid, rname, _, _, _, lambda, _) in &pacing_metrics {
-            out.push_str(&format!("banditdb_pacing_lambda{{campaign=\"{cid}\",resource=\"{rname}\"}} {lambda}\n"));
+            out.push_str(&format!(
+                "banditdb_pacing_lambda{{campaign=\"{cid}\",resource=\"{rname}\"}} {lambda}\n"
+            ));
         }
         out.push('\n');
         out.push_str("# HELP banditdb_pacing_utilization Resource utilization ratio\n");
         out.push_str("# TYPE banditdb_pacing_utilization gauge\n");
         for (cid, rname, _, _, _, _, util) in &pacing_metrics {
-            out.push_str(&format!("banditdb_pacing_utilization{{campaign=\"{cid}\",resource=\"{rname}\"}} {util}\n"));
+            out.push_str(&format!(
+                "banditdb_pacing_utilization{{campaign=\"{cid}\",resource=\"{rname}\"}} {util}\n"
+            ));
         }
         out.push('\n');
     }
@@ -1698,16 +2154,24 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
 
     if process_wide {
         // HTTP request counters
-        out.push_str("# HELP banditdb_http_requests_total HTTP requests by endpoint and status class\n");
+        out.push_str(
+            "# HELP banditdb_http_requests_total HTTP requests by endpoint and status class\n",
+        );
         out.push_str("# TYPE banditdb_http_requests_total counter\n");
         for (i, name) in EP_NAMES.iter().enumerate() {
             let ep = &state.http_metrics.by_endpoint[i];
             let r2 = ep.req_2xx.load(Ordering::Relaxed);
             let r4 = ep.req_4xx.load(Ordering::Relaxed);
             let r5 = ep.req_5xx.load(Ordering::Relaxed);
-            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"2xx\"}} {r2}\n"));
-            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"4xx\"}} {r4}\n"));
-            out.push_str(&format!("banditdb_http_requests_total{{endpoint=\"{name}\",status=\"5xx\"}} {r5}\n"));
+            out.push_str(&format!(
+                "banditdb_http_requests_total{{endpoint=\"{name}\",status=\"2xx\"}} {r2}\n"
+            ));
+            out.push_str(&format!(
+                "banditdb_http_requests_total{{endpoint=\"{name}\",status=\"4xx\"}} {r4}\n"
+            ));
+            out.push_str(&format!(
+                "banditdb_http_requests_total{{endpoint=\"{name}\",status=\"5xx\"}} {r5}\n"
+            ));
         }
         out.push('\n');
 
@@ -1723,7 +2187,7 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
                 ));
             }
             let total = ep.lat_count.load(Ordering::Relaxed);
-            let sum   = f64::from_bits(ep.lat_sum_bits.load(Ordering::Relaxed));
+            let sum = f64::from_bits(ep.lat_sum_bits.load(Ordering::Relaxed));
             out.push_str(&format!(
                 "banditdb_http_request_duration_seconds_bucket{{endpoint=\"{name}\",le=\"+Inf\"}} {total}\n"
             ));
@@ -1738,13 +2202,19 @@ async fn handle_metrics(State(state): State<Arc<AppState>>, headers: HeaderMap) 
     }
 
     let mut headers = HeaderMap::new();
-    headers.insert(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/plain; version=0.0.4; charset=utf-8".parse().unwrap(),
+    );
     (headers, out)
 }
 
 async fn handle_openapi() -> (HeaderMap, &'static str) {
     let mut headers = HeaderMap::new();
-    headers.insert(axum::http::header::CONTENT_TYPE, "application/yaml".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/yaml".parse().unwrap(),
+    );
     (headers, include_str!("../docs/openapi.yaml"))
 }
 
@@ -1756,30 +2226,48 @@ async fn handle_openapi() -> (HeaderMap, &'static str) {
 async fn main() {
     // Print version and exit before booting the runtime, so `banditdb --version`
     // works as an ops check instead of falling through to a full server start.
-    if std::env::args().skip(1).any(|a| a == "--version" || a == "-V" || a == "version") {
-        println!("banditdb {} ({})", env!("CARGO_PKG_VERSION"), build_features_str());
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V" || a == "version")
+    {
+        println!(
+            "banditdb {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            build_features_str()
+        );
         return;
     }
 
     let filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into());
-    let use_json = std::env::var("LOG_FORMAT").map(|v| v == "json").unwrap_or(false);
-    if use_json { tracing_subscriber::fmt().json().with_env_filter(filter).init(); }
-    else        { tracing_subscriber::fmt().with_env_filter(filter).init(); }
+    let use_json = std::env::var("LOG_FORMAT")
+        .map(|v| v == "json")
+        .unwrap_or(false);
+    if use_json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string());
     let wal_path = format!("{data_dir}/bandit_wal.jsonl");
     tracing::info!(data_dir = %data_dir, version = env!("CARGO_PKG_VERSION"),
         features = %build_features_str(), "BanditDB starting");
 
-    let db       = Arc::new(BanditDB::new(&wal_path, &data_dir));
+    let db = Arc::new(BanditDB::new(&wal_path, &data_dir));
 
     // Creation of neural campaigns is rejected on a plain build, but recovery
     // can still restore ones written by a neural build — those run as plain
     // LinUCB, so say so loudly instead of degrading in silence.
     #[cfg(not(feature = "neural"))]
     {
-        let degraded: Vec<String> = db.campaigns.read().iter()
+        let degraded: Vec<String> = db
+            .campaigns
+            .read()
+            .iter()
             .filter(|(_, c)| needs_neural(&c.algorithm))
             .map(|(id, _)| id.clone())
             .collect();
@@ -1819,22 +2307,31 @@ async fn main() {
              to enable authentication, and BANDITDB_REQUIRE_AUTH=true to make this fatal."
         );
     } else {
-        tracing::info!(key_count = registry.key_count(),
-            tenant_mode = registry.tenant_mode, "API key authentication enabled");
+        tracing::info!(
+            key_count = registry.key_count(),
+            tenant_mode = registry.tenant_mode,
+            "API key authentication enabled"
+        );
     }
 
-    let rps       = std::env::var("BANDITDB_RATE_LIMIT_PER_SEC")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(1000u32);
-    let rate_limiter = Some(Arc::new(
-        RateLimiter::<String, _, _>::keyed(Quota::per_second(NonZeroU32::new(rps).expect("rps > 0")))
-    ));
+    let rps = std::env::var("BANDITDB_RATE_LIMIT_PER_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000u32);
+    let rate_limiter = Some(Arc::new(RateLimiter::<String, _, _>::keyed(
+        Quota::per_second(NonZeroU32::new(rps).expect("rps > 0")),
+    )));
     tracing::info!(rps, "rate limiting enabled");
 
     let metrics_public = std::env::var("BANDITDB_METRICS_PUBLIC")
-        .map(|v| v == "true" || v == "1").unwrap_or(false);
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     let app_state = Arc::new(AppState {
-        db: Arc::clone(&db), registry, rate_limiter, metrics_public,
+        db: Arc::clone(&db),
+        registry,
+        rate_limiter,
+        metrics_public,
         request_log: RequestLog::new(),
         http_metrics: HttpMetrics::default(),
     });
@@ -1842,9 +2339,13 @@ async fn main() {
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     let checkpoint_interval: Option<u64> = std::env::var("BANDITDB_CHECKPOINT_INTERVAL")
-        .ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0);
     let max_wal_bytes: Option<u64> = std::env::var("BANDITDB_MAX_WAL_SIZE_MB")
-        .ok().and_then(|v| v.parse::<u64>().ok()).filter(|&n| n > 0)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
         .map(|mb| mb * 1024 * 1024);
 
     if checkpoint_interval.is_some() || max_wal_bytes.is_some() {
@@ -1856,9 +2357,12 @@ async fn main() {
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
                     _ = cancel.changed() => { break; }
                 }
-                let count_exceeded = checkpoint_interval.is_some_and(|n| db_bg.rewarded_count.load(Ordering::Relaxed) >= n);
-                let size_exceeded  = max_wal_bytes.is_some_and(|max| {
-                    std::fs::metadata(&db_bg.wal_path).map(|m| m.len() > max).unwrap_or(false)
+                let count_exceeded = checkpoint_interval
+                    .is_some_and(|n| db_bg.rewarded_count.load(Ordering::Relaxed) >= n);
+                let size_exceeded = max_wal_bytes.is_some_and(|max| {
+                    std::fs::metadata(&db_bg.wal_path)
+                        .map(|m| m.len() > max)
+                        .unwrap_or(false)
                 });
                 if count_exceeded || size_exceeded {
                     db_bg.rewarded_count.store(0, Ordering::Relaxed);
@@ -1879,9 +2383,11 @@ async fn main() {
     #[cfg(feature = "neural")]
     {
         let poll_secs = std::env::var("BANDITDB_RETRAIN_POLL_SECS")
-            .ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2);
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(2);
         if poll_secs > 0 {
-            let db_rt      = Arc::clone(&db);
+            let db_rt = Arc::clone(&db);
             let mut cancel = cancel_rx.clone();
             tokio::spawn(async move {
                 loop {
@@ -1892,7 +2398,9 @@ async fn main() {
                     for cid in db_rt.campaigns_due_for_retrain() {
                         let db_one = Arc::clone(&db_rt);
                         // Retrain is CPU-bound — keep it off the async runtime threads.
-                        if let Err(e) = tokio::task::spawn_blocking(move || db_one.retrain_campaign(&cid)).await {
+                        if let Err(e) =
+                            tokio::task::spawn_blocking(move || db_one.retrain_campaign(&cid)).await
+                        {
                             tracing::error!(error = %e, "neural retrain task panicked");
                         }
                     }
@@ -1906,39 +2414,49 @@ async fn main() {
     let state = Arc::clone(&app_state);
 
     let reader_routes = Router::new()
-        .route("/campaigns",                get(handle_list_campaigns))
-        .route("/campaign/:id",             get(handle_campaign_info))
-        .route("/campaign/:id/report",      get(handle_campaign_report))
-        .route("/campaign/:id/diagnostics", get(handle_campaign_diagnostics))
-        .route("/campaign/:id/pacing",      get(handle_campaign_pacing))
-        .route("/health/detail",            get(handle_health_detail))
-        .route("/export",                   get(handle_export))
-        .route("/limits",                   get(handle_limits));
+        .route("/campaigns", get(handle_list_campaigns))
+        .route("/campaign/:id", get(handle_campaign_info))
+        .route("/campaign/:id/report", get(handle_campaign_report))
+        .route(
+            "/campaign/:id/diagnostics",
+            get(handle_campaign_diagnostics),
+        )
+        .route("/campaign/:id/pacing", get(handle_campaign_pacing))
+        .route("/health/detail", get(handle_health_detail))
+        .route("/export", get(handle_export))
+        .route("/limits", get(handle_limits));
 
     let writer_routes = Router::new()
-        .route("/predict",       post(handle_predict))
+        .route("/predict", post(handle_predict))
         .route("/batch_predict", post(handle_batch_predict))
-        .route("/reward",        post(handle_reward))
+        .route("/reward", post(handle_reward))
         .route("/campaign/:id/interact", post(handle_interact))
-        .layer(middleware::from_fn(|ext: Extension<AuthContext>, req: Request, next: Next| {
-            require_role(Role::Writer, ext, req, next)
-        }));
+        .layer(middleware::from_fn(
+            |ext: Extension<AuthContext>, req: Request, next: Next| {
+                require_role(Role::Writer, ext, req, next)
+            },
+        ));
 
     let admin_state = Arc::clone(&app_state);
     let admin_routes = Router::new()
-        .route("/campaign",               post(handle_create_campaign))
-        .route("/campaign/:id",           delete(handle_delete_campaign))
-        .route("/campaign/:id/archive",   post(handle_archive_campaign))
-        .route("/campaign/:id/restore",   post(handle_restore_campaign))
+        .route("/campaign", post(handle_create_campaign))
+        .route("/campaign/:id", delete(handle_delete_campaign))
+        .route("/campaign/:id/archive", post(handle_archive_campaign))
+        .route("/campaign/:id/restore", post(handle_restore_campaign))
         // Arm lifecycle changes the shape of a campaign, so it sits with the other
         // structural routes. Per-request exclusion needs no privilege — it is a
         // field on /predict.
-        .route("/campaign/:id/arms",              post(handle_add_arm))
-        .route("/campaign/:id/arms/:arm/status",  post(handle_set_arm_status))
-        .route("/checkpoint",             post(handle_checkpoint))
-        .layer(middleware::from_fn(|ext: Extension<AuthContext>, req: Request, next: Next| {
-            require_role(Role::Admin, ext, req, next)
-        }))
+        .route("/campaign/:id/arms", post(handle_add_arm))
+        .route(
+            "/campaign/:id/arms/:arm/status",
+            post(handle_set_arm_status),
+        )
+        .route("/checkpoint", post(handle_checkpoint))
+        .layer(middleware::from_fn(
+            |ext: Extension<AuthContext>, req: Request, next: Next| {
+                require_role(Role::Admin, ext, req, next)
+            },
+        ))
         .with_state(Arc::clone(&admin_state));
 
     // Provisioning routes sit OUTSIDE the API-key auth layer entirely: they are
@@ -1946,18 +2464,31 @@ async fn main() {
     // the control plane. Keeping them off the tenant ladder means no tenant key,
     // at any role, can reach them.
     let provision_routes = Router::new()
-        .route("/admin/tenants",     get(handle_list_tenants))
-        .route("/admin/tenants/:id", axum::routing::put(handle_put_tenant)
-                                         .delete(handle_delete_tenant)
-                                         .get(handle_get_tenant))
-        .route("/admin/tenants/:id/campaigns", get(handle_tenant_campaigns)
-                                                   .delete(handle_purge_tenant_campaigns))
+        .route("/admin/tenants", get(handle_list_tenants))
+        .route(
+            "/admin/tenants/:id",
+            axum::routing::put(handle_put_tenant)
+                .delete(handle_delete_tenant)
+                .get(handle_get_tenant),
+        )
+        .route(
+            "/admin/tenants/:id/campaigns",
+            get(handle_tenant_campaigns).delete(handle_purge_tenant_campaigns),
+        )
         .route("/admin/tenants/:id/requests", get(handle_tenant_requests))
-        .route("/admin/tenants/:id/campaigns/:campaign/predict", post(handle_tenant_predict))
+        .route(
+            "/admin/tenants/:id/campaigns/:campaign/predict",
+            post(handle_tenant_predict),
+        )
         .route("/admin/tenants/:id/reward", post(handle_tenant_reward))
-        .route("/admin/tenants/:id/campaigns/:campaign/report", get(handle_tenant_campaign_report))
-        .route("/admin/tenants/:id/campaigns/:campaign/diagnostics",
-               get(handle_tenant_campaign_diagnostics))
+        .route(
+            "/admin/tenants/:id/campaigns/:campaign/report",
+            get(handle_tenant_campaign_report),
+        )
+        .route(
+            "/admin/tenants/:id/campaigns/:campaign/diagnostics",
+            get(handle_tenant_campaign_diagnostics),
+        )
         .layer(middleware::from_fn(require_provision_key))
         .with_state(Arc::clone(&admin_state));
 
@@ -1966,15 +2497,22 @@ async fn main() {
         .merge(writer_routes)
         .merge(admin_routes)
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn_with_state(Arc::clone(&state), auth_middleware));
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth_middleware,
+        ));
 
     let metrics_state = Arc::clone(&app_state);
     let metrics_route = if app_state.metrics_public {
         Router::new().route("/metrics", get(handle_metrics))
     } else {
-        Router::new().route("/metrics", get(handle_metrics))
+        Router::new()
+            .route("/metrics", get(handle_metrics))
             .layer(DefaultBodyLimit::max(1024))
-            .layer(middleware::from_fn_with_state(Arc::clone(&metrics_state), auth_middleware))
+            .layer(middleware::from_fn_with_state(
+                Arc::clone(&metrics_state),
+                auth_middleware,
+            ))
     };
 
     // CORS defaults to deny. Previously any origin could drive the API from a
@@ -1996,7 +2534,9 @@ async fn main() {
             .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
             .collect();
         if origins.is_empty() {
-            tracing::info!("CORS: no origins allowed (set BANDITDB_CORS_ORIGINS to permit browsers)");
+            tracing::info!(
+                "CORS: no origins allowed (set BANDITDB_CORS_ORIGINS to permit browsers)"
+            );
         } else {
             tracing::info!(count = origins.len(), "CORS: allow-list configured");
         }
@@ -2004,7 +2544,7 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/health",       get(handle_health))
+        .route("/health", get(handle_health))
         .route("/openapi.yaml", get(handle_openapi))
         .merge(metrics_route)
         // Provisioning is merged OUTSIDE the API-key auth layer on purpose: it
@@ -2015,11 +2555,15 @@ async fn main() {
         .merge(protected)
         .layer(cors)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(middleware::from_fn_with_state(Arc::clone(&app_state), metrics_middleware))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&app_state),
+            metrics_middleware,
+        ))
         .with_state(app_state);
 
     let shutdown = async {
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use tokio::signal::unix::{signal, SignalKind};
             let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
             tokio::select! {
@@ -2027,11 +2571,12 @@ async fn main() {
                 _ = sigterm.recv()          => {},
             }
         }
-        #[cfg(not(unix))] tokio::signal::ctrl_c().await.ok();
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await.ok();
     };
 
-    let port     = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr     = format!("0.0.0.0:{port}");
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
         tracing::error!(addr = %addr, error = %e, "failed to bind (is another banditdb running?)");
         std::process::exit(1);
@@ -2039,17 +2584,20 @@ async fn main() {
     tracing::info!(addr = %addr, "BanditDB listening");
 
     let db_shutdown = Arc::clone(&db);
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown)
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .unwrap();
 
     let _ = cancel_tx.send(true);
     tracing::info!("shutdown signal received — running final checkpoint");
     match tokio::time::timeout(std::time::Duration::from_secs(30), db_shutdown.checkpoint()).await {
         Ok(Ok(msg)) => tracing::info!(msg = %msg, "final checkpoint complete"),
-        Ok(Err(e))  => tracing::error!(error = %e, "final checkpoint failed"),
-        Err(_)      => tracing::error!("final checkpoint timed out after 30s"),
+        Ok(Err(e)) => tracing::error!(error = %e, "final checkpoint failed"),
+        Err(_) => tracing::error!("final checkpoint timed out after 30s"),
     }
     tracing::info!("shutdown complete");
 }

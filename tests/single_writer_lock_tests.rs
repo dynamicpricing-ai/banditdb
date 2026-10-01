@@ -16,12 +16,22 @@ fn wait_for_health(port: u16, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let ok = Command::new("curl")
-            .args(["-sS", "--max-time", "2", "-o", "/dev/null", "-w", "%{http_code}",
-                   &format!("http://127.0.0.1:{port}/health")])
+            .args([
+                "-sS",
+                "--max-time",
+                "2",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                &format!("http://127.0.0.1:{port}/health"),
+            ])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "200")
             .unwrap_or(false);
-        if ok { return true; }
+        if ok {
+            return true;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     false
@@ -35,12 +45,18 @@ fn second_process_on_the_same_data_dir_refuses_to_start() {
     std::fs::create_dir_all(dir).unwrap();
 
     let mut first = match Command::new(bin)
-        .env("DATA_DIR", dir).env("PORT", "18401").env("BANDITDB_API_KEY", "k")
-        .stdout(Stdio::null()).stderr(Stdio::null())
+        .env("DATA_DIR", dir)
+        .env("PORT", "18401")
+        .env("BANDITDB_API_KEY", "k")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => { eprintln!("SKIPPED: cannot spawn binary"); return; }
+        Err(_) => {
+            eprintln!("SKIPPED: cannot spawn binary");
+            return;
+        }
     };
 
     if !wait_for_health(18401, Duration::from_secs(20)) {
@@ -52,8 +68,11 @@ fn second_process_on_the_same_data_dir_refuses_to_start() {
     // Second instance, same DATA_DIR, different port so the failure cannot be
     // mistaken for a port collision.
     let second = Command::new(bin)
-        .env("DATA_DIR", dir).env("PORT", "18402").env("BANDITDB_API_KEY", "k")
-        .stdout(Stdio::null()).stderr(Stdio::null())
+        .env("DATA_DIR", dir)
+        .env("PORT", "18402")
+        .env("BANDITDB_API_KEY", "k")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .expect("second instance runs to completion");
 
@@ -76,12 +95,18 @@ fn lock_is_released_when_the_holder_exits() {
     std::fs::create_dir_all(dir).unwrap();
 
     let mut first = match Command::new(bin)
-        .env("DATA_DIR", dir).env("PORT", "18403").env("BANDITDB_API_KEY", "k")
-        .stdout(Stdio::null()).stderr(Stdio::null())
+        .env("DATA_DIR", dir)
+        .env("PORT", "18403")
+        .env("BANDITDB_API_KEY", "k")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
     {
         Ok(c) => c,
-        Err(_) => { eprintln!("SKIPPED: cannot spawn binary"); return; }
+        Err(_) => {
+            eprintln!("SKIPPED: cannot spawn binary");
+            return;
+        }
     };
     if !wait_for_health(18403, Duration::from_secs(20)) {
         let _ = first.kill();
@@ -97,8 +122,11 @@ fn lock_is_released_when_the_holder_exits() {
     std::thread::sleep(Duration::from_millis(300));
 
     let mut second = Command::new(bin)
-        .env("DATA_DIR", dir).env("PORT", "18404").env("BANDITDB_API_KEY", "k")
-        .stdout(Stdio::null()).stderr(Stdio::null())
+        .env("DATA_DIR", dir)
+        .env("PORT", "18404")
+        .env("BANDITDB_API_KEY", "k")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("replacement spawns");
 
@@ -118,16 +146,25 @@ fn lock_is_released_when_the_holder_exits() {
 /// must be scoped to the instance rather than the process.
 #[tokio::test]
 async fn same_process_can_reopen_after_dropping_the_instance() {
-    use banditdb::BanditDB;
     use banditdb::state::Algorithm;
+    use banditdb::BanditDB;
 
     let dir = "/tmp/banditdb_lock_test_reopen";
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
 
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db.checkpoint().await.expect("checkpoint");
     drop(db);
 

@@ -28,8 +28,8 @@
 //! - Regret assertion uses absolute magnitude, handles negative regret gracefully.
 //! - Comment/value alignment on lambda convergence tolerance.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, PacingConfig, ResourceConstraint};
+use banditdb::BanditDB;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -85,7 +85,9 @@ async fn test_constrained_bandit_ground_truth_simulation() {
         None,
         None,
         Some(pacing_cfg),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // 2. Setup Unconstrained FCFS campaign (no pacing, manual budget tracking)
     db.add_campaign(
@@ -96,7 +98,9 @@ async fn test_constrained_bandit_ground_truth_simulation() {
         Algorithm::Linucb,
         None,
         None,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // FIX(Bug 1): Use separate RNG streams so every policy faces the same context sequence.
     // A dedicated context RNG produces z_t, and each policy gets its own noise RNG.
@@ -189,7 +193,10 @@ async fn test_constrained_bandit_ground_truth_simulation() {
     }
 
     // ── Inspect BanditDB Pacing Report ──────────────────────────────────
-    let report = db.campaign_pacing_report("sim_pacing").unwrap().expect("report exists");
+    let report = db
+        .campaign_pacing_report("sim_pacing")
+        .unwrap()
+        .expect("report exists");
     let res = &report.resources[0];
 
     let bdb_consumed = res.consumed;
@@ -211,12 +218,23 @@ async fn test_constrained_bandit_ground_truth_simulation() {
     println!("------------------------------------------------------------");
     println!("BanditDB Budget Consumed:     {bdb_consumed:.1} / {budget:.1}");
     println!("BanditDB Budget Remaining:    {bdb_remaining:.1}");
-    println!("BanditDB Utilization:         {:.1}%", bdb_utilization * 100.0);
+    println!(
+        "BanditDB Utilization:         {:.1}%",
+        bdb_utilization * 100.0
+    );
     println!("------------------------------------------------------------");
     let bdb_regret = opt_cum_reward - bdb_cum_reward;
     let fcfs_regret = opt_cum_reward - fcfs_cum_reward;
-    let bdb_regret_pct = if opt_cum_reward > 0.0 { (bdb_regret / opt_cum_reward) * 100.0 } else { 0.0 };
-    let fcfs_regret_pct = if opt_cum_reward > 0.0 { (fcfs_regret / opt_cum_reward) * 100.0 } else { 0.0 };
+    let bdb_regret_pct = if opt_cum_reward > 0.0 {
+        (bdb_regret / opt_cum_reward) * 100.0
+    } else {
+        0.0
+    };
+    let fcfs_regret_pct = if opt_cum_reward > 0.0 {
+        (fcfs_regret / opt_cum_reward) * 100.0
+    } else {
+        0.0
+    };
     println!("BanditDB Regret vs Optimal:   {bdb_regret:.2} ({bdb_regret_pct:.2}% gap)");
     println!("FCFS Regret vs Optimal:       {fcfs_regret:.2} ({fcfs_regret_pct:.2}% gap)");
     println!("============================================================");
@@ -248,7 +266,11 @@ async fn test_constrained_bandit_ground_truth_simulation() {
     assert!(
         opt_cum_reward == 0.0 || bdb_regret.abs() / opt_cum_reward < 0.10,
         "Regret too high: {:.2}% absolute gap against optimal",
-        if opt_cum_reward > 0.0 { (bdb_regret.abs() / opt_cum_reward) * 100.0 } else { 0.0 }
+        if opt_cum_reward > 0.0 {
+            (bdb_regret.abs() / opt_cum_reward) * 100.0
+        } else {
+            0.0
+        }
     );
 
     // FIX(Bug 4): Comment and value now match at 0.15.

@@ -18,9 +18,15 @@ use std::os::unix::fs::PermissionsExt;
 fn tenant(id: &str, keys: &[&str]) -> Tenant {
     Tenant {
         id: id.into(),
-        keys: keys.iter().map(|k| TenantKey {
-            hash: hash_key(k), role: "admin".into(), prefix: None, last_used_at: 0,
-        }).collect(),
+        keys: keys
+            .iter()
+            .map(|k| TenantKey {
+                hash: hash_key(k),
+                role: "admin".into(),
+                prefix: None,
+                last_used_at: 0,
+            })
+            .collect(),
         quotas: TenantQuotas::default(),
         status: "active".into(),
         updated_at: 0,
@@ -28,7 +34,11 @@ fn tenant(id: &str, keys: &[&str]) -> Tenant {
 }
 
 fn set_writable(dir: &str, writable: bool) {
-    fs::set_permissions(dir, fs::Permissions::from_mode(if writable { 0o755 } else { 0o555 })).unwrap();
+    fs::set_permissions(
+        dir,
+        fs::Permissions::from_mode(if writable { 0o755 } else { 0o555 }),
+    )
+    .unwrap();
 }
 
 /// A fresh data dir, or None when this process can write to a read-only
@@ -50,43 +60,70 @@ fn fresh(dir: &str) -> Option<()> {
 #[test]
 fn failed_upsert_changes_nothing() {
     let dir = "/tmp/banditdb_tenant_store_upsert";
-    if fresh(dir).is_none() { return; }
+    if fresh(dir).is_none() {
+        return;
+    }
     let mut store = TenantStore::load(dir).unwrap();
     store.upsert(tenant("t", &["key-t"])).unwrap();
 
     set_writable(dir, false);
-    assert!(store.upsert(tenant("t", &[])).is_err(), "the write must fail");
-    assert!(store.upsert(tenant("u", &["key-u"])).is_err(), "the write must fail");
-    assert!(store.authenticate("key-t").is_some(),
-        "a revocation that failed to persist must not take effect — disk still has the key");
-    assert!(store.authenticate("key-u").is_none(),
-        "a grant that failed to persist must not take effect");
+    assert!(
+        store.upsert(tenant("t", &[])).is_err(),
+        "the write must fail"
+    );
+    assert!(
+        store.upsert(tenant("u", &["key-u"])).is_err(),
+        "the write must fail"
+    );
+    assert!(
+        store.authenticate("key-t").is_some(),
+        "a revocation that failed to persist must not take effect — disk still has the key"
+    );
+    assert!(
+        store.authenticate("key-u").is_none(),
+        "a grant that failed to persist must not take effect"
+    );
 
     // The control plane's retry succeeds once the disk does.
     set_writable(dir, true);
     store.upsert(tenant("t", &[])).unwrap();
     assert!(store.authenticate("key-t").is_none());
-    assert!(TenantStore::load(dir).unwrap().authenticate("key-t").is_none(),
-        "the revocation must survive a reload");
+    assert!(
+        TenantStore::load(dir)
+            .unwrap()
+            .authenticate("key-t")
+            .is_none(),
+        "the revocation must survive a reload"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 fn retried_remove_after_a_failed_write_still_persists() {
     let dir = "/tmp/banditdb_tenant_store_remove";
-    if fresh(dir).is_none() { return; }
+    if fresh(dir).is_none() {
+        return;
+    }
     let mut store = TenantStore::load(dir).unwrap();
     store.upsert(tenant("t", &["key-t"])).unwrap();
 
     set_writable(dir, false);
     assert!(store.remove("t").is_err(), "the write must fail");
-    assert!(store.authenticate("key-t").is_some(),
-        "a removal that failed to persist must not take effect");
+    assert!(
+        store.authenticate("key-t").is_some(),
+        "a removal that failed to persist must not take effect"
+    );
 
     set_writable(dir, true);
-    assert_eq!(store.remove("t"), Ok(true), "the retry must find the tenant and remove it");
+    assert_eq!(
+        store.remove("t"),
+        Ok(true),
+        "the retry must find the tenant and remove it"
+    );
     let reloaded = TenantStore::load(dir).unwrap();
-    assert!(reloaded.get("t").is_none() && reloaded.authenticate("key-t").is_none(),
-        "a removal reported as successful came back after a reload");
+    assert!(
+        reloaded.get("t").is_none() && reloaded.authenticate("key-t").is_none(),
+        "a removal reported as successful came back after a reload"
+    );
     let _ = fs::remove_dir_all(dir);
 }

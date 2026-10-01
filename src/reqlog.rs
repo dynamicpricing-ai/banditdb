@@ -32,12 +32,12 @@ const RING_CAPACITY: usize = 50;
 #[derive(Serialize, Debug, Clone)]
 pub struct RequestRecord {
     /// Unix seconds.
-    pub at:         u64,
-    pub method:     String,
+    pub at: u64,
+    pub method: String,
     /// Path with the tenant's namespace already stripped, so it reads the way the
     /// caller wrote it.
-    pub path:       String,
-    pub status:     u16,
+    pub path: String,
+    pub status: u16,
     pub latency_us: u64,
 }
 
@@ -49,7 +49,9 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn record(&self, tenant_id: &str, record: RequestRecord) {
         // Fast path: the tenant already has a ring.
@@ -57,7 +59,9 @@ impl RequestLog {
             let guard = self.tenants.read();
             if let Some(ring) = guard.get(tenant_id) {
                 let mut ring = ring.lock();
-                if ring.len() == RING_CAPACITY { ring.pop_front(); }
+                if ring.len() == RING_CAPACITY {
+                    ring.pop_front();
+                }
                 ring.push_back(record);
                 return;
             }
@@ -65,10 +69,13 @@ impl RequestLog {
         // First request for this tenant: take the write lock once, then never
         // again for the life of the process.
         let mut guard = self.tenants.write();
-        let ring = guard.entry(tenant_id.to_string())
+        let ring = guard
+            .entry(tenant_id.to_string())
             .or_insert_with(|| Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
         let mut ring = ring.lock();
-        if ring.len() == RING_CAPACITY { ring.pop_front(); }
+        if ring.len() == RING_CAPACITY {
+            ring.pop_front();
+        }
         ring.push_back(record);
     }
 

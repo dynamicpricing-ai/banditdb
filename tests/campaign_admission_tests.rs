@@ -23,7 +23,8 @@ use banditdb::BanditDB;
 
 fn data_dir_for(wal: &str) -> String {
     let stem = std::path::Path::new(wal)
-        .file_stem().map(|s| s.to_string_lossy().to_string())
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     let dir = format!("/tmp/bdb_{stem}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -53,7 +54,7 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         match &self.1 {
             Some(v) => std::env::set_var(self.0, v),
-            None    => std::env::remove_var(self.0),
+            None => std::env::remove_var(self.0),
         }
     }
 }
@@ -65,30 +66,62 @@ impl Drop for EnvGuard {
 #[tokio::test]
 async fn test_campaign_cap_rejects_creates_past_the_limit() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let _env  = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "3");
+    let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "3");
 
     let wal = "/tmp/banditdb_test_campaign_cap.jsonl";
     let _ = std::fs::remove_file(wal);
     let db = BanditDB::new(wal, &data_dir_for(wal));
 
     for i in 0..3 {
-        db.add_campaign(&format!("c{i}"), arms(2), 4, 1.0, Algorithm::Linucb, None, None)
-            .await.expect("creates below the cap must succeed");
+        db.add_campaign(
+            &format!("c{i}"),
+            arms(2),
+            4,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await
+        .expect("creates below the cap must succeed");
     }
 
-    let err = db.add_campaign("one_too_many", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
-        .await.expect_err("the fourth create must be refused");
-    assert!(matches!(err, EngineError::LimitExceeded(_)),
-        "expected LimitExceeded, got {err:?}");
+    let err = db
+        .add_campaign(
+            "one_too_many",
+            arms(2),
+            4,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await
+        .expect_err("the fourth create must be refused");
+    assert!(
+        matches!(err, EngineError::LimitExceeded(_)),
+        "expected LimitExceeded, got {err:?}"
+    );
     // The message has to carry the numbers, or the operator cannot act on it.
     let msg = err.to_string();
-    assert!(msg.contains('3') && msg.contains("BANDITDB_MAX_CAMPAIGNS"),
-        "message must name the limit and the count: {msg}");
+    assert!(
+        msg.contains('3') && msg.contains("BANDITDB_MAX_CAMPAIGNS"),
+        "message must name the limit and the count: {msg}"
+    );
 
     // Deleting one frees a slot: the cap is a ceiling, not a high-water mark.
     db.delete_campaign("c0").await.unwrap();
-    db.add_campaign("replacement", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
-        .await.expect("a create must succeed once a slot is freed");
+    db.add_campaign(
+        "replacement",
+        arms(2),
+        4,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .expect("a create must succeed once a slot is freed");
 
     let _ = std::fs::remove_file(wal);
 }
@@ -99,18 +132,24 @@ async fn test_campaign_cap_rejects_creates_past_the_limit() {
 #[tokio::test]
 async fn test_archived_campaigns_still_count() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let _env  = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "2");
+    let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "2");
 
     let wal = "/tmp/banditdb_test_cap_archived.jsonl";
     let _ = std::fs::remove_file(wal);
     let db = BanditDB::new(wal, &data_dir_for(wal));
 
-    db.add_campaign("a", arms(2), 4, 1.0, Algorithm::Linucb, None, None).await.unwrap();
-    db.add_campaign("b", arms(2), 4, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+    db.add_campaign("a", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
+        .await
+        .unwrap();
+    db.add_campaign("b", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
+        .await
+        .unwrap();
     db.archive_campaign("a").await.unwrap();
 
     assert!(
-        db.add_campaign("c", arms(2), 4, 1.0, Algorithm::Linucb, None, None).await.is_err(),
+        db.add_campaign("c", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
+            .await
+            .is_err(),
         "archiving must not free a campaign slot — the state is still resident"
     );
 
@@ -134,8 +173,17 @@ async fn test_lowered_cap_does_not_break_checkpoint_recovery() {
         let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "5");
         let db = BanditDB::new(wal, &data_dir);
         for i in 0..5 {
-            db.add_campaign(&format!("c{i}"), arms(2), 4, 1.0, Algorithm::Linucb, None, None)
-                .await.unwrap();
+            db.add_campaign(
+                &format!("c{i}"),
+                arms(2),
+                4,
+                1.0,
+                Algorithm::Linucb,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         }
         db.checkpoint().await.expect("checkpoint must succeed");
     }
@@ -143,12 +191,17 @@ async fn test_lowered_cap_does_not_break_checkpoint_recovery() {
     // Operator lowers the limit, then restarts.
     let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "2");
     let db = BanditDB::new(wal, &data_dir);
-    assert_eq!(db.campaigns.read().len(), 5,
-        "recovery must restore every campaign in the checkpoint, limit notwithstanding");
+    assert_eq!(
+        db.campaigns.read().len(),
+        5,
+        "recovery must restore every campaign in the checkpoint, limit notwithstanding"
+    );
 
     // New creates are still refused while over the limit.
     assert!(
-        db.add_campaign("new", arms(2), 4, 1.0, Algorithm::Linucb, None, None).await.is_err(),
+        db.add_campaign("new", arms(2), 4, 1.0, Algorithm::Linucb, None, None)
+            .await
+            .is_err(),
         "creates must stay refused while the instance is over its lowered limit"
     );
 
@@ -168,16 +221,28 @@ async fn test_lowered_cap_does_not_break_wal_replay() {
         let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "4");
         let db = BanditDB::new(wal, &data_dir);
         for i in 0..4 {
-            db.add_campaign(&format!("w{i}"), arms(2), 4, 1.0, Algorithm::Linucb, None, None)
-                .await.unwrap();
+            db.add_campaign(
+                &format!("w{i}"),
+                arms(2),
+                4,
+                1.0,
+                Algorithm::Linucb,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         }
         // No checkpoint: these survive only as WAL records.
     }
 
     let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGNS", "1");
     let db = BanditDB::new(wal, &data_dir);
-    assert_eq!(db.campaigns.read().len(), 4,
-        "WAL replay must restore every campaign, limit notwithstanding");
+    assert_eq!(
+        db.campaigns.read().len(),
+        4,
+        "WAL replay must restore every campaign, limit notwithstanding"
+    );
 
     let _ = std::fs::remove_file(wal);
 }
@@ -197,15 +262,20 @@ async fn test_size_ceiling_rejects_an_oversized_campaign() {
     let db = BanditDB::new(wal, &data_dir_for(wal));
 
     db.add_campaign("small", arms(5), 16, 1.0, Algorithm::Linucb, None, None)
-        .await.expect("5 arms at d=16 is ~10 KB and must be admitted");
+        .await
+        .expect("5 arms at d=16 is ~10 KB and must be admitted");
 
     // 20 arms at d=128 is 20 × 8 × 128² ≈ 2.6 MB.
-    let err = db.add_campaign("wide", arms(20), 128, 1.0, Algorithm::Linucb, None, None)
-        .await.expect_err("an oversized campaign must be refused");
+    let err = db
+        .add_campaign("wide", arms(20), 128, 1.0, Algorithm::Linucb, None, None)
+        .await
+        .expect_err("an oversized campaign must be refused");
     assert!(matches!(err, EngineError::LimitExceeded(_)), "got {err:?}");
     let msg = err.to_string();
-    assert!(msg.contains("MB") && msg.contains("BANDITDB_MAX_CAMPAIGN_BYTES"),
-        "message must state the estimate and the limit: {msg}");
+    assert!(
+        msg.contains("MB") && msg.contains("BANDITDB_MAX_CAMPAIGN_BYTES"),
+        "message must state the estimate and the limit: {msg}"
+    );
 
     let _ = std::fs::remove_file(wal);
 }
@@ -214,14 +284,15 @@ async fn test_size_ceiling_rejects_an_oversized_campaign() {
 #[tokio::test]
 async fn test_size_ceiling_is_off_by_default() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let _env  = EnvGuard::set("BANDITDB_MAX_CAMPAIGN_BYTES", "0");
+    let _env = EnvGuard::set("BANDITDB_MAX_CAMPAIGN_BYTES", "0");
 
     let wal = "/tmp/banditdb_test_size_default.jsonl";
     let _ = std::fs::remove_file(wal);
     let db = BanditDB::new(wal, &data_dir_for(wal));
 
     db.add_campaign("wide", arms(20), 128, 1.0, Algorithm::Linucb, None, None)
-        .await.expect("with the ceiling disabled, size must not be checked");
+        .await
+        .expect("with the ceiling disabled, size must not be checked");
 
     let _ = std::fs::remove_file(wal);
 }
@@ -235,7 +306,10 @@ fn test_memory_estimate_matches_hand_computation() {
     // LinUCB: arms × (8d² + 16d + 64)
     let d = 64u64;
     let expected = 10 * (8 * d * d + 16 * d + 64);
-    assert_eq!(campaign_memory_estimate(10, 64, &Algorithm::Linucb), expected);
+    assert_eq!(
+        campaign_memory_estimate(10, 64, &Algorithm::Linucb),
+        expected
+    );
 
     // Thompson sampling doubles it: the Cholesky factor is cached per arm.
     assert_eq!(
@@ -248,11 +322,17 @@ fn test_memory_estimate_matches_hand_computation() {
 #[test]
 fn test_neural_estimate_is_dominated_by_the_replay_buffer() {
     let _lock = ENV_LOCK.lock().unwrap();
-    let _env  = EnvGuard::set("BANDITDB_NEURAL_BUFFER_CAP", "50000");
+    let _env = EnvGuard::set("BANDITDB_NEURAL_BUFFER_CAP", "50000");
 
     let cfg = NeuralLinUCBConfig {
-        context_dim: 256, embed_dim: 32, hidden_dim: 128, hidden_layers: 2,
-        retrain_every: 200, retrain_steps: 100, learning_rate: 1e-3, lambda: 1.0,
+        context_dim: 256,
+        embed_dim: 32,
+        hidden_dim: 128,
+        hidden_layers: 2,
+        retrain_every: 200,
+        retrain_steps: 100,
+        learning_rate: 1e-3,
+        lambda: 1.0,
     };
     let total = campaign_memory_estimate(6, 32, &Algorithm::NeuralLinUCB(cfg));
     let arms_only = 6 * (8 * 32 * 32 + 16 * 32 + 64);

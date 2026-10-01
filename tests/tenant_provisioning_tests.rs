@@ -10,11 +10,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const PROVISION_KEY: &str = "prov-secret-key";
-const OPERATOR_KEY:  &str = "operator-admin-key";
+const OPERATOR_KEY: &str = "operator-admin-key";
 
 struct Server {
     child: Child,
-    port:  u16,
+    port: u16,
 }
 
 impl Drop for Server {
@@ -40,7 +40,8 @@ impl Server {
             .env("BANDITDB_RATE_LIMIT_PER_SEC", "100000")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn().ok()?;
+            .spawn()
+            .ok()?;
 
         let server = Server { child, port };
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -53,20 +54,32 @@ impl Server {
         None
     }
 
-    fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: Option<&str>)
-        -> Option<(u16, String)>
-    {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Option<(u16, String)> {
         let mut cmd = Command::new("curl");
-        cmd.arg("-sS").arg("--max-time").arg("10")
-            .arg("-o").arg("-")
-            .arg("-w").arg("\n__STATUS__%{http_code}")
-            .arg("-X").arg(method)
+        cmd.arg("-sS")
+            .arg("--max-time")
+            .arg("10")
+            .arg("-o")
+            .arg("-")
+            .arg("-w")
+            .arg("\n__STATUS__%{http_code}")
+            .arg("-X")
+            .arg(method)
             .arg(format!("http://127.0.0.1:{}{}", self.port, path));
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{k}: {v}"));
         }
         if let Some(b) = body {
-            cmd.arg("-H").arg("Content-Type: application/json").arg("-d").arg(b);
+            cmd.arg("-H")
+                .arg("Content-Type: application/json")
+                .arg("-d")
+                .arg(b);
         }
         let out = cmd.output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -90,7 +103,10 @@ macro_rules! server_or_skip {
     ($port:expr, $dir:expr, $fresh:expr) => {
         match Server::start($port, $dir, $fresh) {
             Some(s) => s,
-            None => { eprintln!("SKIPPED: could not start server on port {}", $port); return; }
+            None => {
+                eprintln!("SKIPPED: could not start server on port {}", $port);
+                return;
+            }
         }
     };
 }
@@ -108,15 +124,22 @@ fn tenant_body(admin: &str, writer: &str, max_campaigns: usize) -> String {
 }
 
 fn tenant_body_with_bytes(
-    admin: &str, writer: &str, max_campaigns: usize, max_bytes: Option<u64>,
+    admin: &str,
+    writer: &str,
+    max_campaigns: usize,
+    max_bytes: Option<u64>,
 ) -> String {
-    let bytes = max_bytes.map(|b| format!(r#","max_campaign_bytes":{b}"#)).unwrap_or_default();
+    let bytes = max_bytes
+        .map(|b| format!(r#","max_campaign_bytes":{b}"#))
+        .unwrap_or_default();
     format!(
         r#"{{"keys":[{{"hash":"{}","role":"admin","prefix":"{}"}},
                      {{"hash":"{}","role":"writer"}}],
             "quotas":{{"max_campaigns":{max_campaigns},"max_feature_dim":512{bytes}}},
             "status":"active"}}"#,
-        hash(admin), &admin[..8.min(admin.len())], hash(writer)
+        hash(admin),
+        &admin[..8.min(admin.len())],
+        hash(writer)
     )
 }
 
@@ -127,29 +150,52 @@ fn tenant_body_with_bytes(
 fn provisioned_tenant_can_work_immediately() {
     let srv = server_or_skip!(18401, "/tmp/bdb_provision_1", true);
 
-    let key_admin  = "BDBtenant1admin000000000000000000";
+    let key_admin = "BDBtenant1admin000000000000000000";
     let key_writer = "BDBtenant1writer00000000000000000";
 
     // Before provisioning, the key is simply unknown.
     assert_eq!(srv.get("/campaigns", Some(key_admin)).unwrap().0, 401);
 
-    let (status, _) = srv.provision("PUT", "/admin/tenants/org_alpha",
-        Some(&tenant_body(key_admin, key_writer, 5))).unwrap();
+    let (status, _) = srv
+        .provision(
+            "PUT",
+            "/admin/tenants/org_alpha",
+            Some(&tenant_body(key_admin, key_writer, 5)),
+        )
+        .unwrap();
     assert_eq!(status, 200, "provisioning must succeed");
 
     // Usable straight away — no restart, no config edit.
     assert_eq!(srv.get("/campaigns", Some(key_admin)).unwrap().0, 200);
 
-    let (status, _) = srv.post_key("/campaign", key_admin,
-        r#"{"campaign_id":"checkout","arms":["a","b"],"feature_dim":4,"alpha":1.0}"#).unwrap();
-    assert_eq!(status, 200, "tenant admin must be able to create a campaign");
+    let (status, _) = srv
+        .post_key(
+            "/campaign",
+            key_admin,
+            r#"{"campaign_id":"checkout","arms":["a","b"],"feature_dim":4,"alpha":1.0}"#,
+        )
+        .unwrap();
+    assert_eq!(
+        status, 200,
+        "tenant admin must be able to create a campaign"
+    );
 
     // The writer key works for decisions but cannot create campaigns.
-    let (status, _) = srv.post_key("/predict", key_writer,
-        r#"{"campaign_id":"checkout","context":[0.1,0.2,0.3,0.4]}"#).unwrap();
+    let (status, _) = srv
+        .post_key(
+            "/predict",
+            key_writer,
+            r#"{"campaign_id":"checkout","context":[0.1,0.2,0.3,0.4]}"#,
+        )
+        .unwrap();
     assert_eq!(status, 200, "writer must be able to predict");
-    let (status, _) = srv.post_key("/campaign", key_writer,
-        r#"{"campaign_id":"other","arms":["a","b"],"feature_dim":4}"#).unwrap();
+    let (status, _) = srv
+        .post_key(
+            "/campaign",
+            key_writer,
+            r#"{"campaign_id":"other","arms":["a","b"],"feature_dim":4}"#,
+        )
+        .unwrap();
     assert_eq!(status, 403, "writer must not create campaigns");
 }
 
@@ -160,16 +206,32 @@ fn provisioned_tenants_cannot_see_each_other() {
 
     let a_key = "BDBorgAadmin0000000000000000000000";
     let b_key = "BDBorgBadmin0000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_a", Some(&tenant_body(a_key, "BDBorgAwriter000000000000000", 5))).unwrap();
-    srv.provision("PUT", "/admin/tenants/org_b", Some(&tenant_body(b_key, "BDBorgBwriter000000000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_a",
+        Some(&tenant_body(a_key, "BDBorgAwriter000000000000000", 5)),
+    )
+    .unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_b",
+        Some(&tenant_body(b_key, "BDBorgBwriter000000000000000", 5)),
+    )
+    .unwrap();
 
-    srv.post_key("/campaign", a_key,
-        r#"{"campaign_id":"secret","arms":["a","b"],"feature_dim":4}"#).unwrap();
+    srv.post_key(
+        "/campaign",
+        a_key,
+        r#"{"campaign_id":"secret","arms":["a","b"],"feature_dim":4}"#,
+    )
+    .unwrap();
 
     // B lists its own campaigns and sees nothing of A's.
     let (_, body) = srv.get("/campaigns", Some(b_key)).unwrap();
-    assert!(!body.contains("secret"),
-        "tenant B must not see tenant A's campaigns — got {body}");
+    assert!(
+        !body.contains("secret"),
+        "tenant B must not see tenant A's campaigns — got {body}"
+    );
 
     // Nor can B address it directly.
     assert_eq!(srv.get("/campaign/secret", Some(b_key)).unwrap().0, 404);
@@ -184,17 +246,31 @@ fn tenants_survive_restart() {
 
     {
         let srv = server_or_skip!(18403, dir, true);
-        srv.provision("PUT", "/admin/tenants/org_persist",
-            Some(&tenant_body(key, "BDBpersistwriter00000000000", 3))).unwrap();
-        srv.post_key("/campaign", key,
-            r#"{"campaign_id":"kept","arms":["a","b"],"feature_dim":4}"#).unwrap();
+        srv.provision(
+            "PUT",
+            "/admin/tenants/org_persist",
+            Some(&tenant_body(key, "BDBpersistwriter00000000000", 3)),
+        )
+        .unwrap();
+        srv.post_key(
+            "/campaign",
+            key,
+            r#"{"campaign_id":"kept","arms":["a","b"],"feature_dim":4}"#,
+        )
+        .unwrap();
     } // server dropped → killed
 
-    let srv = server_or_skip!(18404, dir, false);   // same data dir, new process
-    assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200,
-        "the key must still authenticate after a restart");
+    let srv = server_or_skip!(18404, dir, false); // same data dir, new process
+    assert_eq!(
+        srv.get("/campaigns", Some(key)).unwrap().0,
+        200,
+        "the key must still authenticate after a restart"
+    );
     let (_, body) = srv.get("/campaigns", Some(key)).unwrap();
-    assert!(body.contains("kept"), "the tenant's campaign must survive too: {body}");
+    assert!(
+        body.contains("kept"),
+        "the tenant's campaign must survive too: {body}"
+    );
 }
 
 /// Quotas are enforced per tenant, and the error names the numbers.
@@ -202,29 +278,53 @@ fn tenants_survive_restart() {
 fn tenant_quotas_are_enforced() {
     let srv = server_or_skip!(18405, "/tmp/bdb_provision_4", true);
     let key = "BDBquota0000000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_quota",
-        Some(&tenant_body(key, "BDBquotawriter000000000000", 2))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_quota",
+        Some(&tenant_body(key, "BDBquotawriter000000000000", 2)),
+    )
+    .unwrap();
 
     for i in 0..2 {
-        let (status, _) = srv.post_key("/campaign", key,
-            &format!(r#"{{"campaign_id":"c{i}","arms":["a","b"],"feature_dim":4}}"#)).unwrap();
+        let (status, _) = srv
+            .post_key(
+                "/campaign",
+                key,
+                &format!(r#"{{"campaign_id":"c{i}","arms":["a","b"],"feature_dim":4}}"#),
+            )
+            .unwrap();
         assert_eq!(status, 200);
     }
-    let (status, body) = srv.post_key("/campaign", key,
-        r#"{"campaign_id":"c3","arms":["a","b"],"feature_dim":4}"#).unwrap();
+    let (status, body) = srv
+        .post_key(
+            "/campaign",
+            key,
+            r#"{"campaign_id":"c3","arms":["a","b"],"feature_dim":4}"#,
+        )
+        .unwrap();
     assert_eq!(status, 403, "the third campaign must be refused");
     assert!(body.contains('2'), "the error must name the limit: {body}");
 
     // feature_dim is capped at 64 by the quota in tenant_body.
-    let (status, _) = srv.post_key("/campaign", key,
-        r#"{"campaign_id":"wide","arms":["a","b"],"feature_dim":128}"#).unwrap();
-    assert_eq!(status, 403, "feature_dim above the plan limit must be refused");
+    let (status, _) = srv
+        .post_key(
+            "/campaign",
+            key,
+            r#"{"campaign_id":"wide","arms":["a","b"],"feature_dim":128}"#,
+        )
+        .unwrap();
+    assert_eq!(
+        status, 403,
+        "feature_dim above the plan limit must be refused"
+    );
 
     // /limits reports the same numbers the errors quote.
     let (status, body) = srv.get("/limits", Some(key)).unwrap();
     assert_eq!(status, 200);
-    assert!(body.contains("\"max_campaigns\":2") && body.contains("\"campaigns_used\":2"),
-        "/limits must report quota and usage: {body}");
+    assert!(
+        body.contains("\"max_campaigns\":2") && body.contains("\"campaigns_used\":2"),
+        "/limits must report quota and usage: {body}"
+    );
 }
 
 /// Suspension is not the same as an invalid key, and the difference must be visible.
@@ -232,19 +332,31 @@ fn tenant_quotas_are_enforced() {
 fn suspended_tenant_is_refused_with_a_clear_reason() {
     let srv = server_or_skip!(18406, "/tmp/bdb_provision_5", true);
     let key = "BDBsuspend00000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_susp",
-        Some(&tenant_body(key, "BDBsuspendwriter0000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_susp",
+        Some(&tenant_body(key, "BDBsuspendwriter0000000000", 5)),
+    )
+    .unwrap();
     assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200);
 
     // Suspend by re-provisioning with the same keys — the call is idempotent.
     let body = format!(
-        r#"{{"keys":[{{"hash":"{}","role":"admin"}}],"status":"suspended"}}"#, hash(key));
-    srv.provision("PUT", "/admin/tenants/org_susp", Some(&body)).unwrap();
+        r#"{{"keys":[{{"hash":"{}","role":"admin"}}],"status":"suspended"}}"#,
+        hash(key)
+    );
+    srv.provision("PUT", "/admin/tenants/org_susp", Some(&body))
+        .unwrap();
 
     let (status, msg) = srv.get("/campaigns", Some(key)).unwrap();
-    assert_eq!(status, 403, "a suspended tenant must be forbidden, not unauthorized");
-    assert!(msg.to_lowercase().contains("suspend"),
-        "the message must say why, so a console can show 'renew' rather than 'bad key': {msg}");
+    assert_eq!(
+        status, 403,
+        "a suspended tenant must be forbidden, not unauthorized"
+    );
+    assert!(
+        msg.to_lowercase().contains("suspend"),
+        "the message must say why, so a console can show 'renew' rather than 'bad key': {msg}"
+    );
 }
 
 /// The provisioning surface must be unreachable from any tenant credential.
@@ -253,15 +365,35 @@ fn provisioning_requires_its_own_credential() {
     let srv = server_or_skip!(18407, "/tmp/bdb_provision_6", true);
 
     // No provisioning key at all.
-    assert_eq!(srv.request("GET", "/admin/tenants", &[], None).unwrap().0, 401);
+    assert_eq!(
+        srv.request("GET", "/admin/tenants", &[], None).unwrap().0,
+        401
+    );
     // Wrong provisioning key.
     assert_eq!(
-        srv.request("GET", "/admin/tenants", &[("X-Provision-Key", "wrong")], None).unwrap().0,
-        401);
+        srv.request(
+            "GET",
+            "/admin/tenants",
+            &[("X-Provision-Key", "wrong")],
+            None
+        )
+        .unwrap()
+        .0,
+        401
+    );
     // An operator admin API key is NOT a provisioning credential.
     assert_eq!(
-        srv.request("GET", "/admin/tenants", &[("X-Api-Key", OPERATOR_KEY)], None).unwrap().0,
-        401, "an admin API key must not reach the provisioning routes");
+        srv.request(
+            "GET",
+            "/admin/tenants",
+            &[("X-Api-Key", OPERATOR_KEY)],
+            None
+        )
+        .unwrap()
+        .0,
+        401,
+        "an admin API key must not reach the provisioning routes"
+    );
     // The real credential works.
     assert_eq!(srv.provision("GET", "/admin/tenants", None).unwrap().0, 200);
 }
@@ -272,13 +404,28 @@ fn a_key_cannot_be_claimed_by_two_tenants() {
     let srv = server_or_skip!(18408, "/tmp/bdb_provision_7", true);
     let shared = "BDBshared000000000000000000000000";
 
-    srv.provision("PUT", "/admin/tenants/org_one",
-        Some(&tenant_body(shared, "BDBonewriter0000000000000", 5))).unwrap();
-    let (status, body) = srv.provision("PUT", "/admin/tenants/org_two",
-        Some(&tenant_body(shared, "BDBtwowriter0000000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_one",
+        Some(&tenant_body(shared, "BDBonewriter0000000000000", 5)),
+    )
+    .unwrap();
+    let (status, body) = srv
+        .provision(
+            "PUT",
+            "/admin/tenants/org_two",
+            Some(&tenant_body(shared, "BDBtwowriter0000000000000", 5)),
+        )
+        .unwrap();
 
-    assert_eq!(status, 400, "reusing a key hash across tenants must be rejected");
-    assert!(body.contains("org_one"), "the error must name the current owner: {body}");
+    assert_eq!(
+        status, 400,
+        "reusing a key hash across tenants must be rejected"
+    );
+    assert!(
+        body.contains("org_one"),
+        "the error must name the current owner: {body}"
+    );
 }
 
 /// Removing a tenant revokes its keys but must not destroy its data.
@@ -286,26 +433,51 @@ fn a_key_cannot_be_claimed_by_two_tenants() {
 fn removing_a_tenant_revokes_keys_but_keeps_data() {
     let srv = server_or_skip!(18409, "/tmp/bdb_provision_8", true);
     let key = "BDBremove000000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_gone",
-        Some(&tenant_body(key, "BDBremovewriter00000000000", 5))).unwrap();
-    srv.post_key("/campaign", key,
-        r#"{"campaign_id":"data","arms":["a","b"],"feature_dim":4}"#).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_gone",
+        Some(&tenant_body(key, "BDBremovewriter00000000000", 5)),
+    )
+    .unwrap();
+    srv.post_key(
+        "/campaign",
+        key,
+        r#"{"campaign_id":"data","arms":["a","b"],"feature_dim":4}"#,
+    )
+    .unwrap();
 
-    assert_eq!(srv.provision("DELETE", "/admin/tenants/org_gone", None).unwrap().0, 200);
-    assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 401,
-        "the revoked key must stop working");
+    assert_eq!(
+        srv.provision("DELETE", "/admin/tenants/org_gone", None)
+            .unwrap()
+            .0,
+        200
+    );
+    assert_eq!(
+        srv.get("/campaigns", Some(key)).unwrap().0,
+        401,
+        "the revoked key must stop working"
+    );
 
     // The operator can still see the namespaced campaign: deleting credentials is
     // not deleting models.
     let (_, body) = srv.get("/campaigns", Some(OPERATOR_KEY)).unwrap();
-    assert!(body.contains("org_gone/data"),
-        "campaign data must survive tenant removal: {body}");
+    assert!(
+        body.contains("org_gone/data"),
+        "campaign data must survive tenant removal: {body}"
+    );
 
     // Re-provisioning the same tenant restores access to it.
-    srv.provision("PUT", "/admin/tenants/org_gone",
-        Some(&tenant_body(key, "BDBremovewriter00000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_gone",
+        Some(&tenant_body(key, "BDBremovewriter00000000000", 5)),
+    )
+    .unwrap();
     let (_, body) = srv.get("/campaigns", Some(key)).unwrap();
-    assert!(body.contains("data"), "re-provisioning must restore access: {body}");
+    assert!(
+        body.contains("data"),
+        "re-provisioning must restore access: {body}"
+    );
 }
 
 /// The console reads tenant data with the provisioning credential, because it
@@ -314,36 +486,68 @@ fn removing_a_tenant_revokes_keys_but_keeps_data() {
 fn console_can_read_tenant_data_without_a_tenant_key() {
     let srv = server_or_skip!(18410, "/tmp/bdb_provision_9", true);
     let key = "BDBconsole00000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_console",
-        Some(&tenant_body(key, "BDBconsolewriter000000000", 5))).unwrap();
-    srv.post_key("/campaign", key,
-        r#"{"campaign_id":"checkout","arms":["a","b"],"feature_dim":4}"#).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_console",
+        Some(&tenant_body(key, "BDBconsolewriter000000000", 5)),
+    )
+    .unwrap();
+    srv.post_key(
+        "/campaign",
+        key,
+        r#"{"campaign_id":"checkout","arms":["a","b"],"feature_dim":4}"#,
+    )
+    .unwrap();
 
     // Campaign list, with the namespace stripped for display.
-    let (status, body) = srv.provision("GET", "/admin/tenants/org_console/campaigns", None).unwrap();
+    let (status, body) = srv
+        .provision("GET", "/admin/tenants/org_console/campaigns", None)
+        .unwrap();
     assert_eq!(status, 200);
-    assert!(body.contains("\"campaign_id\":\"checkout\""),
-        "the console must see the campaign under its bare name: {body}");
-    assert!(!body.contains("org_console/checkout"),
-        "the namespace prefix must not leak into the console view: {body}");
+    assert!(
+        body.contains("\"campaign_id\":\"checkout\""),
+        "the console must see the campaign under its bare name: {body}"
+    );
+    assert!(
+        !body.contains("org_console/checkout"),
+        "the namespace prefix must not leak into the console view: {body}"
+    );
 
     // Report and diagnostics for one campaign.
-    let (status, body) = srv.provision("GET",
-        "/admin/tenants/org_console/campaigns/checkout/report", None).unwrap();
+    let (status, body) = srv
+        .provision(
+            "GET",
+            "/admin/tenants/org_console/campaigns/checkout/report",
+            None,
+        )
+        .unwrap();
     assert_eq!(status, 200, "report must be readable: {body}");
     assert!(body.contains("\"campaign_id\":\"checkout\""));
 
-    let (status, body) = srv.provision("GET",
-        "/admin/tenants/org_console/campaigns/checkout/diagnostics", None).unwrap();
+    let (status, body) = srv
+        .provision(
+            "GET",
+            "/admin/tenants/org_console/campaigns/checkout/diagnostics",
+            None,
+        )
+        .unwrap();
     assert_eq!(status, 200, "diagnostics must be readable: {body}");
     assert!(body.contains("selection_entropy"));
 
     // One tenant's credential cannot read another's data through these routes,
     // because they are not reachable with a tenant key at all.
     assert_eq!(
-        srv.request("GET", "/admin/tenants/org_console/campaigns",
-                    &[("X-Api-Key", key)], None).unwrap().0,
-        401, "a tenant key must not reach the console read routes");
+        srv.request(
+            "GET",
+            "/admin/tenants/org_console/campaigns",
+            &[("X-Api-Key", key)],
+            None
+        )
+        .unwrap()
+        .0,
+        401,
+        "a tenant key must not reach the console read routes"
+    );
 }
 
 /// Key usage is recorded, so the console can stop claiming "never used".
@@ -351,17 +555,30 @@ fn console_can_read_tenant_data_without_a_tenant_key() {
 fn key_usage_is_reported() {
     let srv = server_or_skip!(18411, "/tmp/bdb_provision_10", true);
     let key = "BDBusage0000000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_usage",
-        Some(&tenant_body(key, "BDBusagewriter00000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_usage",
+        Some(&tenant_body(key, "BDBusagewriter00000000000", 5)),
+    )
+    .unwrap();
 
-    let (_, before) = srv.provision("GET", "/admin/tenants/org_usage", None).unwrap();
-    assert!(before.contains("\"last_used_at\":0"), "a fresh key must read as never used: {before}");
+    let (_, before) = srv
+        .provision("GET", "/admin/tenants/org_usage", None)
+        .unwrap();
+    assert!(
+        before.contains("\"last_used_at\":0"),
+        "a fresh key must read as never used: {before}"
+    );
 
-    srv.get("/campaigns", Some(key)).unwrap();          // authenticate once
+    srv.get("/campaigns", Some(key)).unwrap(); // authenticate once
 
-    let (_, after) = srv.provision("GET", "/admin/tenants/org_usage", None).unwrap();
-    assert!(!after.contains("\"last_used_at\":0") || after.matches("\"last_used_at\":0").count() < 2,
-        "the used key must record a timestamp: {after}");
+    let (_, after) = srv
+        .provision("GET", "/admin/tenants/org_usage", None)
+        .unwrap();
+    assert!(
+        !after.contains("\"last_used_at\":0") || after.matches("\"last_used_at\":0").count() < 2,
+        "the used key must record a timestamp: {after}"
+    );
 }
 
 /// An engine a control plane manages must never fall back to open access.
@@ -378,34 +595,64 @@ fn a_provisioned_engine_is_never_open() {
         std::fs::create_dir_all(dir).ok();
         // Provisioning configured, NO BANDITDB_API_KEYS, no tenants yet.
         let child = Command::new(bin)
-            .env("DATA_DIR", dir).env("PORT", "18412")
+            .env("DATA_DIR", dir)
+            .env("PORT", "18412")
             .env("BANDITDB_PROVISION_KEY", PROVISION_KEY)
-            .env_remove("BANDITDB_API_KEYS").env_remove("BANDITDB_API_KEY")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().ok();
-        let Some(child) = child else { eprintln!("SKIPPED: spawn failed"); return };
+            .env_remove("BANDITDB_API_KEYS")
+            .env_remove("BANDITDB_API_KEY")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+        let Some(child) = child else {
+            eprintln!("SKIPPED: spawn failed");
+            return;
+        };
         let srv = Server { child, port: 18412 };
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if matches!(srv.get("/health", None), Some((200, _))) { break; }
+            if matches!(srv.get("/health", None), Some((200, _))) {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         srv
     };
 
-    assert_eq!(srv.get("/campaigns", None).unwrap().0, 401,
-        "an anonymous caller must not be admitted");
-    assert_eq!(srv.get("/campaigns", Some("anything-at-all")).unwrap().0, 401,
-        "an arbitrary key must not be admitted");
     assert_eq!(
-        srv.post_key("/campaign", "anything-at-all",
-            r#"{"campaign_id":"x","arms":["a","b"],"feature_dim":4}"#).unwrap().0,
-        401, "and certainly must not be able to create campaigns");
+        srv.get("/campaigns", None).unwrap().0,
+        401,
+        "an anonymous caller must not be admitted"
+    );
+    assert_eq!(
+        srv.get("/campaigns", Some("anything-at-all")).unwrap().0,
+        401,
+        "an arbitrary key must not be admitted"
+    );
+    assert_eq!(
+        srv.post_key(
+            "/campaign",
+            "anything-at-all",
+            r#"{"campaign_id":"x","arms":["a","b"],"feature_dim":4}"#
+        )
+        .unwrap()
+        .0,
+        401,
+        "and certainly must not be able to create campaigns"
+    );
 
     // Provisioning still works, and its tenant then authenticates normally.
     let key = "BDBopencheck0000000000000000000000";
-    assert_eq!(srv.provision("PUT", "/admin/tenants/org_open",
-        Some(&tenant_body(key, "BDBopenwriter00000000000000", 5))).unwrap().0, 200);
+    assert_eq!(
+        srv.provision(
+            "PUT",
+            "/admin/tenants/org_open",
+            Some(&tenant_body(key, "BDBopenwriter00000000000000", 5))
+        )
+        .unwrap()
+        .0,
+        200
+    );
     assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200);
 }
 
@@ -419,23 +666,47 @@ fn tenant_memory_budget_is_enforced() {
     let key = "BDBbytes0000000000000000000000000";
 
     // 2 MB: room for a few small campaigns, nowhere near a wide one.
-    srv.provision("PUT", "/admin/tenants/org_bytes",
-        Some(&tenant_body_with_bytes(key, "BDBbyteswriter000000000000", 50, Some(2 * 1024 * 1024))))
-        .unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_bytes",
+        Some(&tenant_body_with_bytes(
+            key,
+            "BDBbyteswriter000000000000",
+            50,
+            Some(2 * 1024 * 1024),
+        )),
+    )
+    .unwrap();
 
     // 10 arms at d=16 ≈ 10 × 8 × 256 ≈ 20 KB.
     let small = r#"{"campaign_id":"small","arms":["a","b","c","d","e","f","g","h","i","j"],"feature_dim":16}"#;
-    assert_eq!(srv.post_key("/campaign", key, small).unwrap().0, 200,
-        "a small campaign must fit");
+    assert_eq!(
+        srv.post_key("/campaign", key, small).unwrap().0,
+        200,
+        "a small campaign must fit"
+    );
 
     // 40 arms at d=256 ≈ 40 × 8 × 65536 ≈ 21 MB — over budget on its own.
     let wide: String = format!(
         r#"{{"campaign_id":"wide","arms":[{}],"feature_dim":256}}"#,
-        (0..40).map(|i| format!("\"a{i}\"")).collect::<Vec<_>>().join(","));
+        (0..40)
+            .map(|i| format!("\"a{i}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let (status, body) = srv.post_key("/campaign", key, &wide).unwrap();
-    assert_eq!(status, 403, "a campaign over the byte budget must be refused");
-    assert!(body.contains("MB"), "the error must be stated in MB: {body}");
-    assert!(body.to_lowercase().contains("budget"), "and name the budget: {body}");
+    assert_eq!(
+        status, 403,
+        "a campaign over the byte budget must be refused"
+    );
+    assert!(
+        body.contains("MB"),
+        "the error must be stated in MB: {body}"
+    );
+    assert!(
+        body.to_lowercase().contains("budget"),
+        "and name the budget: {body}"
+    );
 
     // The budget is cumulative, not per campaign: enough small campaigns must
     // eventually exhaust it even though each one fits comfortably.
@@ -443,19 +714,27 @@ fn tenant_memory_budget_is_enforced() {
     for i in 0..40 {
         let body = format!(
             r#"{{"campaign_id":"fill{i}","arms":[{}],"feature_dim":128}}"#,
-            (0..12).map(|j| format!("\"a{j}\"")).collect::<Vec<_>>().join(","));
+            (0..12)
+                .map(|j| format!("\"a{j}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         if srv.post_key("/campaign", key, &body).unwrap().0 == 403 {
             refused_at = Some(i);
             break;
         }
     }
-    assert!(refused_at.is_some(),
-        "the budget must accumulate across campaigns, not reset for each one");
+    assert!(
+        refused_at.is_some(),
+        "the budget must accumulate across campaigns, not reset for each one"
+    );
 
     // Campaign count was never the binding limit here — the plan allowed 50.
     let (_, listed) = srv.get("/campaigns", Some(key)).unwrap();
-    assert!(listed.matches("campaign_id").count() < 50,
-        "bytes should bind before the count limit does");
+    assert!(
+        listed.matches("campaign_id").count() < 50,
+        "bytes should bind before the count limit does"
+    );
 }
 
 /// Adding arms grows a campaign, so it must be charged against the same budget.
@@ -469,25 +748,48 @@ fn adding_arms_is_charged_against_the_memory_budget() {
     let key = "BDBarmbytes000000000000000000000";
 
     // 2 MB. One arm at d=256 reserves ~0.5 MB, so a handful fit and no more.
-    srv.provision("PUT", "/admin/tenants/org_arm_bytes",
-        Some(&tenant_body_with_bytes(key, "BDBarmbyteswriter0000000000", 50, Some(2 * 1024 * 1024))))
-        .unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_arm_bytes",
+        Some(&tenant_body_with_bytes(
+            key,
+            "BDBarmbyteswriter0000000000",
+            50,
+            Some(2 * 1024 * 1024),
+        )),
+    )
+    .unwrap();
     let one = r#"{"campaign_id":"grow","arms":["a0"],"feature_dim":256}"#;
-    assert_eq!(srv.post_key("/campaign", key, one).unwrap().0, 200, "one arm must fit");
+    assert_eq!(
+        srv.post_key("/campaign", key, one).unwrap().0,
+        200,
+        "one arm must fit"
+    );
 
     let mut refused = None;
     for i in 1..20 {
-        let (status, body) = srv.post_key("/campaign/grow/arms", key,
-            &format!(r#"{{"arm_id":"a{i}"}}"#)).unwrap();
+        let (status, body) = srv
+            .post_key(
+                "/campaign/grow/arms",
+                key,
+                &format!(r#"{{"arm_id":"a{i}"}}"#),
+            )
+            .unwrap();
         match status {
             200 => {}
-            403 => { refused = Some((i, body)); break; }
+            403 => {
+                refused = Some((i, body));
+                break;
+            }
             other => panic!("unexpected status {other} adding arm {i}: {body}"),
         }
     }
     let (at, body) = refused.expect("arms were added past the tenant's memory budget");
     assert!(at > 1, "arms that fit must still be accepted");
-    assert!(body.to_lowercase().contains("budget"), "the refusal must name the budget: {body}");
+    assert!(
+        body.to_lowercase().contains("budget"),
+        "the refusal must name the budget: {body}"
+    );
 }
 
 /// Purging is explicit and separate from revoking credentials.
@@ -499,26 +801,49 @@ fn adding_arms_is_charged_against_the_memory_budget() {
 fn campaigns_are_purged_only_when_asked() {
     let srv = server_or_skip!(18414, "/tmp/bdb_provision_purge", true);
     let key = "BDBpurge0000000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_purge",
-        Some(&tenant_body(key, "BDBpurgewriter00000000000", 5))).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_purge",
+        Some(&tenant_body(key, "BDBpurgewriter00000000000", 5)),
+    )
+    .unwrap();
 
     for c in ["one", "two"] {
-        assert_eq!(srv.post_key("/campaign", key,
-            &format!(r#"{{"campaign_id":"{c}","arms":["a","b"],"feature_dim":4}}"#)).unwrap().0,
-            200);
+        assert_eq!(
+            srv.post_key(
+                "/campaign",
+                key,
+                &format!(r#"{{"campaign_id":"{c}","arms":["a","b"],"feature_dim":4}}"#)
+            )
+            .unwrap()
+            .0,
+            200
+        );
     }
 
-    let (status, body) = srv.provision("DELETE", "/admin/tenants/org_purge/campaigns", None).unwrap();
+    let (status, body) = srv
+        .provision("DELETE", "/admin/tenants/org_purge/campaigns", None)
+        .unwrap();
     assert_eq!(status, 200, "purge must succeed: {body}");
-    assert!(body.contains("\"deleted\":2"), "both campaigns must be deleted: {body}");
+    assert!(
+        body.contains("\"deleted\":2"),
+        "both campaigns must be deleted: {body}"
+    );
 
-    let (_, after) = srv.provision("GET", "/admin/tenants/org_purge/campaigns", None).unwrap();
-    assert!(!after.contains("\"one\"") && !after.contains("\"two\""),
-        "no campaign may survive a purge: {after}");
+    let (_, after) = srv
+        .provision("GET", "/admin/tenants/org_purge/campaigns", None)
+        .unwrap();
+    assert!(
+        !after.contains("\"one\"") && !after.contains("\"two\""),
+        "no campaign may survive a purge: {after}"
+    );
 
     // The tenant itself is untouched — its keys still work.
-    assert_eq!(srv.get("/campaigns", Some(key)).unwrap().0, 200,
-        "purging data must not revoke credentials");
+    assert_eq!(
+        srv.get("/campaigns", Some(key)).unwrap().0,
+        200,
+        "purging data must not revoke credentials"
+    );
 }
 
 /// The console can drive a campaign for its playground, and cannot reach across
@@ -528,33 +853,77 @@ fn console_playground_traffic_is_tenant_scoped() {
     let srv = server_or_skip!(18415, "/tmp/bdb_provision_play", true);
     let a_key = "BDBplayA00000000000000000000000000";
     let b_key = "BDBplayB00000000000000000000000000";
-    srv.provision("PUT", "/admin/tenants/org_play_a",
-        Some(&tenant_body(a_key, "BDBplayAwriter0000000000000", 5))).unwrap();
-    srv.provision("PUT", "/admin/tenants/org_play_b",
-        Some(&tenant_body(b_key, "BDBplayBwriter0000000000000", 5))).unwrap();
-    srv.post_key("/campaign", a_key,
-        r#"{"campaign_id":"demo","arms":["x","y"],"feature_dim":3}"#).unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_play_a",
+        Some(&tenant_body(a_key, "BDBplayAwriter0000000000000", 5)),
+    )
+    .unwrap();
+    srv.provision(
+        "PUT",
+        "/admin/tenants/org_play_b",
+        Some(&tenant_body(b_key, "BDBplayBwriter0000000000000", 5)),
+    )
+    .unwrap();
+    srv.post_key(
+        "/campaign",
+        a_key,
+        r#"{"campaign_id":"demo","arms":["x","y"],"feature_dim":3}"#,
+    )
+    .unwrap();
 
     // Predict through the provisioning credential.
-    let (status, body) = srv.provision("POST", "/admin/tenants/org_play_a/campaigns/demo/predict",
-        Some(r#"{"context":[0.5,0.5,0.5]}"#)).unwrap();
+    let (status, body) = srv
+        .provision(
+            "POST",
+            "/admin/tenants/org_play_a/campaigns/demo/predict",
+            Some(r#"{"context":[0.5,0.5,0.5]}"#),
+        )
+        .unwrap();
     assert_eq!(status, 200, "playground predict must work: {body}");
-    let iid = body.split("\"interaction_id\":\"").nth(1)
-        .and_then(|s| s.split('"').next()).unwrap().to_string();
+    let iid = body
+        .split("\"interaction_id\":\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap()
+        .to_string();
 
     // Reward it, scoped to the owning tenant.
-    let (status, _) = srv.provision("POST", "/admin/tenants/org_play_a/reward",
-        Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#))).unwrap();
+    let (status, _) = srv
+        .provision(
+            "POST",
+            "/admin/tenants/org_play_a/reward",
+            Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#)),
+        )
+        .unwrap();
     assert_eq!(status, 200, "playground reward must work");
 
     // The same interaction must not be rewardable under another tenant.
-    let (status, _) = srv.provision("POST", "/admin/tenants/org_play_b/reward",
-        Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#))).unwrap();
-    assert_eq!(status, 404, "one tenant must not reward another's interaction");
+    let (status, _) = srv
+        .provision(
+            "POST",
+            "/admin/tenants/org_play_b/reward",
+            Some(&format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#)),
+        )
+        .unwrap();
+    assert_eq!(
+        status, 404,
+        "one tenant must not reward another's interaction"
+    );
 
     // The traffic is visible in the tenant's request log, and only theirs.
-    let (_, log_a) = srv.provision("GET", "/admin/tenants/org_play_a/requests", None).unwrap();
-    assert!(log_a.contains("/campaign"), "the tenant's own calls must appear: {log_a}");
-    let (_, log_b) = srv.provision("GET", "/admin/tenants/org_play_b/requests", None).unwrap();
-    assert!(!log_b.contains("demo"), "another tenant's calls must not: {log_b}");
+    let (_, log_a) = srv
+        .provision("GET", "/admin/tenants/org_play_a/requests", None)
+        .unwrap();
+    assert!(
+        log_a.contains("/campaign"),
+        "the tenant's own calls must appear: {log_a}"
+    );
+    let (_, log_b) = srv
+        .provision("GET", "/admin/tenants/org_play_b/requests", None)
+        .unwrap();
+    assert!(
+        !log_b.contains("demo"),
+        "another tenant's calls must not: {log_b}"
+    );
 }

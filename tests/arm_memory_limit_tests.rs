@@ -16,18 +16,41 @@ async fn add_arm_respects_the_campaign_byte_limit() {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["a0".into()], 256, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+    db.add_campaign(
+        "c",
+        vec!["a0".into()],
+        256,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let mut refused = None;
     for i in 1..20 {
-        match db.add_arm("c", &format!("a{i}"), None, &WarmStart::default()).await {
+        match db
+            .add_arm("c", &format!("a{i}"), None, &WarmStart::default())
+            .await
+        {
             Ok(()) => {}
-            Err(e) => { refused = Some((i, e)); break; }
+            Err(e) => {
+                refused = Some((i, e));
+                break;
+            }
         }
     }
     let (at, err) = refused.expect("arms were added past BANDITDB_MAX_CAMPAIGN_BYTES");
     assert!(at > 1, "arms that fit must still be accepted");
-    assert!(matches!(err, EngineError::LimitExceeded(_)), "expected LimitExceeded, got {err:?}");
-    assert_eq!(db.campaigns.read()["c"].arms.read().len(), at, "the refused arm must not exist");
+    assert!(
+        matches!(err, EngineError::LimitExceeded(_)),
+        "expected LimitExceeded, got {err:?}"
+    );
+    assert_eq!(
+        db.campaigns.read()["c"].arms.read().len(),
+        at,
+        "the refused arm must not exist"
+    );
     let _ = fs::remove_dir_all(dir);
 }

@@ -13,11 +13,9 @@
 //! 10. PacingConsumed WAL event: post-checkpoint pacing state restored on replay.
 //! 11. PacingConsumed rollback: old WAL without PacingConsumed resets to checkpoint.
 
-use banditdb::BanditDB;
 use banditdb::engine::ArmFilter;
-use banditdb::state::{
-    Algorithm, DbEvent, EngineError, PacingConfig, ResourceConstraint,
-};
+use banditdb::state::{Algorithm, DbEvent, EngineError, PacingConfig, ResourceConstraint};
+use banditdb::BanditDB;
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -44,14 +42,39 @@ async fn test_unconstrained_invariance() {
     let db = BanditDB::new(&wal, &dir);
 
     // Create campaign A without pacing (None)
-    db.add_campaign("camp_a", arms(&["arm_1", "arm_2"]), 2, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+    db.add_campaign(
+        "camp_a",
+        arms(&["arm_1", "arm_2"]),
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Create campaign B explicitly passing None pacing
-    db.add_campaign_pacing("camp_b", arms(&["arm_1", "arm_2"]), 2, 1.0, Algorithm::Linucb, None, None, None).await.unwrap();
+    db.add_campaign_pacing(
+        "camp_b",
+        arms(&["arm_1", "arm_2"]),
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     // Train arm_1 with positive reward in both campaigns so scores are strictly differentiated
-    db.interact("camp_a", "arm_1", vec![1.0, 0.0], 1.0).await.unwrap();
-    db.interact("camp_b", "arm_1", vec![1.0, 0.0], 1.0).await.unwrap();
+    db.interact("camp_a", "arm_1", vec![1.0, 0.0], 1.0)
+        .await
+        .unwrap();
+    db.interact("camp_b", "arm_1", vec![1.0, 0.0], 1.0)
+        .await
+        .unwrap();
 
     let ctx = vec![1.0, 0.0];
     for _ in 0..50 {
@@ -102,28 +125,43 @@ async fn test_hard_mask_exhaustion() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Use ArmFilter to force 2 selections of "expensive", consuming the full 10.0 budget
     let only_expensive = ArmFilter::include(vec!["expensive".to_string()]);
-    let (p1, iid1) = db.predict_filtered("server_tokens", vec![1.0, 0.0], &only_expensive).unwrap();
+    let (p1, iid1) = db
+        .predict_filtered("server_tokens", vec![1.0, 0.0], &only_expensive)
+        .unwrap();
     assert_eq!(p1, "expensive");
     db.reward(&iid1, 1.0).await.unwrap();
 
-    let (p2, iid2) = db.predict_filtered("server_tokens", vec![1.0, 0.0], &only_expensive).unwrap();
+    let (p2, iid2) = db
+        .predict_filtered("server_tokens", vec![1.0, 0.0], &only_expensive)
+        .unwrap();
     assert_eq!(p2, "expensive");
     db.reward(&iid2, 1.0).await.unwrap();
 
     // Now budget consumed is 10.0 / 10.0. Remaining is 0.0 < 5.0.
     // Prediction 3 with no filter: "expensive" is hard-masked! "free" MUST be selected.
     let (p3, _) = db.predict("server_tokens", vec![1.0, 0.0]).unwrap();
-    assert_eq!(p3, "free", "Expensive arm must be hard-masked when capacity is depleted");
+    assert_eq!(
+        p3, "free",
+        "Expensive arm must be hard-masked when capacity is depleted"
+    );
 
     // Prediction 4 attempting to force "expensive" via filter MUST fail with BadRequest (no eligible arms)
     let p4_err = db.predict_filtered("server_tokens", vec![1.0, 0.0], &only_expensive);
-    assert!(matches!(p4_err, Err(EngineError::BadRequest(_))), "Filter requiring masked arm must return BadRequest");
+    assert!(
+        matches!(p4_err, Err(EngineError::BadRequest(_))),
+        "Filter requiring masked arm must return BadRequest"
+    );
 
-    let report = db.campaign_pacing_report("server_tokens").unwrap().expect("pacing report exists");
+    let report = db
+        .campaign_pacing_report("server_tokens")
+        .unwrap()
+        .expect("pacing report exists");
     let res = &report.resources[0];
     assert_eq!(res.consumed, 10.0);
     assert_eq!(res.remaining, 0.0);
@@ -165,7 +203,9 @@ async fn test_dual_shadow_price_adaptation() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let report0 = db.campaign_pacing_report("compute_camp").unwrap().unwrap();
     assert_eq!(report0.resources[0].lambda, 0.0);
@@ -174,23 +214,33 @@ async fn test_dual_shadow_price_adaptation() {
     // rho = 0.1. delta = 1.0 - 0.1 = 0.9.
     // lambda_1 = clamp(0.0 + 0.1 * 0.9) = 0.09.
     let only_heavy = ArmFilter::include(vec!["heavy".to_string()]);
-    let (chosen, _) = db.predict_filtered("compute_camp", vec![1.0, 0.0], &only_heavy).unwrap();
+    let (chosen, _) = db
+        .predict_filtered("compute_camp", vec![1.0, 0.0], &only_heavy)
+        .unwrap();
     assert_eq!(chosen, "heavy");
 
     let report1 = db.campaign_pacing_report("compute_camp").unwrap().unwrap();
     let l1 = report1.resources[0].lambda;
-    assert!((l1 - 0.09).abs() < 1e-6, "Lambda should increase by eta * (c - rho), got {l1}");
+    assert!(
+        (l1 - 0.09).abs() < 1e-6,
+        "Lambda should increase by eta * (c - rho), got {l1}"
+    );
 
     // Serve prediction forcing light: light is selected (consumes 0.0).
     // rho = 0.1. delta = 0.0 - 0.1 = -0.1.
     // lambda_2 = clamp(0.09 + 0.1 * (-0.1)) = 0.08.
     let only_light = ArmFilter::include(vec!["light".to_string()]);
-    let (chosen2, _) = db.predict_filtered("compute_camp", vec![1.0, 0.0], &only_light).unwrap();
+    let (chosen2, _) = db
+        .predict_filtered("compute_camp", vec![1.0, 0.0], &only_light)
+        .unwrap();
     assert_eq!(chosen2, "light");
 
     let report2 = db.campaign_pacing_report("compute_camp").unwrap().unwrap();
     let l2 = report2.resources[0].lambda;
-    assert!((l2 - 0.08).abs() < 1e-6, "Lambda should decrease when under-consuming, got {l2}");
+    assert!(
+        (l2 - 0.08).abs() < 1e-6,
+        "Lambda should decrease when under-consuming, got {l2}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -229,7 +279,9 @@ async fn test_price_before_propensity() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let (_, iid) = db.predict("priced_propensity", vec![1.0, 1.0]).unwrap();
     let record = db.interactions.get(&iid).expect("interaction recorded");
@@ -241,7 +293,10 @@ async fn test_price_before_propensity() {
     // At cold start without price, arm_a and arm_b have identical feature scores (both 0) and identical uncertainty.
     // With price lambda * cost_a = 2.0 * 1.0 = 2.0 subtracted from arm_a, arm_a's effective score is -2.0.
     // Softmax ensures p_b > p_a.
-    assert!(p_b > p_a, "Price penalty must reduce propensity before logging: p_b ({p_b}) > p_a ({p_a})");
+    assert!(
+        p_b > p_a,
+        "Price penalty must reduce propensity before logging: p_b ({p_b}) > p_a ({p_a})"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -294,11 +349,15 @@ async fn test_multi_knapsack_constraints() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Call 1: force heavy. Consumes 2.0 GPU and 1.0 RAM.
     let only_heavy = ArmFilter::include(vec!["heavy".to_string()]);
-    let (c1, _) = db.predict_filtered("multi_res", vec![1.0, 0.0], &only_heavy).unwrap();
+    let (c1, _) = db
+        .predict_filtered("multi_res", vec![1.0, 0.0], &only_heavy)
+        .unwrap();
     assert_eq!(c1, "heavy");
 
     // Call 2: with no filter, GPU is exhausted (remaining = 0.0 < 2.0), so heavy is masked!
@@ -349,7 +408,9 @@ async fn test_pacing_checkpoint_recovery_and_wal_replay() {
             None,
             None,
             Some(pacing),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 3 predictions before checkpoint
         for _ in 0..3 {
@@ -365,7 +426,10 @@ async fn test_pacing_checkpoint_recovery_and_wal_replay() {
             db.reward(&iid, 1.0).await.unwrap();
         }
 
-        let report = db.campaign_pacing_report("durability_camp").unwrap().unwrap();
+        let report = db
+            .campaign_pacing_report("durability_camp")
+            .unwrap()
+            .unwrap();
         let r = &report.resources[0];
         (r.consumed, r.lambda, r.decisions)
     };
@@ -373,12 +437,24 @@ async fn test_pacing_checkpoint_recovery_and_wal_replay() {
     // Reopen DB from the same directory to verify recovery
     {
         let recovered_db = BanditDB::new(&wal, &dir);
-        let report = recovered_db.campaign_pacing_report("durability_camp").unwrap().expect("pacing restored");
+        let report = recovered_db
+            .campaign_pacing_report("durability_camp")
+            .unwrap()
+            .expect("pacing restored");
         let r = &report.resources[0];
 
-        assert_eq!(r.decisions, d_before, "Decisions count must survive recovery");
-        assert_eq!(r.consumed, c_before, "Consumed amount must survive recovery");
-        assert!((r.lambda - l_before).abs() < 1e-9, "Lambda must match precisely across recovery");
+        assert_eq!(
+            r.decisions, d_before,
+            "Decisions count must survive recovery"
+        );
+        assert_eq!(
+            r.consumed, c_before,
+            "Consumed amount must survive recovery"
+        );
+        assert!(
+            (r.lambda - l_before).abs() < 1e-9,
+            "Lambda must match precisely across recovery"
+        );
     }
 }
 
@@ -416,7 +492,9 @@ async fn test_endgame_singularity_protection() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // Drive decisions all the way to horizon and past it
     for _ in 0..120 {
@@ -425,7 +503,10 @@ async fn test_endgame_singularity_protection() {
 
     let report = db.campaign_pacing_report("endgame_camp").unwrap().unwrap();
     let r = &report.resources[0];
-    assert!(r.lambda.is_finite(), "Lambda must remain finite during endgame");
+    assert!(
+        r.lambda.is_finite(),
+        "Lambda must remain finite during endgame"
+    );
     assert!(!r.lambda.is_nan(), "Lambda must not be NaN");
     assert!(r.decisions >= 100);
 }
@@ -471,7 +552,10 @@ async fn test_rollback_compatibility_unknown_wal_event() {
     // Opening BanditDB should gracefully skip the unknown event without crashing
     let db = BanditDB::new(&wal, &dir);
     let campaigns = db.campaigns.read();
-    assert!(campaigns.contains_key("test_rollback"), "Valid campaign must be recovered despite unknown event");
+    assert!(
+        campaigns.contains_key("test_rollback"),
+        "Valid campaign must be recovered despite unknown event"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -497,7 +581,17 @@ async fn test_pacing_validation_rejects_malformed_config() {
         adaptive: true,
     };
     assert!(matches!(
-        db.add_campaign_pacing("bad1", arms(&["a"]), 2, 1.0, Algorithm::Linucb, None, None, Some(bad1)).await,
+        db.add_campaign_pacing(
+            "bad1",
+            arms(&["a"]),
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+            Some(bad1)
+        )
+        .await,
         Err(EngineError::BadRequest(_))
     ));
 
@@ -515,7 +609,17 @@ async fn test_pacing_validation_rejects_malformed_config() {
         adaptive: true,
     };
     assert!(matches!(
-        db.add_campaign_pacing("bad2", arms(&["a"]), 2, 1.0, Algorithm::Linucb, None, None, Some(bad2)).await,
+        db.add_campaign_pacing(
+            "bad2",
+            arms(&["a"]),
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+            Some(bad2)
+        )
+        .await,
         Err(EngineError::BadRequest(_))
     ));
 
@@ -533,7 +637,17 @@ async fn test_pacing_validation_rejects_malformed_config() {
         adaptive: true,
     };
     assert!(matches!(
-        db.add_campaign_pacing("bad3", arms(&["a"]), 2, 1.0, Algorithm::Linucb, None, None, Some(bad3)).await,
+        db.add_campaign_pacing(
+            "bad3",
+            arms(&["a"]),
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+            Some(bad3)
+        )
+        .await,
         Err(EngineError::BadRequest(_))
     ));
 
@@ -562,7 +676,17 @@ async fn test_pacing_validation_rejects_malformed_config() {
         adaptive: true,
     };
     assert!(matches!(
-        db.add_campaign_pacing("bad4", arms(&["a"]), 2, 1.0, Algorithm::Linucb, None, None, Some(bad4)).await,
+        db.add_campaign_pacing(
+            "bad4",
+            arms(&["a"]),
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+            Some(bad4)
+        )
+        .await,
         Err(EngineError::BadRequest(_))
     ));
 }
@@ -580,17 +704,17 @@ async fn test_pacing_consumed_wal_replay_restores_post_checkpoint_state() {
 
     let mut costs = HashMap::new();
     costs.insert("costly".to_string(), 3.0);
-    costs.insert("free".to_string(),   0.0);
+    costs.insert("free".to_string(), 0.0);
 
     let pacing = PacingConfig {
         resources: vec![ResourceConstraint {
-            name:           "bandwidth".to_string(),
-            budget:         1_000.0,
-            horizon:        10_000,
-            step_size:      Some(0.05),
-            lambda_max:     Some(4.0),
+            name: "bandwidth".to_string(),
+            budget: 1_000.0,
+            horizon: 10_000,
+            step_size: Some(0.05),
+            lambda_max: Some(4.0),
             initial_lambda: Some(0.5),
-            arm_costs:      costs,
+            arm_costs: costs,
         }],
         adaptive: false,
     };
@@ -606,12 +730,16 @@ async fn test_pacing_consumed_wal_replay_restores_post_checkpoint_state() {
             None,
             None,
             Some(pacing),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Phase 1: 5 predictions before checkpoint — force the costly arm.
         let only_costly = ArmFilter::include(vec!["costly".to_string()]);
         for _ in 0..5 {
-            let (_, iid) = db.predict_filtered("replay_camp", vec![1.0, 0.0], &only_costly).unwrap();
+            let (_, iid) = db
+                .predict_filtered("replay_camp", vec![1.0, 0.0], &only_costly)
+                .unwrap();
             db.reward(&iid, 1.0).await.unwrap();
         }
 
@@ -621,7 +749,9 @@ async fn test_pacing_consumed_wal_replay_restores_post_checkpoint_state() {
         // Phase 2: 3 more predictions after checkpoint (WAL slice only).
         // Each emits one Predicted + one PacingConsumed event.
         for _ in 0..3 {
-            let (_, iid) = db.predict_filtered("replay_camp", vec![1.0, 0.0], &only_costly).unwrap();
+            let (_, iid) = db
+                .predict_filtered("replay_camp", vec![1.0, 0.0], &only_costly)
+                .unwrap();
             db.reward(&iid, 1.0).await.unwrap();
         }
 
@@ -678,13 +808,13 @@ async fn test_pacing_without_pacing_consumed_events_loads_safely() {
 
     let pacing = PacingConfig {
         resources: vec![ResourceConstraint {
-            name:           "cpu".to_string(),
-            budget:         500.0,
-            horizon:        5_000,
-            step_size:      Some(0.01),
-            lambda_max:     Some(3.0),
+            name: "cpu".to_string(),
+            budget: 500.0,
+            horizon: 5_000,
+            step_size: Some(0.01),
+            lambda_max: Some(3.0),
             initial_lambda: Some(0.0),
-            arm_costs:      costs,
+            arm_costs: costs,
         }],
         adaptive: false,
     };
@@ -693,30 +823,33 @@ async fn test_pacing_without_pacing_consumed_events_loads_safely() {
     // Mimics a WAL slice from a pre-schema binary.
     {
         let mut file = std::fs::OpenOptions::new()
-            .create(true).truncate(true).write(true)
-            .open(&wal).unwrap();
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&wal)
+            .unwrap();
 
         let created = DbEvent::CampaignCreated {
-            campaign_id:           "rollback_camp".to_string(),
-            arms:                  vec!["arm_a".to_string(), "arm_b".to_string()],
-            feature_dim:           2,
-            alpha:                 1.0,
-            algorithm:             Algorithm::Linucb,
-            metadata:              None,
+            campaign_id: "rollback_camp".to_string(),
+            arms: vec!["arm_a".to_string(), "arm_b".to_string()],
+            feature_dim: 2,
+            alpha: 1.0,
+            algorithm: Algorithm::Linucb,
+            metadata: None,
             decay_half_life_hours: None,
-            pacing:                Some(pacing),
+            pacing: Some(pacing),
         };
         writeln!(file, "{}", serde_json::to_string(&created).unwrap()).unwrap();
 
         for i in 0..10u32 {
             let predicted = DbEvent::Predicted {
-                interaction_id:   format!("iid-{i}"),
-                campaign_id:      "rollback_camp".to_string(),
-                arm_id:           "arm_a".to_string(),
-                context:          vec![1.0, 0.0],
-                timestamp_secs:   1_700_000_000 + i as u64,
+                interaction_id: format!("iid-{i}"),
+                campaign_id: "rollback_camp".to_string(),
+                arm_id: "arm_a".to_string(),
+                context: vec![1.0, 0.0],
+                timestamp_secs: 1_700_000_000 + i as u64,
                 arm_propensities: None,
-                is_reemit:        false,
+                is_reemit: false,
             };
             writeln!(file, "{}", serde_json::to_string(&predicted).unwrap()).unwrap();
         }
@@ -731,9 +864,9 @@ async fn test_pacing_without_pacing_consumed_events_loads_safely() {
 
     // Old-binary WAL: no PacingConsumed replayed → consumed stays at 0.
     // Conservatively correct: under-counts, never over-counts.
-    assert!(r.lambda.is_finite(),  "lambda must be finite");
-    assert!(!r.lambda.is_nan(),    "lambda must not be NaN");
-    assert!(r.consumed >= 0.0,     "consumed must be non-negative");
+    assert!(r.lambda.is_finite(), "lambda must be finite");
+    assert!(!r.lambda.is_nan(), "lambda must not be NaN");
+    assert!(r.consumed >= 0.0, "consumed must be non-negative");
 
     // Predictions must still work after loading old-format WAL.
     assert!(

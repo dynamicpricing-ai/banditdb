@@ -2,7 +2,7 @@ use crate::state::ArmState;
 use ndarray::{Array1, Array2, Axis};
 
 /// Cholesky decomposition.
-/// Currently a manual O(d^3) implementation. 
+/// Currently a manual O(d^3) implementation.
 /// TODO: Integrate ndarray-linalg with a BLAS backend for d > 100.
 pub(crate) fn cholesky(m: &Array2<f64>) -> Array2<f64> {
     let n = m.shape()[0];
@@ -10,7 +10,9 @@ pub(crate) fn cholesky(m: &Array2<f64>) -> Array2<f64> {
     for i in 0..n {
         for j in 0..=i {
             let mut s = m[[i, j]];
-            for k in 0..j { s -= l[[i, k]] * l[[j, k]]; }
+            for k in 0..j {
+                s -= l[[i, k]] * l[[j, k]];
+            }
             if i == j {
                 l[[i, j]] = s.max(0.0).sqrt();
             } else if l[[j, j]] > 1e-10 {
@@ -57,10 +59,10 @@ impl ArmState {
             return;
         }
 
-        let a_inv_x   = self.a_inv.dot(context);
+        let a_inv_x = self.a_inv.dot(context);
         let x_a_inv_x = context.dot(&a_inv_x);
-        let col       = a_inv_x.clone().insert_axis(Axis(1));
-        let row       = a_inv_x.clone().insert_axis(Axis(0));
+        let col = a_inv_x.clone().insert_axis(Axis(1));
+        let row = a_inv_x.clone().insert_axis(Axis(0));
         let numerator = col.dot(&row);
 
         self.a_inv = &self.a_inv - &(numerator / (1.0 + x_a_inv_x));
@@ -70,7 +72,7 @@ impl ArmState {
         // otherwise cause score() variance and cholesky() to diverge from the true posterior.
         self.a_inv = (&self.a_inv + &self.a_inv.t()) * 0.5;
 
-        self.b     = &self.b + &(context * reward);
+        self.b = &self.b + &(context * reward);
         self.theta = self.a_inv.dot(&self.b);
 
         // Invalidate Cholesky cache — recomputed lazily on next score_ts call.

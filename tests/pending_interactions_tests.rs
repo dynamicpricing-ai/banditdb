@@ -9,8 +9,8 @@
 //!      campaign with a low conversion rate rewrote its whole backlog each time.
 //!      They now travel inside the checkpoint instead.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, CheckpointData};
+use banditdb::BanditDB;
 use std::fs;
 use std::sync::atomic::Ordering;
 
@@ -18,8 +18,17 @@ async fn setup(dir: &str) -> BanditDB {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("c", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "c",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     db
 }
 
@@ -76,7 +85,9 @@ async fn checkpoint_carries_unmatched_predictions() {
     // 10 rewarded (matched), 15 left in flight.
     for i in 0..10 {
         let (arm, iid) = db.predict("c", ctx(i)).expect("predict");
-        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 })
+            .await
+            .expect("reward");
     }
     let mut in_flight = Vec::new();
     for i in 10..25 {
@@ -88,12 +99,16 @@ async fn checkpoint_carries_unmatched_predictions() {
     let cp = read_checkpoint(dir);
 
     assert_eq!(
-        cp.pending_interactions.len(), in_flight.len(),
+        cp.pending_interactions.len(),
+        in_flight.len(),
         "every unmatched prediction must be carried in the checkpoint; a missing one \
          is a reward that can never be matched after rotation"
     );
     for iid in &in_flight {
-        assert!(cp.pending_interactions.contains_key(iid), "in-flight {iid} not carried");
+        assert!(
+            cp.pending_interactions.contains_key(iid),
+            "in-flight {iid} not carried"
+        );
     }
 
     let _ = fs::remove_dir_all(dir);
@@ -106,7 +121,9 @@ async fn checkpoint_does_not_carry_matched_predictions() {
 
     for i in 0..20 {
         let (arm, iid) = db.predict("c", ctx(i)).expect("predict");
-        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 }).await.expect("reward");
+        db.reward(&iid, if arm == "A" { 1.0 } else { 0.0 })
+            .await
+            .expect("reward");
     }
     db.checkpoint().await.expect("checkpoint");
 
@@ -158,7 +175,11 @@ async fn repeated_checkpoints_do_not_rewrite_the_backlog() {
     let mut sizes = Vec::new();
     for _ in 0..4 {
         db.checkpoint().await.expect("checkpoint");
-        sizes.push(fs::metadata(format!("{dir}/wal.jsonl")).map(|m| m.len()).unwrap_or(0));
+        sizes.push(
+            fs::metadata(format!("{dir}/wal.jsonl"))
+                .map(|m| m.len())
+                .unwrap_or(0),
+        );
     }
 
     assert!(

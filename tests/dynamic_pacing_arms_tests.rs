@@ -1,5 +1,5 @@
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, ArmStatus, PacingConfig, ResourceConstraint, WarmStart};
+use banditdb::BanditDB;
 use std::collections::HashMap;
 
 fn temp_paths(test_name: &str) -> (String, String) {
@@ -27,13 +27,13 @@ async fn test_pacing_with_dynamic_arms() {
 
     let pacing = PacingConfig {
         resources: vec![ResourceConstraint {
-            name:           "budget".to_string(),
-            budget:         10.0,
-            horizon:        100,
-            step_size:      None,
-            lambda_max:     None,
+            name: "budget".to_string(),
+            budget: 10.0,
+            horizon: 100,
+            step_size: None,
+            lambda_max: None,
             initial_lambda: None,
-            arm_costs:      costs,
+            arm_costs: costs,
         }],
         adaptive: false,
     };
@@ -47,7 +47,9 @@ async fn test_pacing_with_dynamic_arms() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     // 2. Consume some budget.
     for _ in 0..5 {
@@ -61,13 +63,17 @@ async fn test_pacing_with_dynamic_arms() {
     assert!(consumed_initial > 0.0, "Budget should be consumed");
 
     // 3. Pause an arm.
-    db.set_arm_status("dyn_camp", "paid_2", ArmStatus::Paused).await.unwrap();
+    db.set_arm_status("dyn_camp", "paid_2", ArmStatus::Paused)
+        .await
+        .unwrap();
 
     // 4. Add a new arm dynamically.
     // It is not in the original pacing config arm_costs, so its cost defaults to 0.0.
-    db.add_arm("dyn_camp", "free_new", None, &WarmStart::None).await.unwrap();
+    db.add_arm("dyn_camp", "free_new", None, &WarmStart::None)
+        .await
+        .unwrap();
 
-    // 5. Predict again. 
+    // 5. Predict again.
     // We should be able to select both paid_1 and free_new.
     let mut selected_new = false;
     for _ in 0..20 {
@@ -81,8 +87,10 @@ async fn test_pacing_with_dynamic_arms() {
 
     // 6. Exhaust the budget.
     // Pause free_new temporarily so that only paid_1 is eligible, forcing budget consumption.
-    db.set_arm_status("dyn_camp", "free_new", ArmStatus::Paused).await.unwrap();
-    
+    db.set_arm_status("dyn_camp", "free_new", ArmStatus::Paused)
+        .await
+        .unwrap();
+
     // Predict until paid_1 exhausts the remaining budget.
     // Since free_new is paused, once budget is exhausted, predict will return BadRequest.
     let mut exhausted = false;
@@ -90,24 +98,35 @@ async fn test_pacing_with_dynamic_arms() {
         match db.predict("dyn_camp", vec![1.0, 0.0]) {
             Ok((arm, _)) => assert_eq!(arm, "paid_1", "Only paid_1 should be selectable right now"),
             Err(e) => {
-                assert!(e.to_string().contains("exhausted capacity"), "Expected capacity exhaustion error");
+                assert!(
+                    e.to_string().contains("exhausted capacity"),
+                    "Expected capacity exhaustion error"
+                );
                 exhausted = true;
                 break;
             }
         }
     }
     assert!(exhausted, "paid_1 should have exhausted the budget");
-    
+
     // Reactivate free_new.
-    db.set_arm_status("dyn_camp", "free_new", ArmStatus::Active).await.unwrap();
-    
+    db.set_arm_status("dyn_camp", "free_new", ArmStatus::Active)
+        .await
+        .unwrap();
+
     // Once budget is exhausted, paid_1 will be masked out by the Lagrangian engine.
     // Predict should then exclusively return the free_new arm.
     let report2 = db.campaign_pacing_report("dyn_camp").unwrap().unwrap();
-    assert!(report2.resources[0].is_exhausted, "Budget should be exhausted");
+    assert!(
+        report2.resources[0].is_exhausted,
+        "Budget should be exhausted"
+    );
 
     for _ in 0..10 {
         let (arm, _) = db.predict("dyn_camp", vec![1.0, 0.0]).unwrap();
-        assert_eq!(arm, "free_new", "Only unconstrained dynamic arm is left after budget exhaustion");
+        assert_eq!(
+            arm, "free_new",
+            "Only unconstrained dynamic arm is left after budget exhaustion"
+        );
     }
 }

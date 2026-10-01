@@ -2,20 +2,20 @@
 //! Covers the retrain path once it is driven by the background worker rather than
 //! by `checkpoint()`. These exercise the public entry points the worker calls.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, NeuralLinUCBConfig};
+use banditdb::BanditDB;
 use std::fs;
 
 fn neural_cfg(retrain_every: usize) -> NeuralLinUCBConfig {
     NeuralLinUCBConfig {
-        context_dim:   2,
-        embed_dim:     8,
-        hidden_dim:    32,
+        context_dim: 2,
+        embed_dim: 8,
+        hidden_dim: 32,
         hidden_layers: 2,
         retrain_every,
         retrain_steps: 5,
         learning_rate: 1e-3,
-        lambda:        1.0,
+        lambda: 1.0,
     }
 }
 
@@ -45,7 +45,8 @@ async fn setup(dir: &str, retrain_every: usize) -> BanditDB {
         Algorithm::NeuralLinUCB(cfg),
         None,
         None,
-    ).await
+    )
+    .await
     .unwrap();
     db
 }
@@ -89,7 +90,9 @@ async fn retrain_persists_weights_and_keeps_serving() {
     );
 
     // Arm matrices are rebuilt in the new embedding space; predict must still work.
-    let (arm, _) = db.predict("c", vec![0.5, 0.5]).expect("predict after retrain");
+    let (arm, _) = db
+        .predict("c", vec![0.5, 0.5])
+        .expect("predict after retrain");
     assert!(arm == "A" || arm == "B");
 
     let _ = fs::remove_dir_all(dir);
@@ -123,7 +126,8 @@ async fn worker_retrain_publishes_weights_to_prediction_path() {
     };
 
     assert_ne!(
-        before.to_vec(), after.to_vec(),
+        before.to_vec(),
+        after.to_vec(),
         "worker-driven retrain did not republish weights — predictions would still \
          be served by the pre-training snapshot"
     );
@@ -137,11 +141,23 @@ async fn retrain_campaign_is_safe_on_unknown_and_non_neural_campaigns() {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).unwrap();
     let db = BanditDB::new(&format!("{dir}/wal.jsonl"), dir);
-    db.add_campaign("linear", vec!["A".into(), "B".into()], 2, 1.0, Algorithm::Linucb, None, None).await
-        .unwrap();
+    db.add_campaign(
+        "linear",
+        vec!["A".into(), "B".into()],
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(!db.retrain_campaign("does_not_exist"));
-    assert!(!db.retrain_campaign("linear"), "a LinUCB campaign has no MLP to retrain");
+    assert!(
+        !db.retrain_campaign("linear"),
+        "a LinUCB campaign has no MLP to retrain"
+    );
     assert!(db.campaigns_due_for_retrain().is_empty());
 
     let _ = fs::remove_dir_all(dir);

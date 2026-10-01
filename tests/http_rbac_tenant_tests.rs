@@ -49,8 +49,10 @@ impl Server {
             .env("BANDITDB_RATE_LIMIT_PER_SEC", "100000")
             .env(
                 "BANDITDB_API_KEYS",
-                format!("{ADMIN_A}=admin:tenant_a;{WRITER_A}=writer:tenant_a;\
-                         {READER_A}=reader:tenant_a;{ADMIN_B}=admin:tenant_b"),
+                format!(
+                    "{ADMIN_A}=admin:tenant_a;{WRITER_A}=writer:tenant_a;\
+                         {READER_A}=reader:tenant_a;{ADMIN_B}=admin:tenant_b"
+                ),
             )
             .env("BANDITDB_TENANT_MODE", "true")
             .stdout(Stdio::null())
@@ -60,7 +62,11 @@ impl Server {
         }
 
         let child = cmd.spawn().ok()?;
-        let server = Server { child, port, _dir: dir };
+        let server = Server {
+            child,
+            port,
+            _dir: dir,
+        };
 
         // Must be a real 200: curl still reports `__STATUS__000` on connection
         // refused, so "got a response" is not the same as "server is listening".
@@ -79,20 +85,32 @@ impl Server {
     }
 
     /// Returns (status, body). `None` if the server is unreachable.
-    fn request(&self, method: &str, path: &str, key: Option<&str>, body: Option<&str>)
-        -> Option<(u16, String)>
-    {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Option<&str>,
+    ) -> Option<(u16, String)> {
         let mut cmd = Command::new("curl");
-        cmd.arg("-sS").arg("--max-time").arg("10")
-            .arg("-o").arg("-")
-            .arg("-w").arg("\n__STATUS__%{http_code}")
-            .arg("-X").arg(method)
+        cmd.arg("-sS")
+            .arg("--max-time")
+            .arg("10")
+            .arg("-o")
+            .arg("-")
+            .arg("-w")
+            .arg("\n__STATUS__%{http_code}")
+            .arg("-X")
+            .arg(method)
             .arg(self.url(path));
         if let Some(k) = key {
             cmd.arg("-H").arg(format!("X-Api-Key: {k}"));
         }
         if let Some(b) = body {
-            cmd.arg("-H").arg("Content-Type: application/json").arg("-d").arg(b);
+            cmd.arg("-H")
+                .arg("Content-Type: application/json")
+                .arg("-d")
+                .arg(b);
         }
         let out = cmd.output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -108,16 +126,25 @@ impl Server {
     }
 
     fn create_campaign(&self, key: &str, id: &str) -> u16 {
-        self.post("/campaign", Some(key),
-            &format!(r#"{{"campaign_id":"{id}","arms":["A","B"],"feature_dim":2,"alpha":1.0}}"#))
-            .map(|(s, _)| s).unwrap_or(0)
+        self.post(
+            "/campaign",
+            Some(key),
+            &format!(r#"{{"campaign_id":"{id}","arms":["A","B"],"feature_dim":2,"alpha":1.0}}"#),
+        )
+        .map(|(s, _)| s)
+        .unwrap_or(0)
     }
 
     /// Predict and return the interaction id.
     fn predict(&self, key: &str, campaign: &str) -> Option<String> {
-        let (status, body) = self.post("/predict", Some(key),
-            &format!(r#"{{"campaign_id":"{campaign}","context":[0.5,0.5]}}"#))?;
-        if status != 200 { return None; }
+        let (status, body) = self.post(
+            "/predict",
+            Some(key),
+            &format!(r#"{{"campaign_id":"{campaign}","context":[0.5,0.5]}}"#),
+        )?;
+        if status != 200 {
+            return None;
+        }
         let v: serde_json::Value = serde_json::from_str(&body).ok()?;
         v["interaction_id"].as_str().map(str::to_string)
     }
@@ -128,7 +155,10 @@ macro_rules! server_or_skip {
     ($port:expr, $env:expr) => {
         match Server::start($port, $env) {
             Some(s) => s,
-            None => { eprintln!("SKIPPED: could not start server on port {}", $port); return; }
+            None => {
+                eprintln!("SKIPPED: could not start server on port {}", $port);
+                return;
+            }
         }
     };
 }
@@ -143,13 +173,19 @@ fn public_health_exposes_no_campaign_identifiers() {
     assert_eq!(srv.create_campaign(ADMIN_A, "secret_launch"), 200);
 
     let (status, body) = srv.get("/health", None).expect("health reachable");
-    assert_eq!(status, 200, "health must stay public for load balancer probes");
+    assert_eq!(
+        status, 200,
+        "health must stay public for load balancer probes"
+    );
     assert!(
         !body.contains("secret_launch") && !body.contains("tenant_a"),
         "unauthenticated /health leaked campaign identifiers, which in tenant mode \
          means the customer list: {body}"
     );
-    assert!(body.contains("\"status\""), "health must still report status: {body}");
+    assert!(
+        body.contains("\"status\""),
+        "health must still report status: {body}"
+    );
 }
 
 #[test]
@@ -161,10 +197,18 @@ fn health_detail_requires_a_key_and_is_tenant_scoped() {
     let (status, _) = srv.get("/health/detail", None).expect("reachable");
     assert_eq!(status, 401, "health detail must require authentication");
 
-    let (status, body) = srv.get("/health/detail", Some(READER_A)).expect("reachable");
+    let (status, body) = srv
+        .get("/health/detail", Some(READER_A))
+        .expect("reachable");
     assert_eq!(status, 200);
-    assert!(body.contains("camp_a"), "tenant must see its own campaign: {body}");
-    assert!(!body.contains("camp_b"), "tenant must not see another tenant's campaign: {body}");
+    assert!(
+        body.contains("camp_a"),
+        "tenant must see its own campaign: {body}"
+    );
+    assert!(
+        !body.contains("camp_b"),
+        "tenant must not see another tenant's campaign: {body}"
+    );
 }
 
 #[test]
@@ -185,8 +229,10 @@ const OPERATOR: &str = "key-operator";
 /// Keys for the tests that also need an operator: an admin bound to no tenant,
 /// which is what Prometheus scrapes with.
 fn keys_with_operator() -> String {
-    format!("{ADMIN_A}=admin:tenant_a;{WRITER_A}=writer:tenant_a;\
-             {READER_A}=reader:tenant_a;{ADMIN_B}=admin:tenant_b;{OPERATOR}=admin")
+    format!(
+        "{ADMIN_A}=admin:tenant_a;{WRITER_A}=writer:tenant_a;\
+             {READER_A}=reader:tenant_a;{ADMIN_B}=admin:tenant_b;{OPERATOR}=admin"
+    )
 }
 
 /// `/metrics` labels series with campaign and arm ids, so it must be scoped like
@@ -201,17 +247,29 @@ fn metrics_are_tenant_scoped() {
 
     let (status, body) = srv.get("/metrics", Some(READER_A)).expect("reachable");
     assert_eq!(status, 200);
-    assert!(body.contains(r#"campaign="camp_a""#), "a tenant must see its own campaigns: {body}");
-    assert!(!body.contains("camp_b") && !body.contains("tenant_b"),
-        "a tenant must not see another tenant's campaigns: {body}");
-    assert!(!body.contains("banditdb_http_requests_total"),
-        "process-wide series describe every tenant's traffic: {body}");
+    assert!(
+        body.contains(r#"campaign="camp_a""#),
+        "a tenant must see its own campaigns: {body}"
+    );
+    assert!(
+        !body.contains("camp_b") && !body.contains("tenant_b"),
+        "a tenant must not see another tenant's campaigns: {body}"
+    );
+    assert!(
+        !body.contains("banditdb_http_requests_total"),
+        "process-wide series describe every tenant's traffic: {body}"
+    );
 
     let (status, body) = srv.get("/metrics", Some(OPERATOR)).expect("reachable");
     assert_eq!(status, 200);
-    assert!(body.contains("tenant_a/camp_a") && body.contains("tenant_b/camp_b"),
-        "the operator sees every campaign: {body}");
-    assert!(body.contains("banditdb_wal_healthy"), "and the process-wide series: {body}");
+    assert!(
+        body.contains("tenant_a/camp_a") && body.contains("tenant_b/camp_b"),
+        "the operator sees every campaign: {body}"
+    );
+    assert!(
+        body.contains("banditdb_wal_healthy"),
+        "and the process-wide series: {body}"
+    );
 }
 
 /// Public metrics exist so Prometheus can scrape without a key. Anonymous output
@@ -219,21 +277,32 @@ fn metrics_are_tenant_scoped() {
 #[test]
 fn public_metrics_carry_no_campaign_labels() {
     let keys = keys_with_operator();
-    let srv = server_or_skip!(18310, &[
-        ("BANDITDB_API_KEYS", keys.as_str()),
-        ("BANDITDB_METRICS_PUBLIC", "true"),
-    ]);
+    let srv = server_or_skip!(
+        18310,
+        &[
+            ("BANDITDB_API_KEYS", keys.as_str()),
+            ("BANDITDB_METRICS_PUBLIC", "true"),
+        ]
+    );
     assert_eq!(srv.create_campaign(ADMIN_A, "camp_a"), 200);
 
     let (status, body) = srv.get("/metrics", None).expect("reachable");
     assert_eq!(status, 200, "public metrics must not need a key");
-    assert!(body.contains("banditdb_wal_healthy"), "process health must be present: {body}");
-    assert!(!body.contains("camp_a") && !body.contains("campaign="),
-        "anonymous metrics leaked campaign identifiers: {body}");
+    assert!(
+        body.contains("banditdb_wal_healthy"),
+        "process health must be present: {body}"
+    );
+    assert!(
+        !body.contains("camp_a") && !body.contains("campaign="),
+        "anonymous metrics leaked campaign identifiers: {body}"
+    );
 
     // A key still narrows or widens the view as usual.
     let (_, body) = srv.get("/metrics", Some(OPERATOR)).expect("reachable");
-    assert!(body.contains("tenant_a/camp_a"), "the operator still sees campaigns: {body}");
+    assert!(
+        body.contains("tenant_a/camp_a"),
+        "the operator still sees campaigns: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +317,13 @@ fn tenant_cannot_reward_another_tenants_interaction() {
     let iid = srv.predict(ADMIN_B, "b_camp").expect("tenant B predicts");
 
     // Tenant A holds a valid writer key and the interaction id.
-    let (status, _) = srv.post("/reward", Some(WRITER_A),
-        &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#)).expect("reachable");
+    let (status, _) = srv
+        .post(
+            "/reward",
+            Some(WRITER_A),
+            &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#),
+        )
+        .expect("reachable");
     assert_eq!(
         status, 404,
         "/reward names its target by interaction id alone; without an ownership check \
@@ -257,9 +331,17 @@ fn tenant_cannot_reward_another_tenants_interaction() {
     );
 
     // The rightful owner still can.
-    let (status, _) = srv.post("/reward", Some(ADMIN_B),
-        &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#)).expect("reachable");
-    assert_eq!(status, 200, "the owning tenant must still be able to reward");
+    let (status, _) = srv
+        .post(
+            "/reward",
+            Some(ADMIN_B),
+            &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#),
+        )
+        .expect("reachable");
+    assert_eq!(
+        status, 200,
+        "the owning tenant must still be able to reward"
+    );
 }
 
 #[test]
@@ -269,12 +351,19 @@ fn campaign_reads_are_tenant_scoped() {
 
     let (status, body) = srv.get("/campaigns", Some(ADMIN_B)).expect("reachable");
     assert_eq!(status, 200);
-    assert!(!body.contains("only_a"), "campaign list crossed tenants: {body}");
+    assert!(
+        !body.contains("only_a"),
+        "campaign list crossed tenants: {body}"
+    );
 
-    let (status, _) = srv.get("/campaign/only_a", Some(ADMIN_B)).expect("reachable");
+    let (status, _) = srv
+        .get("/campaign/only_a", Some(ADMIN_B))
+        .expect("reachable");
     assert_eq!(status, 404, "direct fetch crossed tenants");
 
-    let (status, _) = srv.get("/campaign/only_a/report", Some(ADMIN_B)).expect("reachable");
+    let (status, _) = srv
+        .get("/campaign/only_a/report", Some(ADMIN_B))
+        .expect("reachable");
     assert_eq!(status, 404, "report crossed tenants");
 }
 
@@ -283,9 +372,14 @@ fn export_listing_is_tenant_scoped() {
     let srv = server_or_skip!(18306, &[]);
     assert_eq!(srv.create_campaign(ADMIN_A, "exp_a"), 200);
     let iid = srv.predict(ADMIN_A, "exp_a").expect("predict");
-    srv.post("/reward", Some(ADMIN_A),
-        &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#)).expect("reward");
-    srv.post("/checkpoint", Some(ADMIN_A), "{}").expect("checkpoint writes parquet");
+    srv.post(
+        "/reward",
+        Some(ADMIN_A),
+        &format!(r#"{{"interaction_id":"{iid}","reward":1.0}}"#),
+    )
+    .expect("reward");
+    srv.post("/checkpoint", Some(ADMIN_A), "{}")
+        .expect("checkpoint writes parquet");
 
     let (status, body) = srv.get("/export", Some(ADMIN_B)).expect("reachable");
     // 404 is acceptable when no exports exist at all; 200 must not name tenant A.
@@ -309,23 +403,46 @@ fn roles_are_enforced_per_route() {
     // Reader may read but not write.
     assert_eq!(srv.get("/campaigns", Some(READER_A)).unwrap().0, 200);
     assert_eq!(
-        srv.post("/predict", Some(READER_A), r#"{"campaign_id":"rbac","context":[0.5,0.5]}"#).unwrap().0,
-        403, "reader must not reach a writer route"
+        srv.post(
+            "/predict",
+            Some(READER_A),
+            r#"{"campaign_id":"rbac","context":[0.5,0.5]}"#
+        )
+        .unwrap()
+        .0,
+        403,
+        "reader must not reach a writer route"
     );
 
     // Writer may predict but not create or delete campaigns.
     assert_eq!(
-        srv.post("/predict", Some(WRITER_A), r#"{"campaign_id":"rbac","context":[0.5,0.5]}"#).unwrap().0,
+        srv.post(
+            "/predict",
+            Some(WRITER_A),
+            r#"{"campaign_id":"rbac","context":[0.5,0.5]}"#
+        )
+        .unwrap()
+        .0,
         200
     );
-    assert_eq!(srv.create_campaign(WRITER_A, "nope"), 403, "writer must not create campaigns");
     assert_eq!(
-        srv.request("DELETE", "/campaign/rbac", Some(WRITER_A), None).unwrap().0,
-        403, "writer must not delete campaigns"
+        srv.create_campaign(WRITER_A, "nope"),
+        403,
+        "writer must not create campaigns"
+    );
+    assert_eq!(
+        srv.request("DELETE", "/campaign/rbac", Some(WRITER_A), None)
+            .unwrap()
+            .0,
+        403,
+        "writer must not delete campaigns"
     );
 
     // Unknown key is rejected outright.
-    assert_eq!(srv.get("/campaigns", Some("not-a-real-key")).unwrap().0, 401);
+    assert_eq!(
+        srv.get("/campaigns", Some("not-a-real-key")).unwrap().0,
+        401
+    );
     assert_eq!(srv.get("/campaigns", None).unwrap().0, 401);
 }
 
@@ -375,19 +492,28 @@ fn arm_lifecycle_routes_are_wired_and_admin_only() {
 
     // Structural changes need admin; a writer key must not reshape a campaign.
     assert_eq!(
-        srv.post("/campaign/arms/arms", Some(WRITER_A), r#"{"arm_id":"C"}"#).unwrap().0,
-        403, "adding an arm must require admin"
+        srv.post("/campaign/arms/arms", Some(WRITER_A), r#"{"arm_id":"C"}"#)
+            .unwrap()
+            .0,
+        403,
+        "adding an arm must require admin"
     );
 
-    let (status, _) = srv.post(
-        "/campaign/arms/arms", Some(ADMIN_A),
-        r#"{"arm_id":"C","group":"grp","warm_start":{"from":"population","strength":1.0}}"#,
-    ).unwrap();
+    let (status, _) = srv
+        .post(
+            "/campaign/arms/arms",
+            Some(ADMIN_A),
+            r#"{"arm_id":"C","group":"grp","warm_start":{"from":"population","strength":1.0}}"#,
+        )
+        .unwrap();
     assert_eq!(status, 200, "admin must be able to add a warm-started arm");
 
     assert_eq!(
-        srv.post("/campaign/arms/arms", Some(ADMIN_A), r#"{"arm_id":"C"}"#).unwrap().0,
-        409, "a duplicate arm must conflict"
+        srv.post("/campaign/arms/arms", Some(ADMIN_A), r#"{"arm_id":"C"}"#)
+            .unwrap()
+            .0,
+        409,
+        "a duplicate arm must conflict"
     );
 
     // The new arm shows up with its status and group.
@@ -398,7 +524,13 @@ fn arm_lifecycle_routes_are_wired_and_admin_only() {
 
     // Pause it, then confirm a per-request filter cannot bring it back.
     assert_eq!(
-        srv.post("/campaign/arms/arms/C/status", Some(ADMIN_A), r#"{"status":"paused"}"#).unwrap().0,
+        srv.post(
+            "/campaign/arms/arms/C/status",
+            Some(ADMIN_A),
+            r#"{"status":"paused"}"#
+        )
+        .unwrap()
+        .0,
         200
     );
     let (_, body) = srv.get("/campaign/arms", Some(READER_A)).unwrap();
@@ -406,22 +538,41 @@ fn arm_lifecycle_routes_are_wired_and_admin_only() {
     assert_eq!(info["arms"]["C"]["status"], "paused");
 
     assert_eq!(
-        srv.post("/predict", Some(WRITER_A),
-            r#"{"campaign_id":"arms","context":[0.5,0.5],"eligible_arms":["C"]}"#).unwrap().0,
-        400, "a filter must not resurrect a paused arm"
+        srv.post(
+            "/predict",
+            Some(WRITER_A),
+            r#"{"campaign_id":"arms","context":[0.5,0.5],"eligible_arms":["C"]}"#
+        )
+        .unwrap()
+        .0,
+        400,
+        "a filter must not resurrect a paused arm"
     );
 
     // Per-request exclusion is a writer-level operation on /predict, not a state change.
-    let (status, body) = srv.post("/predict", Some(WRITER_A),
-        r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A"]}"#).unwrap();
+    let (status, body) = srv
+        .post(
+            "/predict",
+            Some(WRITER_A),
+            r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A"]}"#,
+        )
+        .unwrap();
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["arm_id"], "B", "with A excluded and C paused, only B is eligible");
+    assert_eq!(
+        v["arm_id"], "B",
+        "with A excluded and C paused, only B is eligible"
+    );
 
     // Excluding everything left is a client bug, not a reason to serve a paused arm.
     assert_eq!(
-        srv.post("/predict", Some(WRITER_A),
-            r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A","B"]}"#).unwrap().0,
+        srv.post(
+            "/predict",
+            Some(WRITER_A),
+            r#"{"campaign_id":"arms","context":[0.5,0.5],"exclude_arms":["A","B"]}"#
+        )
+        .unwrap()
+        .0,
         400
     );
 }

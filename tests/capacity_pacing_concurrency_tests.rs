@@ -1,6 +1,6 @@
-use banditdb::BanditDB;
 use banditdb::engine::ArmFilter;
 use banditdb::state::{Algorithm, PacingConfig, ResourceConstraint};
+use banditdb::BanditDB;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -31,13 +31,13 @@ async fn test_pacing_cas_contention_and_exact_consumption() {
 
     let pacing = PacingConfig {
         resources: vec![ResourceConstraint {
-            name:           "compute".to_string(),
-            budget:         100_000.0,
-            horizon:        100_000,
-            step_size:      Some(0.01),
-            lambda_max:     Some(10.0),
+            name: "compute".to_string(),
+            budget: 100_000.0,
+            horizon: 100_000,
+            step_size: Some(0.01),
+            lambda_max: Some(10.0),
             initial_lambda: Some(0.0),
-            arm_costs:      costs,
+            arm_costs: costs,
         }],
         adaptive: false,
     };
@@ -51,7 +51,9 @@ async fn test_pacing_cas_contention_and_exact_consumption() {
         None,
         None,
         Some(pacing),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let num_tasks = 100;
     let requests_per_task = 100;
@@ -64,7 +66,9 @@ async fn test_pacing_cas_contention_and_exact_consumption() {
         handles.push(tokio::spawn(async move {
             let filter = ArmFilter::include(vec!["paid".to_string()]);
             for _ in 0..requests_per_task {
-                let (_, iid) = db_clone.predict_filtered("concurrent_camp", vec![1.0, 0.0], &filter).unwrap();
+                let (_, iid) = db_clone
+                    .predict_filtered("concurrent_camp", vec![1.0, 0.0], &filter)
+                    .unwrap();
                 db_clone.reward(&iid, 1.0).await.unwrap();
             }
         }));
@@ -74,9 +78,12 @@ async fn test_pacing_cas_contention_and_exact_consumption() {
         h.await.unwrap();
     }
 
-    let report = db.campaign_pacing_report("concurrent_camp").unwrap().unwrap();
+    let report = db
+        .campaign_pacing_report("concurrent_camp")
+        .unwrap()
+        .unwrap();
     let r = &report.resources[0];
-    
+
     // Exactly 100 * 100 = 10,000 decisions. Cost is 1.0 each.
     let expected_decisions = (num_tasks * requests_per_task) as u64;
     let expected_consumed = expected_decisions as f64;

@@ -14,7 +14,9 @@ use std::fs;
 use std::sync::atomic::Ordering;
 
 fn reward_count(db: &BanditDB) -> u64 {
-    db.campaigns.read()["c"].arms.read()["a"].reward_count.load(Ordering::Relaxed)
+    db.campaigns.read()["c"].arms.read()["a"]
+        .reward_count
+        .load(Ordering::Relaxed)
 }
 
 // Single-threaded runtime: the WAL writer cannot run until the test awaits, so a
@@ -29,18 +31,26 @@ async fn reward_for_dropped_prediction_survives_restart() {
     fs::create_dir_all(dir).unwrap();
 
     let db = BanditDB::new(&wal, dir);
-    db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+    db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None)
+        .await
+        .unwrap();
 
     let first = db.predict("c", vec![0.5, 0.5]).unwrap().1;
     let mut last = String::new();
     for _ in 0..100_010 {
         last = db.predict("c", vec![0.5, 0.5]).unwrap().1;
     }
-    assert!(db.wal_dropped.load(Ordering::Relaxed) > 0, "the burst must overflow the WAL queue");
+    assert!(
+        db.wal_dropped.load(Ordering::Relaxed) > 0,
+        "the burst must overflow the WAL queue"
+    );
 
     // Let the writer drain so the rewards themselves are not refused.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    db.event_tx.send(WalMessage::Checkpoint { reply: tx }).await.unwrap();
+    db.event_tx
+        .send(WalMessage::Checkpoint { reply: tx })
+        .await
+        .unwrap();
     rx.await.unwrap();
 
     db.reward(&first, 1.0).await.unwrap();
@@ -50,14 +60,21 @@ async fn reward_for_dropped_prediction_survives_restart() {
     // Only the reward whose prediction went unlogged pays for carrying it. Counted
     // on raw bytes so the check holds for both JSON and MessagePack WALs.
     let log = fs::read(&wal).unwrap();
-    let carried = log.windows(b"unlogged_prediction".len())
+    let carried = log
+        .windows(b"unlogged_prediction".len())
         .filter(|w| *w == b"unlogged_prediction")
         .count();
-    assert_eq!(carried, 1, "a reward whose prediction is in the WAL must not repeat it");
+    assert_eq!(
+        carried, 1,
+        "a reward whose prediction is in the WAL must not repeat it"
+    );
 
     drop(db);
     let db2 = BanditDB::new(&wal, dir);
-    assert_eq!(reward_count(&db2), 2,
-        "an acknowledged reward was lost on restart because its prediction record had been dropped");
+    assert_eq!(
+        reward_count(&db2),
+        2,
+        "an acknowledged reward was lost on restart because its prediction record had been dropped"
+    );
     let _ = fs::remove_dir_all(dir);
 }

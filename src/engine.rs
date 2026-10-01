@@ -1,29 +1,34 @@
-use crate::state::{Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent, EngineError, EntropyStatus, EntropyTrend, InteractionRecord, PacingCheckpoint, PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH};
-#[cfg(feature = "neural")]
-use crate::state::{ProgressiveConfig, TournamentOutcome};
 #[cfg(feature = "neural")]
 use crate::neural::{NeuralLinUCBState, NeuralWeights};
+use crate::state::{
+    Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint,
+    CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent,
+    EngineError, EntropyStatus, EntropyTrend, InteractionRecord, PacingCheckpoint, PacingConfig,
+    PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
+};
+#[cfg(feature = "neural")]
+use crate::state::{ProgressiveConfig, TournamentOutcome};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
+use polars::prelude::*;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, error::TrySendError, Sender};
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use polars::prelude::*;
 
 /// Basis-point bounds for the Progressive tournament traffic ramp.
-const BPS_FLOOR: u32 = 1_000;   // 10% — minimum challenger exploration
+const BPS_FLOOR: u32 = 1_000; // 10% — minimum challenger exploration
 #[cfg(feature = "neural")]
-const BPS_CEIL:  u32 = 9_000;   // 90% — maximum before full promotion
-const BPS_SCALE: u32 = 10_000;  // denominator for the U[0, BPS_SCALE) draw
+const BPS_CEIL: u32 = 9_000; // 90% — maximum before full promotion
+const BPS_SCALE: u32 = 10_000; // denominator for the U[0, BPS_SCALE) draw
 
 pub enum WalMessage {
     Event {
@@ -36,16 +41,18 @@ pub enum WalMessage {
         /// means the caller did not ask to be told.
         ack: Option<oneshot::Sender<Result<(), String>>>,
     },
-    Checkpoint { reply: oneshot::Sender<u64> },
+    Checkpoint {
+        reply: oneshot::Sender<u64>,
+    },
     /// Discard the WAL prefix that checkpoint `generation` subsumes.
     /// `[segment_start, checkpoint_offset)` — the events since the previous
     /// checkpoint — is kept as `wal_segment.<generation>` first, so the previous
     /// checkpoint stays a lossless fallback.
     Rotate {
         checkpoint_offset: u64,
-        segment_start:     u64,
-        generation:        u64,
-        reply:             oneshot::Sender<()>,
+        segment_start: u64,
+        generation: u64,
+        reply: oneshot::Sender<()>,
     },
 }
 
@@ -78,13 +85,16 @@ pub enum Durability {
 /// WAL serialisation format.
 /// Controlled by `BANDITDB_WAL_FORMAT` (default: json, opt-in: msgpack).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum WalFormat { Json, Msgpack }
+pub enum WalFormat {
+    Json,
+    Msgpack,
+}
 
 impl WalFormat {
     pub fn from_env() -> Self {
         match std::env::var("BANDITDB_WAL_FORMAT").as_deref() {
             Ok("msgpack") => WalFormat::Msgpack,
-            _             => WalFormat::Json,
+            _ => WalFormat::Json,
         }
     }
 }
@@ -107,21 +117,25 @@ fn detect_wal_format(path: &str) -> WalFormat {
 /// `start_offset` is the byte to start reading from (0 for the full file).
 /// `end_offset`   is the exclusive byte limit (0 means read to end-of-file).
 fn read_wal_slice(
-    path:         &str,
+    path: &str,
     start_offset: u64,
-    end_offset:   u64,
-    format:       WalFormat,
+    end_offset: u64,
+    format: WalFormat,
 ) -> Vec<DbEvent> {
-    let Ok(mut file) = File::open(path) else { return vec![] };
+    let Ok(mut file) = File::open(path) else {
+        return vec![];
+    };
 
     // For binary files the first 4 bytes are the magic header.
     // Adjust start_offset so we never seek into the middle of the magic.
     let data_start = match format {
         WalFormat::Msgpack => start_offset.max(WAL_MAGIC.len() as u64),
-        WalFormat::Json    => start_offset,
+        WalFormat::Json => start_offset,
     };
 
-    if file.seek(SeekFrom::Start(data_start)).is_err() { return vec![] }
+    if file.seek(SeekFrom::Start(data_start)).is_err() {
+        return vec![];
+    }
 
     let mut events = Vec::new();
 
@@ -145,16 +159,24 @@ fn read_wal_slice(
             }
         }
         WalFormat::Msgpack => {
-            let limit = if end_offset > 0 { end_offset.saturating_sub(data_start) } else { u64::MAX };
+            let limit = if end_offset > 0 {
+                end_offset.saturating_sub(data_start)
+            } else {
+                u64::MAX
+            };
             let mut reader = file.take(limit);
             let mut len_buf = [0u8; 4];
             while reader.read_exact(&mut len_buf).is_ok() {
                 let len = u32::from_le_bytes(len_buf) as usize;
                 let mut bytes = vec![0u8; len];
-                if reader.read_exact(&mut bytes).is_err() { break; }
+                if reader.read_exact(&mut bytes).is_err() {
+                    break;
+                }
                 match rmp_serde::from_slice::<DbEvent>(&bytes) {
                     Ok(DbEvent::Unknown) => {
-                        tracing::warn!("wal replay: unknown binary event variant encountered; skipping");
+                        tracing::warn!(
+                            "wal replay: unknown binary event variant encountered; skipping"
+                        );
                     }
                     Ok(e) => events.push(e),
                     Err(err) => {
@@ -218,7 +240,10 @@ fn wal_start_generation(path: &str, format: WalFormat) -> Option<u64> {
 
 /// Monotonic Unix timestamp in whole seconds. Returns 0 on the (impossible) pre-epoch case.
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Per-request arm eligibility, on top of each arm's own status.
@@ -241,16 +266,24 @@ pub struct ArmFilter {
 
 impl ArmFilter {
     pub fn include(arms: impl IntoIterator<Item = String>) -> Self {
-        Self { include: Some(arms.into_iter().collect()), exclude: HashSet::new() }
+        Self {
+            include: Some(arms.into_iter().collect()),
+            exclude: HashSet::new(),
+        }
     }
 
     pub fn exclude(arms: impl IntoIterator<Item = String>) -> Self {
-        Self { include: None, exclude: arms.into_iter().collect() }
+        Self {
+            include: None,
+            exclude: arms.into_iter().collect(),
+        }
     }
 
     pub fn allows(&self, arm_id: &str) -> bool {
         if let Some(inc) = &self.include {
-            if !inc.contains(arm_id) { return false; }
+            if !inc.contains(arm_id) {
+                return false;
+            }
         }
         !self.exclude.contains(arm_id)
     }
@@ -268,27 +301,27 @@ pub fn expected_context_dim(algo: &Algorithm, arm_dim: usize) -> usize {
 }
 
 pub struct Campaign {
-    pub alpha:                  f64,
-    pub algorithm:              Algorithm,
-    pub arms:                   RwLock<HashMap<String, ArmState>>,
-    pub challenger_arms:        Option<RwLock<HashMap<String, ArmState>>>,
-    pub metadata:               Option<serde_json::Value>,
+    pub alpha: f64,
+    pub algorithm: Algorithm,
+    pub arms: RwLock<HashMap<String, ArmState>>,
+    pub challenger_arms: Option<RwLock<HashMap<String, ArmState>>>,
+    pub metadata: Option<serde_json::Value>,
     /// Live network: owns the VarMap, replay buffer, and training state. Held only
     /// by the reward path, retraining, diagnostics, and recovery — never by `predict`.
     #[cfg(feature = "neural")]
-    pub neural:                 Option<parking_lot::Mutex<NeuralLinUCBState>>,
+    pub neural: Option<parking_lot::Mutex<NeuralLinUCBState>>,
     /// Published read-only weights for the prediction path. Swapped after each
     /// retrain. Readers clone the `Arc` and release the lock immediately, so a
     /// running retrain never blocks a prediction. See `refresh_neural_weights`.
     #[cfg(feature = "neural")]
-    pub neural_weights:         Option<RwLock<Arc<NeuralWeights>>>,
+    pub neural_weights: Option<RwLock<Arc<NeuralWeights>>>,
     /// Challenger traffic in basis points (0–10000). Progressive campaigns start
     /// at 1000 (10% exploration) and ramp up/down based on SNIPS tournament results.
     pub challenger_traffic_bps: AtomicU32,
     /// Tournament win streak persisted through checkpoints. See ProgressiveConfig.
-    pub tournament_wins:        std::sync::atomic::AtomicI32,
+    pub tournament_wins: std::sync::atomic::AtomicI32,
     /// Soft-deleted: archived campaigns are frozen — no new predictions or rewards.
-    pub archived:               AtomicBool,
+    pub archived: AtomicBool,
     /// f64 bits of the selection entropy computed at the last checkpoint.
     /// f64::NAN (the initial value) means no checkpoint has been written yet.
     pub last_checkpoint_entropy: AtomicU64,
@@ -301,15 +334,15 @@ pub struct Campaign {
 
 impl Campaign {
     pub fn new(
-        alpha:     f64,
+        alpha: f64,
         algorithm: Algorithm,
-        arms:      RwLock<HashMap<String, ArmState>>,
+        arms: RwLock<HashMap<String, ArmState>>,
         // None = derive challenger_arms from algorithm (new campaign).
         // Some(loaded) = restore checkpointed matrices (recovery path).
-        challenger_arms:       Option<RwLock<HashMap<String, ArmState>>>,
-        metadata:              Option<serde_json::Value>,
+        challenger_arms: Option<RwLock<HashMap<String, ArmState>>>,
+        metadata: Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
-        pacing:                Option<PacingState>,
+        pacing: Option<PacingState>,
     ) -> Self {
         // When challenger_arms is not explicitly provided (new campaign path), derive them
         // from the algorithm config so the caller doesn't have to duplicate the logic.
@@ -324,7 +357,8 @@ impl Campaign {
                     Algorithm::NeuralLinUCB(ncfg) => ncfg.embed_dim,
                     _ => base_dim,
                 };
-                let c_map: HashMap<String, ArmState> = arm_names.into_iter()
+                let c_map: HashMap<String, ArmState> = arm_names
+                    .into_iter()
                     .map(|name| (name, ArmState::new(challenger_dim)))
                     .collect();
                 Some(RwLock::new(c_map))
@@ -337,7 +371,10 @@ impl Campaign {
             Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => {
                 match NeuralLinUCBState::new(cfg) {
                     Ok(state) => Some(parking_lot::Mutex::new(state)),
-                    Err(e) => { tracing::error!(error = %e, "neural: failed to init network"); None }
+                    Err(e) => {
+                        tracing::error!(error = %e, "neural: failed to init network");
+                        None
+                    }
                 }
             }
             Algorithm::Progressive(cfg) => {
@@ -348,9 +385,14 @@ impl Campaign {
                 if let Some(neural_cfg) = neural_cfg {
                     match NeuralLinUCBState::new(neural_cfg) {
                         Ok(state) => Some(parking_lot::Mutex::new(state)),
-                        Err(e) => { tracing::error!(error = %e, "neural: failed to init challenger network"); None }
+                        Err(e) => {
+                            tracing::error!(error = %e, "neural: failed to init challenger network");
+                            None
+                        }
                     }
-                } else { None }
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -359,14 +401,19 @@ impl Campaign {
         // the first retrain. A snapshot failure leaves this None, and embed() then
         // falls back to the identity mapping rather than panicking.
         #[cfg(feature = "neural")]
-        let neural_weights = neural.as_ref().and_then(|n| {
-            match n.lock().snapshot() {
-                Ok(w)  => Some(RwLock::new(Arc::new(w))),
-                Err(e) => { tracing::error!(error = %e, "neural: failed to snapshot initial weights"); None }
+        let neural_weights = neural.as_ref().and_then(|n| match n.lock().snapshot() {
+            Ok(w) => Some(RwLock::new(Arc::new(w))),
+            Err(e) => {
+                tracing::error!(error = %e, "neural: failed to snapshot initial weights");
+                None
             }
         });
 
-        let initial_traffic = if let Algorithm::Progressive(_) = &algorithm { BPS_FLOOR } else { 0 };
+        let initial_traffic = if let Algorithm::Progressive(_) = &algorithm {
+            BPS_FLOOR
+        } else {
+            0
+        };
 
         Self {
             alpha,
@@ -378,9 +425,9 @@ impl Campaign {
             neural,
             #[cfg(feature = "neural")]
             neural_weights,
-            challenger_traffic_bps:  AtomicU32::new(initial_traffic),
-            tournament_wins:         std::sync::atomic::AtomicI32::new(0),
-            archived:                AtomicBool::new(false),
+            challenger_traffic_bps: AtomicU32::new(initial_traffic),
+            tournament_wins: std::sync::atomic::AtomicI32::new(0),
+            archived: AtomicBool::new(false),
             last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
             decay_half_life_hours,
             pacing,
@@ -398,19 +445,28 @@ impl Campaign {
             Algorithm::Progressive(cfg) => (cfg.base.as_ref(), Some(cfg.challenger.as_ref())),
             algo => (algo, None),
         };
-        let arm_dim = self.arms.read().get(arm_id).map(|a| a.theta.len())
+        let arm_dim = self
+            .arms
+            .read()
+            .get(arm_id)
+            .map(|a| a.theta.len())
             .ok_or_else(|| EngineError::NotFound(format!("Arm '{arm_id}' not found")))?;
-        let mut expected = vec![expected_context_dim(base_algo, arm_dim)];
+        
+        let expected_base = expected_context_dim(base_algo, arm_dim);
+        if context_len != expected_base {
+            return Err(EngineError::BadRequest(format!(
+                "Context dimension mismatch: expected {expected_base}, got {context_len}"
+            )));
+        }
+
         if let (Some(algo), Some(c_arms)) = (challenger_algo, &self.challenger_arms) {
             if let Some(c) = c_arms.read().get(arm_id) {
-                expected.push(expected_context_dim(algo, c.theta.len()));
-            }
-        }
-        for dim in expected {
-            if context_len != dim {
-                return Err(EngineError::BadRequest(format!(
-                    "Context dimension mismatch: expected {dim}, got {context_len}"
-                )));
+                let expected_chal = expected_context_dim(algo, c.theta.len());
+                if context_len != expected_chal {
+                    return Err(EngineError::BadRequest(format!(
+                        "Context dimension mismatch (challenger): expected {expected_chal}, got {context_len}"
+                    )));
+                }
             }
         }
         Ok(())
@@ -471,9 +527,11 @@ impl Campaign {
     /// `arms` guard across this call would reintroduce the inversion P0.1 removes.
     #[cfg(feature = "neural")]
     pub fn refresh_neural_weights(&self, campaign_id: &str) {
-        let (Some(neural), Some(weights)) = (&self.neural, &self.neural_weights) else { return };
+        let (Some(neural), Some(weights)) = (&self.neural, &self.neural_weights) else {
+            return;
+        };
         let snapshot = match neural.lock().snapshot() {
-            Ok(w)  => w,
+            Ok(w) => w,
             Err(e) => {
                 tracing::error!(campaign = %campaign_id, error = %e,
                     "neural: snapshot failed — predictions continue on the previous weights");
@@ -487,7 +545,6 @@ impl Campaign {
     pub fn embed(&self, context: &Array1<f64>) -> Array1<f64> {
         context.clone()
     }
-
 }
 
 /// Outcome of reading the on-disk checkpoint. Kept distinct from `Option` so a
@@ -522,13 +579,21 @@ pub enum CheckpointLoad {
 /// inspection of a data directory, never for serving.
 fn acquire_data_dir_lock(data_dir: &str) -> Option<File> {
     if std::env::var("BANDITDB_SKIP_DATA_DIR_LOCK").as_deref() == Ok("true") {
-        tracing::warn!(data_dir, "data directory lock skipped — concurrent writers will corrupt the WAL");
+        tracing::warn!(
+            data_dir,
+            "data directory lock skipped — concurrent writers will corrupt the WAL"
+        );
         return None;
     }
     let _ = fs::create_dir_all(data_dir);
     let path = format!("{data_dir}/banditdb.lock");
 
-    let file = match OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+    let file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
         Ok(f) => f,
         Err(e) => {
             tracing::error!(path, error = %e, "cannot open data directory lock — refusing to start");
@@ -544,7 +609,8 @@ fn acquire_data_dir_lock(data_dir: &str) -> Option<File> {
         if rc != 0 {
             let holder = fs::read_to_string(&path).unwrap_or_default();
             tracing::error!(
-                path, holder = holder.trim(),
+                path,
+                holder = holder.trim(),
                 "another BanditDB process already holds this data directory. Two writers \
                  would interleave WAL appends and corrupt it. Refusing to start."
             );
@@ -552,9 +618,11 @@ fn acquire_data_dir_lock(data_dir: &str) -> Option<File> {
         }
     }
 
-    let stamp = format!("pid={} host={}\n",
+    let stamp = format!(
+        "pid={} host={}\n",
         std::process::id(),
-        std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()));
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())
+    );
     let mut f = &file;
     use std::io::Write as _;
     let _ = f.write_all(stamp.as_bytes());
@@ -584,10 +652,14 @@ extern "C" {
 /// Retention is per campaign, newest first. `BANDITDB_EXPORT_RETAIN_SHARDS=0`
 /// disables pruning entirely.
 fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
-    if retain == 0 { return; }
+    if retain == 0 {
+        return;
+    }
 
     let prefix = format!("{campaign_id}_");
-    let Ok(entries) = fs::read_dir(export_dir) else { return };
+    let Ok(entries) = fs::read_dir(export_dir) else {
+        return;
+    };
 
     // Shard names embed a microsecond timestamp, so lexical order is chronological.
     let mut shards: Vec<String> = entries
@@ -595,15 +667,17 @@ fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.starts_with(&prefix) && n.ends_with(".parquet"))
         .collect();
-    if shards.len() <= retain { return; }
+    if shards.len() <= retain {
+        return;
+    }
     shards.sort();
 
     let doomed = shards.len() - retain;
     for name in shards.into_iter().take(doomed) {
         let path = format!("{export_dir}/{name}");
         match fs::remove_file(&path) {
-            Ok(())  => tracing::debug!(shard = %name, "export: pruned old shard"),
-            Err(e)  => tracing::warn!(shard = %name, error = %e, "export: could not prune shard"),
+            Ok(()) => tracing::debug!(shard = %name, "export: pruned old shard"),
+            Err(e) => tracing::warn!(shard = %name, error = %e, "export: could not prune shard"),
         }
     }
     tracing::info!(campaign = %campaign_id, pruned = doomed, retained = retain,
@@ -652,25 +726,25 @@ fn write_file_durable(dir: &str, tmp: &str, dest: &str, bytes: &[u8]) -> std::io
 /// WAL-order == memory-order consistency, the WAL writer would need to become the
 /// sole applier of events to memory, at the cost of one round-trip latency per request.
 pub struct BanditDB {
-    pub campaigns:        RwLock<HashMap<String, Campaign>>,
-    pub interactions:     Cache<String, InteractionRecord>,
-    pub event_tx:         Sender<WalMessage>,
-    pub rewarded_count:   AtomicU64,
-    pub wal_path:         String,
-    pub data_dir:         String,
+    pub campaigns: RwLock<HashMap<String, Campaign>>,
+    pub interactions: Cache<String, InteractionRecord>,
+    pub event_tx: Sender<WalMessage>,
+    pub rewarded_count: AtomicU64,
+    pub wal_path: String,
+    pub data_dir: String,
     /// Upper bound on feature_dim at campaign creation and context length at predict time.
     /// Prevents arm-matrix OOM from untrusted callers. Env: BANDITDB_MAX_FEATURE_DIM (default 4096).
-    pub max_feature_dim:  usize,
+    pub max_feature_dim: usize,
     /// Upper bound on the number of arms per campaign.
     /// Env: BANDITDB_MAX_ARMS (default 1000).
-    pub max_arms:         usize,
+    pub max_arms: usize,
     /// Upper bound on the number of campaigns this instance will create.
     ///
     /// `max_arms` and `max_feature_dim` bound one campaign; nothing bounded how
     /// many of them exist, so a client loop — a retrying job, a test suite pointed
     /// at the wrong host — could create campaigns until the process ran out of
     /// memory. Env: BANDITDB_MAX_CAMPAIGNS (default 10_000).
-    pub max_campaigns:    usize,
+    pub max_campaigns: usize,
     /// Upper bound on the estimated steady-state memory of a single campaign.
     ///
     /// Campaign count is a poor proxy for cost: two arms at d=4 is ~300 bytes,
@@ -692,19 +766,19 @@ pub struct BanditDB {
     pub max_context_magnitude: f64,
     /// False when the WAL writer task has encountered an unrecoverable I/O error.
     /// Exposed to the /health endpoint and checked by all write paths.
-    pub wal_healthy:      Arc<AtomicBool>,
+    pub wal_healthy: Arc<AtomicBool>,
     /// Best-effort prediction records discarded because the WAL writer fell behind.
     /// Sustained growth means predictions are going unlogged, so late rewards for
     /// them will not match. Exported as `banditdb_wal_dropped_total`.
-    pub wal_dropped:      AtomicU64,
+    pub wal_dropped: AtomicU64,
     /// Completed group-commit fsyncs. Ratio against reward throughput shows how
     /// effectively the commit window is batching. Exported as
     /// `banditdb_wal_fsync_total`.
-    pub wal_fsyncs:       Arc<AtomicU64>,
+    pub wal_fsyncs: Arc<AtomicU64>,
     /// Exclusive lock on `data_dir`, held for this instance's lifetime. Dropping
     /// the instance closes the fd and releases the flock, so the directory can be
     /// reopened — by recovery, or by a replacement process after a clean shutdown.
-    _data_dir_lock:   Option<File>,
+    _data_dir_lock: Option<File>,
     /// Pending interactions dropped because the cache hit its capacity limit.
     /// Each one is a prediction whose reward can no longer be matched, so this
     /// must be alerted on rather than merely graphed. Exported as
@@ -713,10 +787,10 @@ pub struct BanditDB {
     /// WAL serialisation format configured by `BANDITDB_WAL_FORMAT`. An existing
     /// WAL in the other format keeps it until the next rotation converts it, so
     /// readers detect the format from the file rather than trusting this.
-    pub wal_format:       WalFormat,
+    pub wal_format: WalFormat,
     /// Optional audit log channel. When set, write-path operations emit a JSON
     /// summary line to a dedicated audit file (separate from application logs).
-    pub audit_tx:             Option<tokio::sync::mpsc::Sender<String>>,
+    pub audit_tx: Option<tokio::sync::mpsc::Sender<String>>,
     /// Unix timestamp (seconds) of the last successful checkpoint. Used to compute
     /// elapsed time for time-aware campaign decay. Initialised to startup time so
     /// a restart followed immediately by checkpoint does not over-decay.
@@ -751,10 +825,10 @@ impl BanditDB {
         let data_dir_lock = acquire_data_dir_lock(data_dir);
         let (tx, mut rx) = channel::<WalMessage>(100_000);
 
-        let wal_healthy        = Arc::new(AtomicBool::new(true));
+        let wal_healthy = Arc::new(AtomicBool::new(true));
         let wal_healthy_writer = Arc::clone(&wal_healthy);
-        let wal_fsyncs         = Arc::new(AtomicU64::new(0));
-        let fsync_count        = Arc::clone(&wal_fsyncs);
+        let wal_fsyncs = Arc::new(AtomicU64::new(0));
+        let fsync_count = Arc::clone(&wal_fsyncs);
 
         // 1. Spawn the WAL writer task.
         //
@@ -777,7 +851,7 @@ impl BanditDB {
                 "WAL: the existing log is in a different format than BANDITDB_WAL_FORMAT; \
                  appending in its current format until the next checkpoint converts it");
         }
-        let path            = wal_path.to_string();
+        let path = wal_path.to_string();
         let writer_data_dir = data_dir.to_string();
 
         tokio::spawn(async move {
@@ -785,7 +859,7 @@ impl BanditDB {
             // between a configuration change and the rotation that applies it.
             let mut write_format = initial_format;
             let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
-                Ok(f)  => f,
+                Ok(f) => f,
                 Err(e) => {
                     tracing::error!(error = %e, path = %path, "WAL writer: cannot open file");
                     wal_healthy_writer.store(false, Ordering::SeqCst);
@@ -814,7 +888,8 @@ impl BanditDB {
             // The published RPO is this interval. BANDITDB_FSYNC_INTERVAL_MS=0
             // syncs every durable batch (lowest RPO, highest cost).
             let fsync_interval = Duration::from_millis(
-                std::env::var("BANDITDB_FSYNC_INTERVAL_MS").ok()
+                std::env::var("BANDITDB_FSYNC_INTERVAL_MS")
+                    .ok()
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(200),
             );
@@ -832,11 +907,13 @@ impl BanditDB {
                         // already wrote durable rather than holding it in cache.
                         if pending_durable {
                             match file.sync_all() {
-                                Ok(())  => {
+                                Ok(()) => {
                                     pending_durable = false;
                                     last_sync = std::time::Instant::now();
                                     fsync_count.fetch_add(1, Ordering::Relaxed);
-                                    for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
+                                    for tx in pending_acks.drain(..) {
+                                        let _ = tx.send(Ok(()));
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::error!(error = %e, "WAL writer: fsync failed — shutting down");
@@ -851,7 +928,7 @@ impl BanditDB {
                         }
                         match rx.recv().await {
                             Some(m) => m,
-                            None    => break,
+                            None => break,
                         }
                     }
                 };
@@ -859,22 +936,37 @@ impl BanditDB {
                 let mut fatal_err: Option<std::io::Error> = None;
 
                 match msg {
-                    WalMessage::Event { event, durable, ack } => {
+                    WalMessage::Event {
+                        event,
+                        durable,
+                        ack,
+                    } => {
                         let mut batch = vec![event];
-                        if let Some(tx) = ack { pending_acks.push(tx); }
+                        if let Some(tx) = ack {
+                            pending_acks.push(tx);
+                        }
                         // Tracks whether this batch carries state-bearing records.
                         // P0.3 uses it to decide whether the batch needs an fsync
                         // before the writer moves on.
                         let mut batch_durable = durable;
                         loop {
                             match rx.try_recv() {
-                                Ok(WalMessage::Event { event, durable, ack }) => {
+                                Ok(WalMessage::Event {
+                                    event,
+                                    durable,
+                                    ack,
+                                }) => {
                                     batch_durable |= durable;
-                                    if let Some(tx) = ack { pending_acks.push(tx); }
+                                    if let Some(tx) = ack {
+                                        pending_acks.push(tx);
+                                    }
                                     batch.push(event);
                                 }
-                                Ok(other) => { peeked = Some(other); break; }
-                                Err(_)    => break,
+                                Ok(other) => {
+                                    peeked = Some(other);
+                                    break;
+                                }
+                                Err(_) => break,
                             }
                         }
                         // Where this batch starts. An attempt that fails partway has
@@ -883,8 +975,11 @@ impl BanditDB {
                         // that did land, which replay would apply twice. So every
                         // failed attempt is truncated back to here.
                         let batch_start = match file.metadata() {
-                            Ok(m)  => Some(m.len()),
-                            Err(e) => { fatal_err = Some(e); None }
+                            Ok(m) => Some(m.len()),
+                            Err(e) => {
+                                fatal_err = Some(e);
+                                None
+                            }
                         };
                         let mut attempt = 0u32;
                         while let Some(batch_start) = batch_start {
@@ -893,28 +988,40 @@ impl BanditDB {
                                 for e in &batch {
                                     match write_format {
                                         WalFormat::Json => {
-                                            let json = serde_json::to_string(e.as_ref()).unwrap_or_default();
+                                            let json = serde_json::to_string(e.as_ref())
+                                                .unwrap_or_default();
                                             if let Err(err) = writeln!(file, "{json}") {
-                                                write_err = Some(err); break 'write;
+                                                write_err = Some(err);
+                                                break 'write;
                                             }
                                         }
                                         WalFormat::Msgpack => {
                                             match rmp_serde::to_vec_named(e.as_ref()) {
                                                 Err(err) => {
                                                     write_err = Some(std::io::Error::new(
-                                                        std::io::ErrorKind::InvalidData, err));
+                                                        std::io::ErrorKind::InvalidData,
+                                                        err,
+                                                    ));
                                                     break 'write;
                                                 }
                                                 Ok(bytes) => {
                                                     let len = (bytes.len() as u32).to_le_bytes();
-                                                    if let Err(err) = file.write_all(&len) { write_err = Some(err); break 'write; }
-                                                    if let Err(err) = file.write_all(&bytes) { write_err = Some(err); break 'write; }
+                                                    if let Err(err) = file.write_all(&len) {
+                                                        write_err = Some(err);
+                                                        break 'write;
+                                                    }
+                                                    if let Err(err) = file.write_all(&bytes) {
+                                                        write_err = Some(err);
+                                                        break 'write;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                if let Err(err) = file.flush() { write_err = Some(err); }
+                                if let Err(err) = file.flush() {
+                                    write_err = Some(err);
+                                }
                             }
                             match write_err {
                                 None => break,
@@ -924,18 +1031,22 @@ impl BanditDB {
                                     tracing::warn!(error = %e, attempt, delay_ms,
                                         "WAL writer: transient error — retrying");
                                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                                    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+                                    if let Ok(f) =
+                                        OpenOptions::new().create(true).append(true).open(&path)
+                                    {
                                         file = f;
                                     }
                                     if let Err(e) = file.set_len(batch_start) {
-                                        fatal_err = Some(e); break;
+                                        fatal_err = Some(e);
+                                        break;
                                     }
                                 }
                                 Some(e) => {
                                     // Best effort: the writer is shutting down either way,
                                     // but a clean tail keeps the next start simple.
                                     let _ = file.set_len(batch_start).and_then(|_| file.sync_all());
-                                    fatal_err = Some(e); break;
+                                    fatal_err = Some(e);
+                                    break;
                                 }
                             }
                         }
@@ -951,13 +1062,18 @@ impl BanditDB {
                         if batch_durable && fatal_err.is_none() {
                             pending_durable = true;
                         }
-                        if fatal_err.is_none() && pending_durable && last_sync.elapsed() >= fsync_interval {
+                        if fatal_err.is_none()
+                            && pending_durable
+                            && last_sync.elapsed() >= fsync_interval
+                        {
                             match file.sync_all() {
                                 Ok(()) => {
                                     pending_durable = false;
                                     last_sync = std::time::Instant::now();
                                     fsync_count.fetch_add(1, Ordering::Relaxed);
-                                    for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
+                                    for tx in pending_acks.drain(..) {
+                                        let _ = tx.send(Ok(()));
+                                    }
                                 }
                                 Err(e) => fatal_err = Some(e),
                             }
@@ -965,7 +1081,8 @@ impl BanditDB {
                     }
 
                     WalMessage::Checkpoint { reply } => {
-                        match file.flush()
+                        match file
+                            .flush()
                             .and_then(|_| file.sync_all())
                             .and_then(|_| file.seek(SeekFrom::End(0)))
                         {
@@ -974,20 +1091,31 @@ impl BanditDB {
                                 // discharges anything waiting on durability.
                                 pending_durable = false;
                                 last_sync = std::time::Instant::now();
-                                for tx in pending_acks.drain(..) { let _ = tx.send(Ok(())); }
+                                for tx in pending_acks.drain(..) {
+                                    let _ = tx.send(Ok(()));
+                                }
                                 let _ = reply.send(offset);
                             }
-                            Err(e)     => fatal_err = Some(e),
+                            Err(e) => fatal_err = Some(e),
                         }
                     }
 
-                    WalMessage::Rotate { checkpoint_offset, segment_start, generation, reply } => {
+                    WalMessage::Rotate {
+                        checkpoint_offset,
+                        segment_start,
+                        generation,
+                        reply,
+                    } => {
                         if let Err(e) = file.flush().and_then(|_| file.sync_all()) {
                             fatal_err = Some(e);
                         } else {
                             let rotate = (|| -> std::io::Result<(usize, std::fs::File)> {
                                 let header_for = |f: WalFormat| -> &'static [u8] {
-                                    if f == WalFormat::Msgpack { WAL_MAGIC } else { b"" }
+                                    if f == WalFormat::Msgpack {
+                                        WAL_MAGIC
+                                    } else {
+                                        b""
+                                    }
                                 };
                                 // The segment is a verbatim slice of the old file, so it
                                 // keeps that file's format and header.
@@ -997,7 +1125,8 @@ impl BanditDB {
                                 let mut old = File::open(&path)?;
                                 old.seek(SeekFrom::Start(seg_from))?;
                                 let mut segment = header.to_vec();
-                                (&mut old).take(checkpoint_offset.saturating_sub(seg_from))
+                                (&mut old)
+                                    .take(checkpoint_offset.saturating_sub(seg_from))
                                     .read_to_end(&mut segment)?;
                                 old.seek(SeekFrom::Start(checkpoint_offset))?;
                                 let mut tail = Vec::new();
@@ -1008,7 +1137,9 @@ impl BanditDB {
                                 // effect: the tail is re-encoded, not copied.
                                 if write_format != configured_format {
                                     tail.clear();
-                                    for e in read_wal_slice(&path, checkpoint_offset, 0, write_format) {
+                                    for e in
+                                        read_wal_slice(&path, checkpoint_offset, 0, write_format)
+                                    {
                                         tail.extend(encode_wal_record(configured_format, &e)?);
                                     }
                                 }
@@ -1018,23 +1149,37 @@ impl BanditDB {
                                 // is the full history, which is what makes
                                 // checkpoint.prev a lossless fallback.
                                 let seg_path = wal_segment_path(&writer_data_dir, generation);
-                                write_file_durable(&writer_data_dir, &format!("{seg_path}.tmp"), &seg_path, &segment)?;
+                                write_file_durable(
+                                    &writer_data_dir,
+                                    &format!("{seg_path}.tmp"),
+                                    &seg_path,
+                                    &segment,
+                                )?;
                                 // Only the newest segment is ever needed: it pairs with
                                 // checkpoint.prev, which this checkpoint just replaced.
                                 if let Ok(entries) = fs::read_dir(&writer_data_dir) {
                                     for entry in entries.flatten() {
                                         let name = entry.file_name();
-                                        let Some(g) = name.to_str()
+                                        let Some(g) = name
+                                            .to_str()
                                             .and_then(|n| n.strip_prefix("wal_segment."))
-                                            .and_then(|g| g.parse::<u64>().ok()) else { continue };
-                                        if g < generation { let _ = fs::remove_file(entry.path()); }
+                                            .and_then(|g| g.parse::<u64>().ok())
+                                        else {
+                                            continue;
+                                        };
+                                        if g < generation {
+                                            let _ = fs::remove_file(entry.path());
+                                        }
                                     }
                                 }
 
                                 // The new WAL opens with a marker naming this checkpoint,
                                 // so recovery knows which history the file continues.
                                 let mut new_content = header_for(configured_format).to_vec();
-                                new_content.extend(encode_wal_record(configured_format, &DbEvent::WalStart { generation })?);
+                                new_content.extend(encode_wal_record(
+                                    configured_format,
+                                    &DbEvent::WalStart { generation },
+                                )?);
                                 new_content.extend(tail);
 
                                 // Durable: the pre-rotation WAL is discarded here, so a
@@ -1049,7 +1194,7 @@ impl BanditDB {
                                     file = new_file;
                                     write_format = configured_format;
                                     tracing::info!(
-                                        freed_bytes  = checkpoint_offset,
+                                        freed_bytes = checkpoint_offset,
                                         new_file_len = total_len,
                                         "WAL rotated"
                                     );
@@ -1077,22 +1222,35 @@ impl BanditDB {
         let wal_format = configured_format;
 
         let ttl_secs: u64 = std::env::var("BANDITDB_REWARD_TTL_SECS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(86400);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86400);
         let max_feature_dim: usize = std::env::var("BANDITDB_MAX_FEATURE_DIM")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096);
         let max_arms: usize = std::env::var("BANDITDB_MAX_ARMS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
         let max_context_magnitude: f64 = std::env::var("BANDITDB_MAX_CONTEXT_MAGNITUDE")
-            .ok().and_then(|v| v.parse().ok()).filter(|v: &f64| v.is_finite() && *v > 0.0)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f64| v.is_finite() && *v > 0.0)
             .unwrap_or(1e6);
         let max_campaigns: usize = std::env::var("BANDITDB_MAX_CAMPAIGNS")
-            .ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(10_000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(10_000);
         // 0 disables the per-campaign size check. Defaulting to unlimited keeps
         // existing deployments working unchanged: a limit that rejects campaigns an
         // operator has already been creating would be a breaking change shipped as a
         // default.
         let max_campaign_bytes: u64 = std::env::var("BANDITDB_MAX_CAMPAIGN_BYTES")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         // Ceiling on pending (predicted, not yet rewarded) interactions.
         //
@@ -1105,7 +1263,10 @@ impl BanditDB {
         // Eviction is not free: an evicted prediction can never be matched to its
         // reward, so `banditdb_interactions_evicted_total` is an alerting signal.
         let max_pending: usize = std::env::var("BANDITDB_MAX_PENDING_INTERACTIONS")
-            .ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(100_000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(100_000);
         let interactions_evicted = Arc::new(AtomicU64::new(0));
         let evicted = Arc::clone(&interactions_evicted);
 
@@ -1118,66 +1279,71 @@ impl BanditDB {
         //    Each line is a JSON object: { "ts": <unix_secs>, "action": "...", "campaign_id": "..." }
         //    Uses a bounded channel (10_000) — audit lines are dropped with a warning under disk pressure
         //    rather than buffering unboundedly.
-        let audit_tx: Option<tokio::sync::mpsc::Sender<String>> =
-            match std::env::var("BANDITDB_AUDIT_LOG") {
-                Err(_) => None,
-                Ok(audit_path) => {
-                    let (atx, mut arx) = tokio::sync::mpsc::channel::<String>(10_000);
-                    tracing::info!(path = %audit_path, "audit logging enabled");
-                    tokio::spawn(async move {
-                        use std::io::Write as _;
-                        let mut f = match OpenOptions::new().create(true).append(true).open(&audit_path) {
-                            Ok(f)  => f,
-                            Err(e) => {
-                                tracing::error!(error = %e, path = %audit_path, "audit: cannot open log file");
-                                return;
-                            }
-                        };
-                        while let Some(line) = arx.recv().await {
-                            let _ = writeln!(f, "{line}");
-                            let _ = f.flush();
+        let audit_tx: Option<tokio::sync::mpsc::Sender<String>> = match std::env::var(
+            "BANDITDB_AUDIT_LOG",
+        ) {
+            Err(_) => None,
+            Ok(audit_path) => {
+                let (atx, mut arx) = tokio::sync::mpsc::channel::<String>(10_000);
+                tracing::info!(path = %audit_path, "audit logging enabled");
+                tokio::spawn(async move {
+                    use std::io::Write as _;
+                    let mut f = match OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&audit_path)
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::error!(error = %e, path = %audit_path, "audit: cannot open log file");
+                            return;
                         }
-                    });
-                    Some(atx)
-                }
-            };
+                    };
+                    while let Some(line) = arx.recv().await {
+                        let _ = writeln!(f, "{line}");
+                        let _ = f.flush();
+                    }
+                });
+                Some(atx)
+            }
+        };
 
         let db = Self {
-            campaigns:            RwLock::new(HashMap::new()),
-            interactions:         Cache::builder()
-                                      .time_to_live(Duration::from_secs(ttl_secs))
-                                      .max_capacity(max_pending as u64)
-                                      .eviction_listener(move |_k, _v, cause| {
-                                          // Only capacity pressure is a problem. Expiry is
-                                          // the TTL doing its job, and explicit invalidation
-                                          // happens on every matched reward.
-                                          if cause == moka::notification::RemovalCause::Size {
-                                              evicted.fetch_add(1, Ordering::Relaxed);
-                                          }
-                                      })
-                                      .build(),
-            event_tx:             tx,
-            rewarded_count:       AtomicU64::new(0),
-            wal_path:             wal_path.to_string(),
-            data_dir:             data_dir.to_string(),
+            campaigns: RwLock::new(HashMap::new()),
+            interactions: Cache::builder()
+                .time_to_live(Duration::from_secs(ttl_secs))
+                .max_capacity(max_pending as u64)
+                .eviction_listener(move |_k, _v, cause| {
+                    // Only capacity pressure is a problem. Expiry is
+                    // the TTL doing its job, and explicit invalidation
+                    // happens on every matched reward.
+                    if cause == moka::notification::RemovalCause::Size {
+                        evicted.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .build(),
+            event_tx: tx,
+            rewarded_count: AtomicU64::new(0),
+            wal_path: wal_path.to_string(),
+            data_dir: data_dir.to_string(),
             max_feature_dim,
             max_arms,
             max_campaigns,
             max_campaign_bytes,
             max_context_magnitude,
             wal_healthy,
-            wal_dropped:          AtomicU64::new(0),
+            wal_dropped: AtomicU64::new(0),
             wal_fsyncs,
             interactions_evicted,
-            _data_dir_lock:       data_dir_lock,
+            _data_dir_lock: data_dir_lock,
             wal_format,
             audit_tx,
             last_checkpoint_secs: AtomicU64::new(now_secs()),
-            write_gate:           RwLock::new(()),
+            write_gate: RwLock::new(()),
             checkpoint_generation: AtomicU64::new(0),
-            wal_base:             AtomicU64::new(0),
+            wal_base: AtomicU64::new(0),
             current_checkpoint_unreadable: AtomicBool::new(false),
-            checkpoint_lock:      tokio::sync::Mutex::new(()),
+            checkpoint_lock: tokio::sync::Mutex::new(()),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1204,12 +1370,16 @@ impl BanditDB {
         let previous = format!("{data_dir}/checkpoint.prev");
 
         let read = |path: &str| -> Option<Result<CheckpointData, String>> {
-            if !Path::new(path).exists() { return None; }
+            if !Path::new(path).exists() {
+                return None;
+            }
             Some(
                 fs::read_to_string(path)
                     .map_err(|e| format!("read failed: {e}"))
-                    .and_then(|s| serde_json::from_str::<CheckpointData>(&s)
-                        .map_err(|e| format!("parse failed: {e}"))),
+                    .and_then(|s| {
+                        serde_json::from_str::<CheckpointData>(&s)
+                            .map_err(|e| format!("parse failed: {e}"))
+                    }),
             )
         };
 
@@ -1228,8 +1398,10 @@ impl BanditDB {
             // checkpoint.prev; prefer it over starting empty.
             None => match read(&previous) {
                 Some(Ok(cp)) => {
-                    tracing::warn!("recovery: checkpoint.json absent — recovering from checkpoint.prev \
-                                    (likely a crash during checkpoint write)");
+                    tracing::warn!(
+                        "recovery: checkpoint.json absent — recovering from checkpoint.prev \
+                                    (likely a crash during checkpoint write)"
+                    );
                     CheckpointLoad::Loaded(cp)
                 }
                 Some(Err(e)) => CheckpointLoad::Corrupt(e),
@@ -1245,10 +1417,11 @@ impl BanditDB {
         let mut checkpoint_generation: Option<u64> = None;
 
         let (load, current_unreadable) = Self::load_checkpoint_detailed(data_dir);
-        self.current_checkpoint_unreadable.store(current_unreadable, Ordering::SeqCst);
+        self.current_checkpoint_unreadable
+            .store(current_unreadable, Ordering::SeqCst);
         let loaded = match load {
             CheckpointLoad::Loaded(cp) => Some(cp),
-            CheckpointLoad::Fresh      => None,
+            CheckpointLoad::Fresh => None,
             CheckpointLoad::Corrupt(err) => {
                 // Refusing to start is the safe default: the WAL no longer holds the
                 // events this checkpoint subsumed, so continuing would silently serve
@@ -1275,13 +1448,14 @@ impl BanditDB {
             Some(checkpoint) => {
                 wal_start_offset = checkpoint.wal_offset;
                 checkpoint_generation = Some(checkpoint.generation);
-                self.last_checkpoint_secs.store(checkpoint.timestamp_secs, Ordering::Relaxed);
+                self.last_checkpoint_secs
+                    .store(checkpoint.timestamp_secs, Ordering::Relaxed);
 
                 tracing::info!(
-                    campaigns  = checkpoint.campaigns.len(),
+                    campaigns = checkpoint.campaigns.len(),
                     wal_offset = checkpoint.wal_offset,
-                    epoch      = checkpoint.timestamp_secs,
-                    pending    = checkpoint.pending_interactions.len(),
+                    epoch = checkpoint.timestamp_secs,
+                    pending = checkpoint.pending_interactions.len(),
                     "recovery: checkpoint snapshot"
                 );
 
@@ -1294,19 +1468,38 @@ impl BanditDB {
                 for (campaign_id, camp) in &checkpoint.campaigns {
                     let mut arms: Vec<&String> = camp.arms.keys().collect();
                     arms.sort();
-                    let feature_dim = camp.arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+                    let feature_dim = camp
+                        .arms
+                        .values()
+                        .next()
+                        .map(|a| a.theta.len())
+                        .unwrap_or(0);
                     tracing::info!(campaign = %campaign_id, ?arms, feature_dim, "recovery: campaign");
                 }
 
                 for (campaign_id, camp) in checkpoint.campaigns {
                     let challenger_arms = camp.challenger_arms.map(RwLock::new);
                     let pacing_state = camp.pacing.map(PacingState::from_checkpoint);
-                    let campaign = Campaign::new(camp.alpha, camp.algorithm, RwLock::new(camp.arms), challenger_arms, camp.metadata, camp.decay_half_life_hours, pacing_state);
-                    campaign.challenger_traffic_bps.store(camp.challenger_traffic_bps, Ordering::Relaxed);
-                    campaign.tournament_wins.store(camp.tournament_wins, Ordering::Relaxed);
+                    let campaign = Campaign::new(
+                        camp.alpha,
+                        camp.algorithm,
+                        RwLock::new(camp.arms),
+                        challenger_arms,
+                        camp.metadata,
+                        camp.decay_half_life_hours,
+                        pacing_state,
+                    );
+                    campaign
+                        .challenger_traffic_bps
+                        .store(camp.challenger_traffic_bps, Ordering::Relaxed);
+                    campaign
+                        .tournament_wins
+                        .store(camp.tournament_wins, Ordering::Relaxed);
                     campaign.archived.store(camp.archived, Ordering::Relaxed);
                     if let Some(e) = camp.entropy_snapshot {
-                        campaign.last_checkpoint_entropy.store(e.to_bits(), Ordering::Relaxed);
+                        campaign
+                            .last_checkpoint_entropy
+                            .store(e.to_bits(), Ordering::Relaxed);
                     }
                     self.campaigns.write().insert(campaign_id, campaign);
                 }
@@ -1329,7 +1522,9 @@ impl BanditDB {
                                         campaign.refresh_neural_weights(campaign_id);
                                         tracing::info!(campaign = %campaign_id, "recovery: loaded neural weights");
                                     }
-                                    Err(e) => tracing::warn!(campaign = %campaign_id, error = %e, "recovery: failed to load neural weights"),
+                                    Err(e) => {
+                                        tracing::warn!(campaign = %campaign_id, error = %e, "recovery: failed to load neural weights")
+                                    }
                                 }
                             }
                         }
@@ -1345,7 +1540,8 @@ impl BanditDB {
         // Auto-detect format (JSON vs MessagePack) from the file's magic bytes.
         if !std::path::Path::new(wal_path).exists() {
             tracing::info!("recovery: no WAL found — starting fresh");
-            self.checkpoint_generation.store(checkpoint_generation.unwrap_or(0), Ordering::SeqCst);
+            self.checkpoint_generation
+                .store(checkpoint_generation.unwrap_or(0), Ordering::SeqCst);
         } else {
             let fmt = detect_wal_format(wal_path);
             let file_len = File::open(wal_path)
@@ -1363,8 +1559,8 @@ impl BanditDB {
                 (Some(g), Some(w)) if w == g => 0,
                 // Rotated by the next checkpoint, whose file was unreadable: the segment
                 // that rotation kept bridges the loaded checkpoint to this WAL.
-                (Some(g), Some(w)) if w == g + 1
-                    && Path::new(&wal_segment_path(data_dir, w)).exists() =>
+                (Some(g), Some(w))
+                    if w == g + 1 && Path::new(&wal_segment_path(data_dir, w)).exists() =>
                 {
                     segment = Some(wal_segment_path(data_dir, w));
                     0
@@ -1373,7 +1569,11 @@ impl BanditDB {
                 // A WAL from before rotation markers existed has no marker; for it an
                 // offset past the end still means "rotated", as it always did.
                 (Some(_), None) => {
-                    if wal_start_offset <= file_len { wal_start_offset } else { 0 }
+                    if wal_start_offset <= file_len {
+                        wal_start_offset
+                    } else {
+                        0
+                    }
                 }
                 (Some(g), Some(w)) if w < g => wal_start_offset,
                 // The WAL continues from a checkpoint whose history is not on disk.
@@ -1384,17 +1584,24 @@ impl BanditDB {
                          is missing. Replaying would silently drop the events in that gap."
                     );
                     if std::env::var("BANDITDB_ALLOW_CORRUPT_CHECKPOINT").as_deref() == Ok("true") {
-                        tracing::error!("{msg} Continuing because BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true.");
+                        tracing::error!(
+                            "{msg} Continuing because BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true."
+                        );
                         0
                     } else {
-                        tracing::error!(data_dir, "{msg} Refusing to start. Restore a backup, or set \
-                            BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true to accept the loss.");
+                        tracing::error!(
+                            data_dir,
+                            "{msg} Refusing to start. Restore a backup, or set \
+                            BANDITDB_ALLOW_CORRUPT_CHECKPOINT=true to accept the loss."
+                        );
                         std::process::exit(1);
                     }
                 }
             };
             self.checkpoint_generation.store(
-                checkpoint_generation.unwrap_or(0).max(wal_generation.unwrap_or(0)),
+                checkpoint_generation
+                    .unwrap_or(0)
+                    .max(wal_generation.unwrap_or(0)),
                 Ordering::SeqCst,
             );
             self.wal_base.store(start, Ordering::SeqCst);
@@ -1405,7 +1612,7 @@ impl BanditDB {
                 events = read_wal_slice(seg, 0, 0, detect_wal_format(seg));
             }
             events.extend(read_wal_slice(wal_path, start, 0, fmt));
-            let count  = events.len();
+            let count = events.len();
             for event in events {
                 self.apply_event_to_memory(&event);
             }
@@ -1434,15 +1641,19 @@ impl BanditDB {
 
             let campaigns = self.campaigns.read();
             for (campaign_id, campaign) in campaigns.iter() {
-                let Some(neural_mutex) = &campaign.neural else { continue };
+                let Some(neural_mutex) = &campaign.neural else {
+                    continue;
+                };
 
                 // Scope the probe so no neural lock is held across retrain_campaign_locked,
                 // which acquires it itself.
-                let needs_retrain  = neural_mutex.lock().should_retrain();
+                let needs_retrain = neural_mutex.lock().should_retrain();
                 let is_progressive = matches!(&campaign.algorithm, Algorithm::Progressive(_));
 
                 // Skip the whole block if neither a retrain nor a tournament evaluation is due.
-                if !needs_retrain && !is_progressive { continue }
+                if !needs_retrain && !is_progressive {
+                    continue;
+                }
 
                 // 1a. Algorithm 2. Usually a no-op now that the background retrain
                 //     worker keeps up with arriving rewards; retained so checkpoints
@@ -1465,22 +1676,26 @@ impl BanditDB {
         //     decay_half_life_hours set. Done after neural retrain so fresh matrices
         //     are decayed, and before snapshot so checkpoint.json reflects the decayed state.
         {
-            let now  = now_secs();
+            let now = now_secs();
             let last = self.last_checkpoint_secs.load(Ordering::Relaxed);
             let elapsed_hours = now.saturating_sub(last) as f64 / 3600.0;
 
             for (campaign_id, campaign) in self.campaigns.read().iter() {
-                let Some(half_life) = campaign.decay_half_life_hours else { continue };
-                if half_life <= 0.0 || elapsed_hours <= 0.0 { continue }
+                let Some(half_life) = campaign.decay_half_life_hours else {
+                    continue;
+                };
+                if half_life <= 0.0 || elapsed_hours <= 0.0 {
+                    continue;
+                }
 
-                let lambda     = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
+                let lambda = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
                 let inv_lambda = 1.0 / lambda;
 
                 let apply_decay = |arms: &RwLock<HashMap<String, ArmState>>| {
                     for arm in arms.write().values_mut() {
                         arm.a_inv *= inv_lambda;
-                        arm.b     *= lambda;
-                        arm.theta  = arm.a_inv.dot(&arm.b);
+                        arm.b *= lambda;
+                        arm.theta = arm.a_inv.dot(&arm.b);
                         *arm.chol_cache.lock() = None;
                     }
                 };
@@ -1506,7 +1721,8 @@ impl BanditDB {
         //
         //    The channel slot is reserved first so the gate is never held across an
         //    await; writers wait only for the clone, not for the WAL writer.
-        let permit = self.event_tx
+        let permit = self
+            .event_tx
             .reserve()
             .await
             .map_err(|_| "WAL channel closed".to_string())?;
@@ -1516,40 +1732,59 @@ impl BanditDB {
             permit.send(WalMessage::Checkpoint { reply: reply_tx });
             let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
                 let campaigns = self.campaigns.read();
-                campaigns.iter().map(|(id, campaign)| {
-                    let arms_snapshot: HashMap<String, ArmState> = campaign.arms.read()
-                        .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    let challenger_snapshot = campaign.challenger_arms.as_ref().map(|c| {
-                        c.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                    });
-                    let entropy_at_checkpoint = selection_entropy(
-                        &arms_snapshot.values()
-                            .map(|s| s.prediction_count.load(Ordering::Relaxed))
-                            .collect::<Vec<_>>(),
-                    );
-                    campaign.last_checkpoint_entropy.store(entropy_at_checkpoint.to_bits(), Ordering::Relaxed);
+                campaigns
+                    .iter()
+                    .map(|(id, campaign)| {
+                        let arms_snapshot: HashMap<String, ArmState> = campaign
+                            .arms
+                            .read()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let challenger_snapshot = campaign.challenger_arms.as_ref().map(|c| {
+                            c.read()
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        });
+                        let entropy_at_checkpoint = selection_entropy(
+                            &arms_snapshot
+                                .values()
+                                .map(|s| s.prediction_count.load(Ordering::Relaxed))
+                                .collect::<Vec<_>>(),
+                        );
+                        campaign
+                            .last_checkpoint_entropy
+                            .store(entropy_at_checkpoint.to_bits(), Ordering::Relaxed);
 
-                    (id.clone(), CampaignCheckpoint {
-                        alpha:                  campaign.alpha,
-                        algorithm:              campaign.algorithm.clone(),
-                        arms:                   arms_snapshot,
-                        challenger_arms:        challenger_snapshot,
-                        challenger_traffic_bps: campaign.challenger_traffic_bps.load(Ordering::SeqCst),
-                        tournament_wins:        campaign.tournament_wins.load(Ordering::SeqCst),
-                        archived:               campaign.archived.load(Ordering::SeqCst),
-                        metadata:               campaign.metadata.clone(),
-                        entropy_snapshot:       Some(entropy_at_checkpoint),
-                        decay_half_life_hours:  campaign.decay_half_life_hours,
-                        pacing:                 campaign.pacing_checkpoint(),
+                        (
+                            id.clone(),
+                            CampaignCheckpoint {
+                                alpha: campaign.alpha,
+                                algorithm: campaign.algorithm.clone(),
+                                arms: arms_snapshot,
+                                challenger_arms: challenger_snapshot,
+                                challenger_traffic_bps: campaign
+                                    .challenger_traffic_bps
+                                    .load(Ordering::SeqCst),
+                                tournament_wins: campaign.tournament_wins.load(Ordering::SeqCst),
+                                archived: campaign.archived.load(Ordering::SeqCst),
+                                metadata: campaign.metadata.clone(),
+                                entropy_snapshot: Some(entropy_at_checkpoint),
+                                decay_half_life_hours: campaign.decay_half_life_hours,
+                                pacing: campaign.pacing_checkpoint(),
+                            },
+                        )
                     })
-                }).collect()
+                    .collect()
             };
 
             // Predictions still awaiting a reward. Their Predicted records are before
             // the barrier, so rotation discards them; they travel in the checkpoint
             // instead so a late reward can still match after a restart. Rewarded
             // interactions are already gone from the cache, so no WAL scan is needed.
-            let pending_interactions: HashMap<String, InteractionRecord> = self.interactions
+            let pending_interactions: HashMap<String, InteractionRecord> = self
+                .interactions
                 .iter()
                 .map(|(iid, record)| (iid.as_ref().clone(), record))
                 .collect();
@@ -1558,7 +1793,9 @@ impl BanditDB {
         let reemit_count = pending_interactions.len();
 
         // The writer replies once everything enqueued before the barrier is on disk.
-        let wal_offset = reply_rx.await.map_err(|_| "WAL writer closed".to_string())?;
+        let wal_offset = reply_rx
+            .await
+            .map_err(|_| "WAL writer closed".to_string())?;
 
         // 4. Parquet export: read WAL [0, wal_offset), join Predicted+Rewarded pairs,
         //    write Parquet shards. Runs inside spawn_blocking so the synchronous WAL
@@ -1569,14 +1806,16 @@ impl BanditDB {
         let export_dir = format!("{}/exports", self.data_dir);
         fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
 
-        let wal_path_clone  = self.wal_path.clone();
+        let wal_path_clone = self.wal_path.clone();
         let export_dir_clone = export_dir.clone();
-        let wal_fmt         = detect_wal_format(&self.wal_path);
+        let wal_fmt = detect_wal_format(&self.wal_path);
         // Parquet shards accumulate one per checkpoint per campaign and nothing used
         // to remove them, so exports/ filled the volume and then checkpointing began
         // to fail. Recovery never reads these files, so the oldest can be dropped.
         let export_retain: usize = std::env::var("BANDITDB_EXPORT_RETAIN_SHARDS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
 
         let parquet_rows = tokio::task::spawn_blocking(move || {
             // Scan the WAL for matched Predicted+Rewarded pairs.
@@ -1632,17 +1871,19 @@ impl BanditDB {
         }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
 
         let timestamp_secs = now_secs();
-        self.last_checkpoint_secs.store(timestamp_secs, Ordering::Relaxed);
+        self.last_checkpoint_secs
+            .store(timestamp_secs, Ordering::Relaxed);
         let generation = self.checkpoint_generation.load(Ordering::SeqCst) + 1;
         let mut data = CheckpointData {
-            wal_offset, timestamp_secs,
+            wal_offset,
+            timestamp_secs,
             campaigns: campaigns_snapshot,
             pending_interactions,
             generation,
         };
         let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
 
-        let tmp_path  = format!("{}/checkpoint.tmp",  self.data_dir);
+        let tmp_path = format!("{}/checkpoint.tmp", self.data_dir);
         let dest_path = format!("{}/checkpoint.json", self.data_dir);
         let prev_path = format!("{}/checkpoint.prev", self.data_dir);
 
@@ -1668,19 +1909,28 @@ impl BanditDB {
         if current_unreadable {
             write_file_durable(&self.data_dir, &tmp_path, &prev_path, json.as_bytes())
                 .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
-            self.current_checkpoint_unreadable.store(false, Ordering::SeqCst);
+            self.current_checkpoint_unreadable
+                .store(false, Ordering::SeqCst);
         }
-        self.checkpoint_generation.store(generation, Ordering::SeqCst);
+        self.checkpoint_generation
+            .store(generation, Ordering::SeqCst);
         // Until rotation succeeds, this checkpoint's history ends at the barrier.
         let segment_start = self.wal_base.swap(wal_offset, Ordering::SeqCst);
 
         // 5. Rotate WAL — discard the prefix already embedded in the checkpoint
         let (rot_tx, rot_rx) = oneshot::channel::<()>();
         self.event_tx
-            .send(WalMessage::Rotate { checkpoint_offset: wal_offset, segment_start, generation, reply: rot_tx })
+            .send(WalMessage::Rotate {
+                checkpoint_offset: wal_offset,
+                segment_start,
+                generation,
+                reply: rot_tx,
+            })
             .await
             .map_err(|_| "WAL channel closed during rotation".to_string())?;
-        rot_rx.await.map_err(|_| "WAL writer closed during rotation".to_string())?;
+        rot_rx
+            .await
+            .map_err(|_| "WAL writer closed during rotation".to_string())?;
         self.wal_base.store(0, Ordering::SeqCst);
 
         // Rotation rewrote the WAL so it now begins exactly at the checkpoint
@@ -1700,15 +1950,20 @@ impl BanditDB {
         // to the current generation, not a new one.
         data.wal_offset = 0;
         let rotated_json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-        write_file_durable(&self.data_dir, &tmp_path, &dest_path, rotated_json.as_bytes())
-            .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))?;
+        write_file_durable(
+            &self.data_dir,
+            &tmp_path,
+            &dest_path,
+            rotated_json.as_bytes(),
+        )
+        .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))?;
 
         let msg = format!(
             "Checkpoint written and WAL rotated: {} campaigns, offset {} bytes, {} interactions exported, {} in-flight re-emitted",
             data.campaigns.len(), wal_offset, parquet_rows, reemit_count
         );
         tracing::info!(
-            campaigns  = data.campaigns.len(),
+            campaigns = data.campaigns.len(),
             wal_offset,
             parquet_rows,
             reemit_count,
@@ -1721,28 +1976,54 @@ impl BanditDB {
     /// and from WAL replay during recovery. Takes a reference — callers own the Arc.
     fn apply_event_to_memory(&self, event: &DbEvent) {
         match event {
-            DbEvent::CampaignCreated { campaign_id, arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours, pacing } => {
-                let arms_map: HashMap<String, ArmState> = arms.iter()
+            DbEvent::CampaignCreated {
+                campaign_id,
+                arms,
+                feature_dim,
+                alpha,
+                algorithm,
+                metadata,
+                decay_half_life_hours,
+                pacing,
+            } => {
+                let arms_map: HashMap<String, ArmState> = arms
+                    .iter()
                     .map(|arm| (arm.clone(), ArmState::new(*feature_dim)))
                     .collect();
                 // challenger_arms derived by Campaign::new from algorithm (None = derive).
                 self.campaigns.write().insert(
                     campaign_id.clone(),
-                    Campaign::new(*alpha, algorithm.clone(), RwLock::new(arms_map), None, metadata.clone(), *decay_half_life_hours, pacing.clone().map(PacingState::new)),
+                    Campaign::new(
+                        *alpha,
+                        algorithm.clone(),
+                        RwLock::new(arms_map),
+                        None,
+                        metadata.clone(),
+                        *decay_half_life_hours,
+                        pacing.clone().map(PacingState::new),
+                    ),
                 );
             }
-            DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, is_reemit } => {
+            DbEvent::Predicted {
+                interaction_id,
+                campaign_id,
+                arm_id,
+                context,
+                timestamp_secs,
+                arm_propensities,
+                is_reemit,
+            } => {
                 // WAL replay path: insert into the interactions cache so delayed rewards
                 // can match.
                 self.interactions.insert(
                     interaction_id.clone(),
                     InteractionRecord {
                         campaign_id: campaign_id.clone(),
-                        arm_id:      arm_id.clone(),
-                        context:     Array1::from_vec(context.clone()),
+                        arm_id: arm_id.clone(),
+                        context: Array1::from_vec(context.clone()),
                         arm_propensities: arm_propensities.clone(),
                         timestamp_secs: *timestamp_secs,
-                        logged:      true,
+                        logged: true,
                     },
                 );
                 // Restore the prediction counter on replay so it survives restart
@@ -1766,12 +2047,18 @@ impl BanditDB {
                     }
                 }
             }
-            DbEvent::Rewarded { interaction_id, reward, unlogged_prediction, .. } => {
+            DbEvent::Rewarded {
+                interaction_id,
+                reward,
+                unlogged_prediction,
+                ..
+            } => {
                 // Replay of a reward whose Predicted record was dropped: restore the
                 // prediction from the reward itself. Live, the cache already has it.
                 if let Some(prediction) = unlogged_prediction {
                     if !self.interactions.contains_key(interaction_id.as_str()) {
-                        self.interactions.insert(interaction_id.clone(), prediction.clone());
+                        self.interactions
+                            .insert(interaction_id.clone(), prediction.clone());
                     }
                 }
                 if let Some(record) = self.interactions.get(interaction_id.as_str()) {
@@ -1801,10 +2088,14 @@ impl BanditDB {
                         // Shadow learning: every reward updates both base and challenger.
                         let base_features = match &campaign.algorithm {
                             Algorithm::Progressive(cfg) => embed_for(cfg.base.as_ref()),
-                            Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => campaign.embed(&record.context),
+                            Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => {
+                                campaign.embed(&record.context)
+                            }
                             _ => record.context.clone(),
                         };
-                        if let Some(arm_state) = campaign.arms.write().get_mut(record.arm_id.as_str()) {
+                        if let Some(arm_state) =
+                            campaign.arms.write().get_mut(record.arm_id.as_str())
+                        {
                             arm_state.update(&base_features, *reward);
                         }
 
@@ -1813,14 +2104,17 @@ impl BanditDB {
                                 Algorithm::Progressive(cfg) => embed_for(cfg.challenger.as_ref()),
                                 _ => campaign.embed(&record.context),
                             };
-                            if let Some(arm_state) = c_arms.write().get_mut(record.arm_id.as_str()) {
+                            if let Some(arm_state) = c_arms.write().get_mut(record.arm_id.as_str())
+                            {
                                 arm_state.update(&challenger_features, *reward);
                             }
                         }
 
                         #[cfg(feature = "neural")]
                         if let Some(neural) = &campaign.neural {
-                            let propensity = record.arm_propensities.as_ref()
+                            let propensity = record
+                                .arm_propensities
+                                .as_ref()
                                 .and_then(|m| m.get(&record.arm_id))
                                 .cloned()
                                 .unwrap_or(1.0);
@@ -1836,25 +2130,43 @@ impl BanditDB {
                 }
             }
             DbEvent::ArmAdded {
-                campaign_id, arm_id, base_dim, group, prior, challenger_dim, challenger_prior, ..
+                campaign_id,
+                arm_id,
+                base_dim,
+                group,
+                prior,
+                challenger_dim,
+                challenger_prior,
+                ..
             } => {
                 let campaigns = self.campaigns.read();
-                let Some(campaign) = campaigns.get(campaign_id.as_str()) else { return };
+                let Some(campaign) = campaigns.get(campaign_id.as_str()) else {
+                    return;
+                };
                 // or_insert: replaying an ArmAdded that is already in the checkpoint
                 // must not reset a trained arm back to its prior.
-                campaign.arms.write()
+                campaign
+                    .arms
+                    .write()
                     .entry(arm_id.clone())
                     .or_insert_with(|| new_arm_state(*base_dim, prior.as_ref(), group.clone()));
                 if let Some(c_arms) = &campaign.challenger_arms {
                     let dim = challenger_dim.unwrap_or(*base_dim);
-                    c_arms.write()
-                        .entry(arm_id.clone())
-                        .or_insert_with(|| new_arm_state(dim, challenger_prior.as_ref(), group.clone()));
+                    c_arms.write().entry(arm_id.clone()).or_insert_with(|| {
+                        new_arm_state(dim, challenger_prior.as_ref(), group.clone())
+                    });
                 }
             }
-            DbEvent::ArmStatusChanged { campaign_id, arm_id, status, .. } => {
+            DbEvent::ArmStatusChanged {
+                campaign_id,
+                arm_id,
+                status,
+                ..
+            } => {
                 let campaigns = self.campaigns.read();
-                let Some(campaign) = campaigns.get(campaign_id.as_str()) else { return };
+                let Some(campaign) = campaigns.get(campaign_id.as_str()) else {
+                    return;
+                };
                 // Status is atomic, so a read lock on the arms map is enough — a
                 // pause never blocks an in-flight prediction.
                 if let Some(arm) = campaign.arms.read().get(arm_id.as_str()) {
@@ -1880,7 +2192,11 @@ impl BanditDB {
                 }
             }
             DbEvent::WalStart { .. } => {}
-            DbEvent::PacingConsumed { campaign_id, arm_id, .. } => {
+            DbEvent::PacingConsumed {
+                campaign_id,
+                arm_id,
+                ..
+            } => {
                 // Sole owner of pacing replay: restores consumed, decisions, and lambda
                 // for the given arm. Costs are looked up from the campaign's live
                 // PacingState — they are stable config, not per-event data.
@@ -1952,9 +2268,13 @@ impl BanditDB {
         } else {
             (None, None)
         };
-        match self.event_tx.try_send(WalMessage::Event { event, durable, ack }) {
+        match self.event_tx.try_send(WalMessage::Event {
+            event,
+            durable,
+            ack,
+        }) {
             Ok(()) => Ok(rx),
-            Err(TrySendError::Full(_))   => Err(EngineError::WalFull),
+            Err(TrySendError::Full(_)) => Err(EngineError::WalFull),
             Err(TrySendError::Closed(_)) => Err(EngineError::WalUnavailable),
         }
     }
@@ -1970,7 +2290,9 @@ impl BanditDB {
     /// holding a valid key could reward another tenant's interaction by presenting
     /// its id.
     pub fn interaction_campaign(&self, interaction_id: &str) -> Option<String> {
-        self.interactions.get(interaction_id).map(|r| r.campaign_id.clone())
+        self.interactions
+            .get(interaction_id)
+            .map(|r| r.campaign_id.clone())
     }
 
     /// Reject context vectors that would corrupt arm matrices.
@@ -1987,7 +2309,8 @@ impl BanditDB {
         if context.len() > self.max_feature_dim {
             return Err(EngineError::BadRequest(format!(
                 "context length {} exceeds BANDITDB_MAX_FEATURE_DIM={}",
-                context.len(), self.max_feature_dim
+                context.len(),
+                self.max_feature_dim
             )));
         }
         for (i, v) in context.iter().enumerate() {
@@ -2001,7 +2324,8 @@ impl BanditDB {
                 return Err(EngineError::BadRequest(format!(
                     "context[{i}] magnitude {} exceeds BANDITDB_MAX_CONTEXT_MAGNITUDE={} — \
                      squared terms would overflow to infinity during the rank-one update",
-                    v.abs(), self.max_context_magnitude
+                    v.abs(),
+                    self.max_context_magnitude
                 )));
             }
         }
@@ -2023,10 +2347,16 @@ impl BanditDB {
                 ("embed_dim", cfg.embed_dim),
                 ("hidden_dim", cfg.hidden_dim),
             ] {
-                if dim == 0 { return Err(bad(name, "0".into())); }
-                if dim > max_dim { return Err(bad(name, format!("{dim} exceeds max {max_dim}"))); }
+                if dim == 0 {
+                    return Err(bad(name, "0".into()));
+                }
+                if dim > max_dim {
+                    return Err(bad(name, format!("{dim} exceeds max {max_dim}")));
+                }
             }
-            if cfg.hidden_layers == 0 { return Err(bad("hidden_layers", "0".into())); }
+            if cfg.hidden_layers == 0 {
+                return Err(bad("hidden_layers", "0".into()));
+            }
             if !cfg.learning_rate.is_finite() || cfg.learning_rate <= 0.0 {
                 return Err(bad("learning_rate", cfg.learning_rate.to_string()));
             }
@@ -2037,7 +2367,9 @@ impl BanditDB {
         };
 
         match algorithm {
-            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => check_neural(cfg),
+            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => {
+                check_neural(cfg)
+            }
             Algorithm::Progressive(cfg) => {
                 Self::validate_algorithm(&cfg.base, max_dim)?;
                 Self::validate_algorithm(&cfg.challenger, max_dim)
@@ -2050,11 +2382,16 @@ impl BanditDB {
     /// SDK and embedded callers cannot create an arm the API could never name.
     fn validate_arm_id(id: &str) -> Result<(), EngineError> {
         if id.is_empty() || id.len() > 128 {
-            return Err(EngineError::BadRequest("arm_id must be 1–128 characters".into()));
-        }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err(EngineError::BadRequest(
-                "arm_id may only contain ASCII letters, digits, '-', and '_'".into()
+                "arm_id must be 1–128 characters".into(),
+            ));
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(EngineError::BadRequest(
+                "arm_id may only contain ASCII letters, digits, '-', and '_'".into(),
             ));
         }
         Ok(())
@@ -2064,7 +2401,9 @@ impl BanditDB {
     /// SNIPS tournament estimator both assume that range.
     fn validate_reward(reward: f64) -> Result<(), EngineError> {
         if !reward.is_finite() {
-            return Err(EngineError::BadRequest(format!("reward {reward} is not finite")));
+            return Err(EngineError::BadRequest(format!(
+                "reward {reward} is not finite"
+            )));
         }
         if !(0.0..=1.0).contains(&reward) {
             return Err(EngineError::BadRequest(format!(
@@ -2078,46 +2417,57 @@ impl BanditDB {
         let mut names = std::collections::HashSet::new();
         for r in &pacing.resources {
             if r.name.trim().is_empty() {
-                return Err(EngineError::BadRequest("resource constraint name cannot be empty".to_string()));
+                return Err(EngineError::BadRequest(
+                    "resource constraint name cannot be empty".to_string(),
+                ));
             }
             if !names.insert(&r.name) {
-                return Err(EngineError::BadRequest(format!("duplicate resource constraint name: '{}'", r.name)));
+                return Err(EngineError::BadRequest(format!(
+                    "duplicate resource constraint name: '{}'",
+                    r.name
+                )));
             }
             if !r.budget.is_finite() || r.budget <= 0.0 {
                 return Err(EngineError::BadRequest(format!(
-                    "resource '{}' budget must be finite and positive, got {}", r.name, r.budget
+                    "resource '{}' budget must be finite and positive, got {}",
+                    r.name, r.budget
                 )));
             }
             if r.horizon == 0 {
                 return Err(EngineError::BadRequest(format!(
-                    "resource '{}' horizon must be positive, got 0", r.name
+                    "resource '{}' horizon must be positive, got 0",
+                    r.name
                 )));
             }
             if let Some(step) = r.step_size {
                 if !step.is_finite() || step <= 0.0 {
                     return Err(EngineError::BadRequest(format!(
-                        "resource '{}' step_size must be finite and positive, got {step}", r.name
+                        "resource '{}' step_size must be finite and positive, got {step}",
+                        r.name
                     )));
                 }
             }
             if let Some(lmax) = r.lambda_max {
                 if !lmax.is_finite() || lmax <= 0.0 {
                     return Err(EngineError::BadRequest(format!(
-                        "resource '{}' lambda_max must be finite and positive, got {lmax}", r.name
+                        "resource '{}' lambda_max must be finite and positive, got {lmax}",
+                        r.name
                     )));
                 }
             }
             if let Some(l0) = r.initial_lambda {
                 if !l0.is_finite() || l0 < 0.0 {
                     return Err(EngineError::BadRequest(format!(
-                        "resource '{}' initial_lambda must be finite and non-negative, got {l0}", r.name
+                        "resource '{}' initial_lambda must be finite and non-negative, got {l0}",
+                        r.name
                     )));
                 }
             }
             for (arm, cost) in &r.arm_costs {
                 if !cost.is_finite() || *cost < 0.0 {
                     return Err(EngineError::BadRequest(format!(
-                        "resource '{}' arm '{}' cost must be finite and non-negative, got {}", r.name, arm, cost
+                        "resource '{}' arm '{}' cost must be finite and non-negative, got {}",
+                        r.name, arm, cost
                     )));
                 }
             }
@@ -2133,15 +2483,14 @@ impl BanditDB {
     #[allow(clippy::too_many_arguments)] // campaign construction params; grouping into a struct would only move the noise
     pub async fn add_campaign(
         &self,
-        campaign_id:          &str,
-        arms:                 Vec<String>,
-        feature_dim:          usize,
-        alpha:                f64,
-        algorithm:            Algorithm,
-        metadata:             Option<serde_json::Value>,
+        campaign_id: &str,
+        arms: Vec<String>,
+        feature_dim: usize,
+        alpha: f64,
+        algorithm: Algorithm,
+        metadata: Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
     ) -> Result<(), EngineError> {
-
         self.add_campaign_pacing(
             campaign_id,
             arms,
@@ -2151,21 +2500,22 @@ impl BanditDB {
             metadata,
             decay_half_life_hours,
             None,
-        ).await
+        )
+        .await
     }
 
     /// Create a campaign with optional Lagrangian pacing / capacity constraints. Returns once the record is durable.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_campaign_pacing(
         &self,
-        campaign_id:          &str,
-        arms:                 Vec<String>,
-        feature_dim:          usize,
-        alpha:                f64,
-        algorithm:            Algorithm,
-        metadata:             Option<serde_json::Value>,
+        campaign_id: &str,
+        arms: Vec<String>,
+        feature_dim: usize,
+        alpha: f64,
+        algorithm: Algorithm,
+        metadata: Option<serde_json::Value>,
         decay_half_life_hours: Option<f64>,
-        pacing:               Option<PacingConfig>,
+        pacing: Option<PacingConfig>,
     ) -> Result<(), EngineError> {
         // Admission control runs on the create path ONLY. Recovery and WAL replay
         // deliberately bypass it — see `apply_event_to_memory`. Lowering a limit
@@ -2175,13 +2525,17 @@ impl BanditDB {
         {
             let campaigns = self.campaigns.read();
             if campaigns.contains_key(campaign_id) {
-                return Err(EngineError::AlreadyExists(format!("Campaign '{campaign_id}' already exists")));
+                return Err(EngineError::AlreadyExists(format!(
+                    "Campaign '{campaign_id}' already exists"
+                )));
             }
             if campaigns.len() >= self.max_campaigns {
                 return Err(EngineError::LimitExceeded(format!(
                     "campaign limit reached: {} of {} campaigns exist — \
                      BANDITDB_MAX_CAMPAIGNS={}. Delete or archive a campaign, or raise the limit",
-                    campaigns.len(), self.max_campaigns, self.max_campaigns
+                    campaigns.len(),
+                    self.max_campaigns,
+                    self.max_campaigns
                 )));
             }
         }
@@ -2215,12 +2569,20 @@ impl BanditDB {
                      Reduce arms ({}), dimension ({}), or the replay buffer",
                     estimate as f64 / 1_048_576.0,
                     self.max_campaign_bytes as f64 / 1_048_576.0,
-                    arms.len(), feature_dim
+                    arms.len(),
+                    feature_dim
                 )));
             }
         }
         let event = Arc::new(DbEvent::CampaignCreated {
-            campaign_id: campaign_id.to_string(), arms, feature_dim, alpha, algorithm, metadata, decay_half_life_hours, pacing,
+            campaign_id: campaign_id.to_string(),
+            arms,
+            feature_dim,
+            alpha,
+            algorithm,
+            metadata,
+            decay_half_life_hours,
+            pacing,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
         let ack = self.log_and_apply(event, Durability::Acked)?;
@@ -2237,16 +2599,19 @@ impl BanditDB {
     pub async fn add_arm(
         &self,
         campaign_id: &str,
-        arm_id:      &str,
-        group:       Option<String>,
-        warm_start:  &WarmStart,
+        arm_id: &str,
+        group: Option<String>,
+        warm_start: &WarmStart,
     ) -> Result<(), EngineError> {
         Self::validate_arm_id(arm_id)?;
-        if let Some(g) = &group { Self::validate_arm_id(g)?; }
+        if let Some(g) = &group {
+            Self::validate_arm_id(g)?;
+        }
 
         let event = {
             let campaigns = self.campaigns.read();
-            let campaign  = campaigns.get(campaign_id)
+            let campaign = campaigns
+                .get(campaign_id)
                 .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
             if campaign.archived.load(Ordering::Relaxed) {
                 return Err(EngineError::Archived(format!(
@@ -2263,18 +2628,22 @@ impl BanditDB {
             if arms.len() >= self.max_arms {
                 return Err(EngineError::BadRequest(format!(
                     "campaign '{campaign_id}' already has {} arms — BANDITDB_MAX_ARMS={}",
-                    arms.len(), self.max_arms
+                    arms.len(),
+                    self.max_arms
                 )));
             }
             // Every arm in a map shares its dimension; an empty map leaves nothing
             // to infer it from, and the campaign is unusable anyway.
             let base_dim = arms.values().next().map(|a| a.theta.len()).ok_or_else(|| {
-                EngineError::BadRequest(format!("campaign '{campaign_id}' has no arms to infer the feature dimension from"))
+                EngineError::BadRequest(format!(
+                    "campaign '{campaign_id}' has no arms to infer the feature dimension from"
+                ))
             })?;
             // Same limit as creation, applied to the size this arm grows it to —
             // otherwise a campaign created small grows past it one arm at a time.
             if self.max_campaign_bytes > 0 {
-                let estimate = campaign_memory_estimate(arms.len() + 1, base_dim, &campaign.algorithm);
+                let estimate =
+                    campaign_memory_estimate(arms.len() + 1, base_dim, &campaign.algorithm);
                 if estimate > self.max_campaign_bytes {
                     return Err(EngineError::LimitExceeded(format!(
                         "adding arm '{arm_id}' would grow campaign '{campaign_id}' to an estimated \
@@ -2291,8 +2660,12 @@ impl BanditDB {
             let (challenger_dim, challenger_prior) = match &campaign.challenger_arms {
                 Some(c_arms) => {
                     let guard = c_arms.read();
-                    let dim   = guard.values().next().map(|a| a.theta.len()).unwrap_or(base_dim);
-                    let p     = resolve_prior(&guard, warm_start, group.as_deref(), dim)?;
+                    let dim = guard
+                        .values()
+                        .next()
+                        .map(|a| a.theta.len())
+                        .unwrap_or(base_dim);
+                    let p = resolve_prior(&guard, warm_start, group.as_deref(), dim)?;
                     (Some(dim), p)
                 }
                 None => (None, None),
@@ -2300,7 +2673,7 @@ impl BanditDB {
 
             Arc::new(DbEvent::ArmAdded {
                 campaign_id: campaign_id.to_string(),
-                arm_id:      arm_id.to_string(),
+                arm_id: arm_id.to_string(),
                 base_dim,
                 group,
                 prior,
@@ -2326,17 +2699,20 @@ impl BanditDB {
     pub async fn set_arm_status(
         &self,
         campaign_id: &str,
-        arm_id:      &str,
-        status:      ArmStatus,
+        arm_id: &str,
+        status: ArmStatus,
     ) -> Result<(), EngineError> {
         {
             let campaigns = self.campaigns.read();
-            let campaign  = campaigns.get(campaign_id)
+            let campaign = campaigns
+                .get(campaign_id)
                 .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
             let arms = campaign.arms.read();
-            let arm  = arms.get(arm_id).ok_or_else(|| EngineError::NotFound(
-                format!("Arm '{arm_id}' not found in campaign '{campaign_id}'")
-            ))?;
+            let arm = arms.get(arm_id).ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "Arm '{arm_id}' not found in campaign '{campaign_id}'"
+                ))
+            })?;
 
             // Refuse to strand the campaign: with no active arm left every
             // prediction would fail, and the only way back is another API call.
@@ -2352,17 +2728,25 @@ impl BanditDB {
         }
 
         let event = Arc::new(DbEvent::ArmStatusChanged {
-            campaign_id:    campaign_id.to_string(),
-            arm_id:         arm_id.to_string(),
+            campaign_id: campaign_id.to_string(),
+            arm_id: arm_id.to_string(),
             status,
             timestamp_secs: now_secs(),
         });
         let ack = self.log_and_apply(event, Durability::Acked)?;
-        self.audit("arm_status", campaign_id, Some(&format!("{arm_id}={status:?}")));
+        self.audit(
+            "arm_status",
+            campaign_id,
+            Some(&format!("{arm_id}={status:?}")),
+        );
         Self::await_ack(ack).await
     }
 
-    pub fn predict(&self, campaign_id: &str, context: Vec<f64>) -> Result<(String, String), EngineError> {
+    pub fn predict(
+        &self,
+        campaign_id: &str,
+        context: Vec<f64>,
+    ) -> Result<(String, String), EngineError> {
         self.predict_filtered(campaign_id, context, &ArmFilter::default())
     }
 
@@ -2373,8 +2757,8 @@ impl BanditDB {
     pub fn predict_filtered(
         &self,
         campaign_id: &str,
-        context:     Vec<f64>,
-        filter:      &ArmFilter,
+        context: Vec<f64>,
+        filter: &ArmFilter,
     ) -> Result<(String, String), EngineError> {
         self.validate_context(&context)?;
         // prediction_count is bumped during scoring, well before the WAL record is
@@ -2385,48 +2769,63 @@ impl BanditDB {
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
         let (best_arm, arm_propensities) = {
             let campaigns = self.campaigns.read();
-            let campaign  = campaigns.get(campaign_id)
+            let campaign = campaigns
+                .get(campaign_id)
                 .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
             if campaign.archived.load(Ordering::Relaxed) {
-                return Err(EngineError::NotFound(format!("Campaign '{campaign_id}' is archived")));
+                return Err(EngineError::NotFound(format!(
+                    "Campaign '{campaign_id}' is archived"
+                )));
             }
             let context_arr = Array1::from_vec(context.clone());
 
             let (active_algo, arms_guard) = match &campaign.algorithm {
                 Algorithm::Progressive(cfg) => {
                     let traffic_bps = campaign.challenger_traffic_bps.load(Ordering::Relaxed);
-                    let use_challenger = rand::thread_rng().gen_range(0u32..BPS_SCALE) < traffic_bps;
+                    let use_challenger =
+                        rand::thread_rng().gen_range(0u32..BPS_SCALE) < traffic_bps;
                     if use_challenger {
-                        let c_arms = campaign.challenger_arms.as_ref()
-                            .ok_or_else(|| EngineError::Internal("challenger_arms missing".into()))?;
+                        let c_arms = campaign.challenger_arms.as_ref().ok_or_else(|| {
+                            EngineError::Internal("challenger_arms missing".into())
+                        })?;
                         (cfg.challenger.as_ref(), c_arms.read())
                     } else {
                         (cfg.base.as_ref(), campaign.arms.read())
                     }
                 }
-                _ => (&campaign.algorithm, campaign.arms.read())
+                _ => (&campaign.algorithm, campaign.arms.read()),
             };
 
             let expected_context_dim = expected_context_dim(
                 active_algo,
-                arms_guard.values().next().map(|a| a.theta.len()).unwrap_or(0),
+                arms_guard
+                    .values()
+                    .next()
+                    .map(|a| a.theta.len())
+                    .unwrap_or(0),
             );
             if context_arr.len() != expected_context_dim {
                 return Err(EngineError::BadRequest(format!(
-                    "Context dimension mismatch: expected {expected_context_dim}, got {}", context_arr.len()
+                    "Context dimension mismatch: expected {expected_context_dim}, got {}",
+                    context_arr.len()
                 )));
             }
 
             let features = match active_algo {
-                Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => campaign.embed(&context_arr),
+                Algorithm::NeuralLinUCB(_) | Algorithm::NeuralThompsonSampling(_) => {
+                    campaign.embed(&context_arr)
+                }
                 _ => context_arr,
             };
 
             // Candidate set for this one request: active arms the filter allows and capacity constraints permit.
             // Everything downstream — scores, argmax, propensities — sees only these,
             // so the logged propensities describe the policy that actually ran.
-            let eligible: Vec<(&String, &ArmState)> = arms_guard.iter()
-                .filter(|(arm_id, state)| state.is_active() && filter.allows(arm_id) && !campaign.is_arm_masked(arm_id))
+            let eligible: Vec<(&String, &ArmState)> = arms_guard
+                .iter()
+                .filter(|(arm_id, state)| {
+                    state.is_active() && filter.allows(arm_id) && !campaign.is_arm_masked(arm_id)
+                })
                 .collect();
             if eligible.is_empty() {
                 return Err(EngineError::BadRequest(format!(
@@ -2435,16 +2834,22 @@ impl BanditDB {
                 )));
             }
 
-            let scores: Vec<(String, f64)> = eligible.iter().map(|(arm_id, state)| {
-                let score = match active_algo {
-                    Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => state.score_ts(&features, campaign.alpha),
-                    _ => state.score(&features, campaign.alpha),
-                };
-                let price = campaign.arm_price(arm_id);
-                ((*arm_id).clone(), score - price)
-            }).collect();
+            let scores: Vec<(String, f64)> = eligible
+                .iter()
+                .map(|(arm_id, state)| {
+                    let score = match active_algo {
+                        Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
+                            state.score_ts(&features, campaign.alpha)
+                        }
+                        _ => state.score(&features, campaign.alpha),
+                    };
+                    let price = campaign.arm_price(arm_id);
+                    ((*arm_id).clone(), score - price)
+                })
+                .collect();
 
-            let best_arm = scores.iter()
+            let best_arm = scores
+                .iter()
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(id, _)| id.clone())
                 .unwrap_or_default();
@@ -2461,20 +2866,35 @@ impl BanditDB {
                     // where many samples are needed; small once the posterior concentrates.
                     // The first trial's winner is already known (best_arm from initial scores draw).
                     let n = ts_propensity_samples(&eligible);
-                    let mut counts: HashMap<String, u32> = eligible.iter()
+                    let mut counts: HashMap<String, u32> = eligible
+                        .iter()
                         .map(|(id, _)| ((*id).clone(), 0u32))
                         .collect();
                     *counts.entry(best_arm.clone()).or_insert(0) += 1;
                     for _ in 1..n {
-                        if let Some((winner, _)) = eligible.iter()
-                            .map(|(id, state)| ((*id).clone(), state.score_ts(&features, campaign.alpha) - campaign.arm_price(id)))
-                            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        if let Some((winner, _)) = eligible
+                            .iter()
+                            .map(|(id, state)| {
+                                (
+                                    (*id).clone(),
+                                    state.score_ts(&features, campaign.alpha)
+                                        - campaign.arm_price(id),
+                                )
+                            })
+                            .max_by(|a, b| {
+                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            })
                         {
                             *counts.entry(winner).or_insert(0) += 1;
                         }
                     }
                     let n_f = n as f64;
-                    Some(counts.into_iter().map(|(id, c)| (id, c as f64 / n_f)).collect())
+                    Some(
+                        counts
+                            .into_iter()
+                            .map(|(id, c)| (id, c as f64 / n_f))
+                            .collect(),
+                    )
                 }
                 _ => Some(softmax_propensities(&scores)),
             };
@@ -2499,13 +2919,13 @@ impl BanditDB {
         let interaction_id = Uuid::new_v4().to_string();
         let now = now_secs();
         let event = Arc::new(DbEvent::Predicted {
-            interaction_id:   interaction_id.clone(),
-            campaign_id:      campaign_id.to_string(),
-            arm_id:           best_arm.clone(),
-            context:          context.clone(),
-            timestamp_secs:   now,
+            interaction_id: interaction_id.clone(),
+            campaign_id: campaign_id.to_string(),
+            arm_id: best_arm.clone(),
+            context: context.clone(),
+            timestamp_secs: now,
             arm_propensities: arm_propensities.clone(),
-            is_reemit:        false,
+            is_reemit: false,
         });
 
         // Best-effort: a prediction record is a log entry, not state. If the writer
@@ -2527,8 +2947,8 @@ impl BanditDB {
         if has_pacing {
             self.wal_send(
                 Arc::new(DbEvent::PacingConsumed {
-                    campaign_id:    campaign_id.to_string(),
-                    arm_id:         best_arm.clone(),
+                    campaign_id: campaign_id.to_string(),
+                    arm_id: best_arm.clone(),
                     timestamp_secs: now,
                 }),
                 Durability::BestEffort,
@@ -2540,11 +2960,11 @@ impl BanditDB {
         self.interactions.insert(
             interaction_id.clone(),
             InteractionRecord {
-                campaign_id:      campaign_id.to_string(),
-                arm_id:           best_arm.clone(),
-                context:          Array1::from_vec(context),
+                campaign_id: campaign_id.to_string(),
+                arm_id: best_arm.clone(),
+                context: Array1::from_vec(context),
                 arm_propensities,
-                timestamp_secs:   now,
+                timestamp_secs: now,
                 logged,
             },
         );
@@ -2557,9 +2977,9 @@ impl BanditDB {
     pub async fn interact(
         &self,
         campaign_id: &str,
-        arm_id:      &str,
-        context:     Vec<f64>,
-        reward:      f64,
+        arm_id: &str,
+        context: Vec<f64>,
+        reward: f64,
     ) -> Result<String, EngineError> {
         // The HTTP handler for this route validated only the IDs, so an unchecked
         // context and an out-of-range reward reached the matrix math directly.
@@ -2567,7 +2987,9 @@ impl BanditDB {
         Self::validate_reward(reward)?;
         // Checked before anything is logged: a record that cannot be applied would
         // otherwise reach the WAL, and recovery would replay it.
-        self.campaigns.read().get(campaign_id)
+        self.campaigns
+            .read()
+            .get(campaign_id)
             .ok_or_else(|| Self::campaign_not_found(campaign_id))?
             .check_interaction(arm_id, context.len())?;
 
@@ -2576,13 +2998,13 @@ impl BanditDB {
 
         // 1. Emit Predicted event
         let pred_event = Arc::new(DbEvent::Predicted {
-            interaction_id:   interaction_id.clone(),
-            campaign_id:      campaign_id.to_string(),
-            arm_id:           arm_id.to_string(),
-            context:          context.clone(),
-            timestamp_secs:   now,
+            interaction_id: interaction_id.clone(),
+            campaign_id: campaign_id.to_string(),
+            arm_id: arm_id.to_string(),
+            context: context.clone(),
+            timestamp_secs: now,
             arm_propensities: None, // Historical data doesn't usually have propensities
-            is_reemit:        false,
+            is_reemit: false,
         });
         self.log_and_apply(pred_event, Durability::Required)?;
 
@@ -2607,7 +3029,9 @@ impl BanditDB {
         if !self.campaigns.read().contains_key(campaign_id) {
             return Err(Self::campaign_not_found(campaign_id));
         }
-        let event = Arc::new(DbEvent::CampaignDeleted { campaign_id: campaign_id.to_string() });
+        let event = Arc::new(DbEvent::CampaignDeleted {
+            campaign_id: campaign_id.to_string(),
+        });
         // WAL before memory. See BanditDB consistency-model doc comment.
         let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("delete", campaign_id, None);
@@ -2626,16 +3050,18 @@ impl BanditDB {
     pub async fn reward(&self, interaction_id: &str, reward: f64) -> Result<(), EngineError> {
         Self::validate_reward(reward)?;
         let Some(record) = self.interactions.get(interaction_id) else {
-            return Err(EngineError::NotFound(
-                format!("Interaction '{interaction_id}' not found or already rewarded")
-            ));
+            return Err(EngineError::NotFound(format!(
+                "Interaction '{interaction_id}' not found or already rewarded"
+            )));
         };
         // A prediction whose WAL record was dropped leaves replay nothing to match
         // this reward against, so the reward carries it. Without that, an
         // acknowledged reward would vanish on restart.
         let unlogged_prediction = (!record.logged).then_some(record);
         let event = Arc::new(DbEvent::Rewarded {
-            interaction_id: interaction_id.to_string(), reward, timestamp_secs: now_secs(),
+            interaction_id: interaction_id.to_string(),
+            reward,
+            timestamp_secs: now_secs(),
             unlogged_prediction,
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
@@ -2652,11 +3078,11 @@ impl BanditDB {
         ack: Option<oneshot::Receiver<Result<(), String>>>,
     ) -> Result<(), EngineError> {
         match ack {
-            None     => Ok(()),
+            None => Ok(()),
             Some(rx) => match rx.await {
-                Ok(Ok(()))   => Ok(()),
+                Ok(Ok(())) => Ok(()),
                 Ok(Err(msg)) => Err(EngineError::Internal(msg)),
-                Err(_)       => Err(EngineError::WalUnavailable),
+                Err(_) => Err(EngineError::WalUnavailable),
             },
         }
     }
@@ -2667,7 +3093,8 @@ impl BanditDB {
             return Err(Self::campaign_not_found(campaign_id));
         }
         let event = Arc::new(DbEvent::CampaignArchived {
-            campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
+            campaign_id: campaign_id.to_string(),
+            timestamp_secs: now_secs(),
         });
         let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("archive", campaign_id, None);
@@ -2680,46 +3107,59 @@ impl BanditDB {
             return Err(Self::campaign_not_found(campaign_id));
         }
         let event = Arc::new(DbEvent::CampaignRestored {
-            campaign_id: campaign_id.to_string(), timestamp_secs: now_secs(),
+            campaign_id: campaign_id.to_string(),
+            timestamp_secs: now_secs(),
         });
         let ack = self.log_and_apply(event, Durability::Acked)?;
         self.audit("restore", campaign_id, None);
         Self::await_ack(ack).await
     }
 
-    pub fn campaign_diagnostics(&self, campaign_id: &str) -> Result<CampaignDiagnosticsData, EngineError> {
+    pub fn campaign_diagnostics(
+        &self,
+        campaign_id: &str,
+    ) -> Result<CampaignDiagnosticsData, EngineError> {
         let campaigns = self.campaigns.read();
-        let campaign  = campaigns.get(campaign_id)
+        let campaign = campaigns
+            .get(campaign_id)
             .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
 
         let arms_guard = campaign.arms.read();
         let mut total_predictions = 0u64;
-        let mut total_rewards     = 0u64;
-        let mut total_reward_sum  = 0.0f64;
-        let mut arm_stats         = HashMap::new();
+        let mut total_rewards = 0u64;
+        let mut total_reward_sum = 0.0f64;
+        let mut arm_stats = HashMap::new();
 
         // Single pass over arms — no duplicate HashMap lookup, use ndarray diag() view.
         for (arm_id, state) in arms_guard.iter() {
-            let p  = state.prediction_count.load(Ordering::Relaxed);
-            let r  = state.reward_count.load(Ordering::Relaxed);
+            let p = state.prediction_count.load(Ordering::Relaxed);
+            let r = state.reward_count.load(Ordering::Relaxed);
             let tr = f64::from_bits(state.total_reward.load(Ordering::Relaxed));
             total_predictions += p;
-            total_rewards     += r;
-            total_reward_sum  += tr;
+            total_rewards += r;
+            total_reward_sum += tr;
 
-            let (a_inv_diag_min, a_inv_diag_max) = state.a_inv.diag().iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| (mn.min(v), mx.max(v)));
+            let (a_inv_diag_min, a_inv_diag_max) = state
+                .a_inv
+                .diag()
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
+                    (mn.min(v), mx.max(v))
+                });
 
-            arm_stats.insert(arm_id.clone(), ArmDiagnostics {
-                predictions:    p,
-                rewards:        r,
-                avg_reward:     if r > 0 { Some(tr / r as f64) } else { None },
-                theta_norm:     state.theta.dot(&state.theta).sqrt(),
-                a_inv_diag_min,
-                a_inv_diag_max,
-                status:         state.status(),
-                group:          state.group.clone(),
-            });
+            arm_stats.insert(
+                arm_id.clone(),
+                ArmDiagnostics {
+                    predictions: p,
+                    rewards: r,
+                    avg_reward: if r > 0 { Some(tr / r as f64) } else { None },
+                    theta_norm: state.theta.dot(&state.theta).sqrt(),
+                    a_inv_diag_min,
+                    a_inv_diag_max,
+                    status: state.status(),
+                    group: state.group.clone(),
+                },
+            );
         }
 
         let active_arms: Vec<&ArmState> = arms_guard.values().filter(|a| a.is_active()).collect();
@@ -2735,15 +3175,18 @@ impl BanditDB {
             };
 
         #[cfg(feature = "neural")]
-        let neural_buffer_size = campaign.neural.as_ref()
-            .map(|n| n.lock().buffer.len());
+        let neural_buffer_size = campaign.neural.as_ref().map(|n| n.lock().buffer.len());
         #[cfg(not(feature = "neural"))]
         let neural_buffer_size: Option<usize> = None;
 
         #[cfg(feature = "neural")]
         let neural_last_retrain_losses = campaign.neural.as_ref().and_then(|n| {
             let v = n.lock().last_retrain_losses.clone();
-            if v.is_empty() { None } else { Some(v) }
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
         });
         #[cfg(not(feature = "neural"))]
         let neural_last_retrain_losses: Option<Vec<f32>> = None;
@@ -2753,13 +3196,14 @@ impl BanditDB {
         // Guard 2: compare current entropy against the snapshot written at last checkpoint.
         // Only active arms count: a paused arm's historical traffic would otherwise
         // keep reporting spread that the live policy no longer has.
-        let pred_counts: Vec<u64> = active_arms.iter()
+        let pred_counts: Vec<u64> = active_arms
+            .iter()
             .map(|s| s.prediction_count.load(Ordering::Relaxed))
             .collect();
         let entropy = selection_entropy(&pred_counts);
 
         let prior_raw = campaign.last_checkpoint_entropy.load(Ordering::Relaxed);
-        let prior     = f64::from_bits(prior_raw);
+        let prior = f64::from_bits(prior_raw);
         let entropy_trend = if prior.is_nan() {
             EntropyTrend::Unknown
         } else if entropy < prior - 0.1 {
@@ -2804,27 +3248,31 @@ impl BanditDB {
         }
 
         Ok(CampaignDiagnosticsData {
-            campaign_id:          campaign_id.to_string(),
-            archived:             campaign.archived.load(Ordering::Relaxed),
-            algorithm:            campaign.algorithm.clone(),
-            alpha:                campaign.alpha,
-            arm_count:            arms_guard.len(),
-            active_arm_count:     active_arms.len(),
+            campaign_id: campaign_id.to_string(),
+            archived: campaign.archived.load(Ordering::Relaxed),
+            algorithm: campaign.algorithm.clone(),
+            alpha: campaign.alpha,
+            arm_count: arms_guard.len(),
+            active_arm_count: active_arms.len(),
             total_predictions,
             total_rewards,
-            overall_avg_reward:   if total_rewards > 0 { Some(total_reward_sum / total_rewards as f64) } else { None },
+            overall_avg_reward: if total_rewards > 0 {
+                Some(total_reward_sum / total_rewards as f64)
+            } else {
+                None
+            },
             arm_stats,
             challenger_traffic_pct,
             tournament_win_streak,
             neural_buffer_size,
             neural_last_retrain_losses,
-            selection_entropy:    entropy,
+            selection_entropy: entropy,
             entropy_status,
             entropy_trend,
             converged,
             likely_cause,
             suggested_action,
-            pacing:               campaign.pacing_report(),
+            pacing: campaign.pacing_report(),
         })
     }
 
@@ -2840,8 +3288,10 @@ impl BanditDB {
             obj["detail"] = serde_json::Value::String(d.to_string());
         }
         match serde_json::to_string(&obj) {
-            Ok(line) => { let _ = tx.try_send(line); }
-            Err(e)   => tracing::warn!(error = %e, "audit: failed to serialise event"),
+            Ok(line) => {
+                let _ = tx.try_send(line);
+            }
+            Err(e) => tracing::warn!(error = %e, "audit: failed to serialise event"),
         }
     }
 
@@ -2851,58 +3301,84 @@ impl BanditDB {
     /// `converged = true` means the leading arm's CI lower bound exceeds the
     /// second arm's upper bound — a statistically significant lead.
     pub fn campaign_report(&self, campaign_id: &str) -> Result<CampaignReport, EngineError> {
-        let campaigns  = self.campaigns.read();
-        let campaign   = campaigns.get(campaign_id)
+        let campaigns = self.campaigns.read();
+        let campaign = campaigns
+            .get(campaign_id)
             .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
 
-        let arms_guard       = campaign.arms.read();
-        let total_preds: u64 = arms_guard.values().map(|s| s.prediction_count.load(Ordering::Relaxed)).sum();
-        let total_rwds:  u64 = arms_guard.values().map(|s| s.reward_count.load(Ordering::Relaxed)).sum();
+        let arms_guard = campaign.arms.read();
+        let total_preds: u64 = arms_guard
+            .values()
+            .map(|s| s.prediction_count.load(Ordering::Relaxed))
+            .sum();
+        let total_rwds: u64 = arms_guard
+            .values()
+            .map(|s| s.reward_count.load(Ordering::Relaxed))
+            .sum();
 
         let mut arm_stats: HashMap<String, ArmReportStats> = HashMap::new();
 
         for (arm_id, state) in arms_guard.iter() {
-            let p  = state.prediction_count.load(Ordering::Relaxed);
-            let r  = state.reward_count.load(Ordering::Relaxed);
+            let p = state.prediction_count.load(Ordering::Relaxed);
+            let r = state.reward_count.load(Ordering::Relaxed);
             let tr = f64::from_bits(state.total_reward.load(Ordering::Relaxed));
 
-            let traffic_share = if total_preds > 0 { p as f64 / total_preds as f64 } else { 0.0 };
+            let traffic_share = if total_preds > 0 {
+                p as f64 / total_preds as f64
+            } else {
+                0.0
+            };
 
             let (mean_reward, lower_ci, upper_ci) = if r >= 10 {
                 let mean = (tr / r as f64).clamp(0.0, 1.0);
-                let z    = 1.96_f64;
-                let se   = ((mean * (1.0 - mean)) / r as f64).max(0.0).sqrt();
-                (Some(mean), Some((mean - z * se).max(0.0)), Some((mean + z * se).min(1.0)))
+                let z = 1.96_f64;
+                let se = ((mean * (1.0 - mean)) / r as f64).max(0.0).sqrt();
+                (
+                    Some(mean),
+                    Some((mean - z * se).max(0.0)),
+                    Some((mean + z * se).min(1.0)),
+                )
             } else {
                 (None, None, None)
             };
 
-            arm_stats.insert(arm_id.clone(), ArmReportStats {
-                traffic_share,
-                predictions:     p,
-                rewards:         r,
-                mean_reward,
-                reward_lower_ci: lower_ci,
-                reward_upper_ci: upper_ci,
-                status:          state.status(),
-                group:           state.group.clone(),
-            });
+            arm_stats.insert(
+                arm_id.clone(),
+                ArmReportStats {
+                    traffic_share,
+                    predictions: p,
+                    rewards: r,
+                    mean_reward,
+                    reward_lower_ci: lower_ci,
+                    reward_upper_ci: upper_ci,
+                    status: state.status(),
+                    group: state.group.clone(),
+                },
+            );
         }
 
         // Rank arms by mean_reward descending. Only arms that can still be served:
         // naming a paused arm as the leader would recommend something the policy is
         // no longer allowed to pick.
-        let mut ranked: Vec<(&String, f64, Option<f64>, Option<f64>)> = arm_stats.iter()
+        let mut ranked: Vec<(&String, f64, Option<f64>, Option<f64>)> = arm_stats
+            .iter()
             .filter(|(_, s)| s.status == ArmStatus::Active)
-            .filter_map(|(id, s)| s.mean_reward.map(|m| (id, m, s.reward_lower_ci, s.reward_upper_ci)))
+            .filter_map(|(id, s)| {
+                s.mean_reward
+                    .map(|m| (id, m, s.reward_lower_ci, s.reward_upper_ci))
+            })
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let (leading_arm, converged) = match ranked.as_slice() {
             [] | [_] => (ranked.first().map(|(id, _, _, _)| (*id).clone()), None),
             [top, second, ..] => {
-                let top_rewards    = arms_guard.get(top.0.as_str()).map_or(0, |s| s.reward_count.load(Ordering::Relaxed));
-                let second_rewards = arms_guard.get(second.0.as_str()).map_or(0, |s| s.reward_count.load(Ordering::Relaxed));
+                let top_rewards = arms_guard
+                    .get(top.0.as_str())
+                    .map_or(0, |s| s.reward_count.load(Ordering::Relaxed));
+                let second_rewards = arms_guard
+                    .get(second.0.as_str())
+                    .map_or(0, |s| s.reward_count.load(Ordering::Relaxed));
                 let converged = if top_rewards >= 30 && second_rewards >= 30 {
                     // Leading arm's lower CI > second arm's upper CI → significant lead
                     Some(top.2.unwrap_or(0.0) > second.3.unwrap_or(1.0))
@@ -2914,7 +3390,8 @@ impl BanditDB {
         };
 
         let overall_reward_rate = if total_rwds > 0 {
-            let sum: f64 = arms_guard.values()
+            let sum: f64 = arms_guard
+                .values()
                 .map(|s| f64::from_bits(s.total_reward.load(Ordering::Relaxed)))
                 .sum();
             Some(sum / total_rwds as f64)
@@ -2924,33 +3401,40 @@ impl BanditDB {
 
         let (challenger_traffic_pct, tournament_win_streak) =
             if matches!(&campaign.algorithm, Algorithm::Progressive(_)) {
-                (Some(campaign.challenger_traffic_bps.load(Ordering::Relaxed) as f64 / 100.0),
-                 Some(campaign.tournament_wins.load(Ordering::Relaxed)))
+                (
+                    Some(campaign.challenger_traffic_bps.load(Ordering::Relaxed) as f64 / 100.0),
+                    Some(campaign.tournament_wins.load(Ordering::Relaxed)),
+                )
             } else {
                 (None, None)
             };
 
         Ok(CampaignReport {
-            campaign_id:         campaign_id.to_string(),
-            archived:            campaign.archived.load(Ordering::Relaxed),
-            algorithm:           campaign.algorithm.clone(),
-            alpha:               campaign.alpha,
-            total_predictions:   total_preds,
-            total_rewards:       total_rwds,
+            campaign_id: campaign_id.to_string(),
+            archived: campaign.archived.load(Ordering::Relaxed),
+            algorithm: campaign.algorithm.clone(),
+            alpha: campaign.alpha,
+            total_predictions: total_preds,
+            total_rewards: total_rwds,
             overall_reward_rate,
-            arms:                arm_stats,
+            arms: arm_stats,
             leading_arm,
             converged,
             challenger_traffic_pct,
             tournament_win_streak,
-            pacing:              campaign.pacing_report(),
+            pacing: campaign.pacing_report(),
         })
     }
 
     /// Retrieve pacing report for a campaign if pacing is configured.
-    pub fn campaign_pacing_report(&self, campaign_id: &str) -> Result<Option<PacingReport>, EngineError> {
+    pub fn campaign_pacing_report(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Option<PacingReport>, EngineError> {
         let campaigns = self.campaigns.read();
-        let campaign = campaigns.get(campaign_id).ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+        let campaign = campaigns
+            .get(campaign_id)
+            .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
         Ok(campaign.pacing_report())
     }
 
@@ -2961,18 +3445,32 @@ impl BanditDB {
     /// predict() takes arms.read() and then neural.lock() via embed(), so holding the
     /// neural lock across an arms.write() would invert that order and deadlock.
     #[cfg(feature = "neural")]
-    fn retrain_campaign_locked(campaign_id: &str, campaign: &Campaign, neural_dir: &str, origin: &str) {
-        let Some(neural_mutex) = &campaign.neural else { return };
+    fn retrain_campaign_locked(
+        campaign_id: &str,
+        campaign: &Campaign,
+        neural_dir: &str,
+        origin: &str,
+    ) {
+        let Some(neural_mutex) = &campaign.neural else {
+            return;
+        };
         let mut neural = neural_mutex.lock();
 
         let arms_snapshot: HashMap<String, ArmState> = {
             let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
-            target_arms.read().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            target_arms
+                .read()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         };
 
         let new_arm_states = match neural.retrain(&arms_snapshot) {
-            Err(e) => { tracing::error!(campaign = %campaign_id, origin, error = %e, "neural retrain failed"); None }
-            Ok(_)  => Some(neural.reaccumulate(&arms_snapshot)),
+            Err(e) => {
+                tracing::error!(campaign = %campaign_id, origin, error = %e, "neural retrain failed");
+                None
+            }
+            Ok(_) => Some(neural.reaccumulate(&arms_snapshot)),
         };
 
         let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
@@ -2983,7 +3481,11 @@ impl BanditDB {
             let losses = &neural.last_retrain_losses;
             let initial = losses.first().copied().unwrap_or(0.0);
             let final_l = losses.last().copied().unwrap_or(0.0);
-            let improv  = if initial > 0.0 { (initial - final_l) / initial * 100.0 } else { 0.0 };
+            let improv = if initial > 0.0 {
+                (initial - final_l) / initial * 100.0
+            } else {
+                0.0
+            };
             tracing::info!(
                 campaign        = %campaign_id,
                 origin,
@@ -3019,7 +3521,9 @@ impl BanditDB {
     /// holds the campaign map across a multi-second retrain.
     #[cfg(feature = "neural")]
     pub fn campaigns_due_for_retrain(&self) -> Vec<String> {
-        self.campaigns.read().iter()
+        self.campaigns
+            .read()
+            .iter()
             .filter(|(_, c)| c.neural.as_ref().is_some_and(|n| n.lock().should_retrain()))
             .map(|(id, _)| id.clone())
             .collect()
@@ -3030,16 +3534,26 @@ impl BanditDB {
     #[cfg(feature = "neural")]
     pub fn retrain_campaign(&self, campaign_id: &str) -> bool {
         let neural_dir = self.neural_dir();
-        if fs::create_dir_all(&neural_dir).is_err() { return false }
+        if fs::create_dir_all(&neural_dir).is_err() {
+            return false;
+        }
         let campaigns = self.campaigns.read();
-        let Some(campaign) = campaigns.get(campaign_id) else { return false };
-        if campaign.neural.is_none() { return false }
+        let Some(campaign) = campaigns.get(campaign_id) else {
+            return false;
+        };
+        if campaign.neural.is_none() {
+            return false;
+        }
         Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "worker");
         true
     }
 
-    pub fn neural_dir(&self) -> String { format!("{}/neural", self.data_dir) }
-    pub fn export_dir(&self) -> String { format!("{}/exports", self.data_dir) }
+    pub fn neural_dir(&self) -> String {
+        format!("{}/neural", self.data_dir)
+    }
+    pub fn export_dir(&self) -> String {
+        format!("{}/exports", self.data_dir)
+    }
 
     /// Lightweight per-campaign entropy status for the /health endpoint.
     /// Computes live entropy from arm prediction counts (one read lock per campaign).
@@ -3047,21 +3561,26 @@ impl BanditDB {
         let campaigns = self.campaigns.read();
         let mut result = Vec::with_capacity(campaigns.len());
         for (id, campaign) in campaigns.iter() {
-            if campaign.archived.load(Ordering::Relaxed) { continue; }
+            if campaign.archived.load(Ordering::Relaxed) {
+                continue;
+            }
             let arms_guard = campaign.arms.read();
-            let total_preds: u64 = arms_guard.values()
+            let total_preds: u64 = arms_guard
+                .values()
                 .map(|s| s.prediction_count.load(Ordering::Relaxed))
                 .sum();
             // Active arms only, matching campaign_diagnostics: entropy describes the
             // spread of the policy that is running now.
-            let active_arms: Vec<&ArmState> = arms_guard.values().filter(|a| a.is_active()).collect();
-            let pred_counts: Vec<u64> = active_arms.iter()
+            let active_arms: Vec<&ArmState> =
+                arms_guard.values().filter(|a| a.is_active()).collect();
+            let pred_counts: Vec<u64> = active_arms
+                .iter()
                 .map(|s| s.prediction_count.load(Ordering::Relaxed))
                 .collect();
             let converged = convergence_signal(&active_arms);
             drop(arms_guard);
             let entropy = selection_entropy(&pred_counts);
-            let status  = classify_entropy_status(entropy, total_preds, converged);
+            let status = classify_entropy_status(entropy, total_preds, converged);
             result.push((id.clone(), entropy, status));
         }
         result
@@ -3083,20 +3602,22 @@ impl BanditDB {
 /// coverage_count is too low (too few matched samples for a reliable estimate).
 #[cfg(feature = "neural")]
 fn snips_score(
-    buffer:     &std::collections::VecDeque<(Vec<f64>, String, f64, f64)>,
-    arms:       &HashMap<String, ArmState>,
+    buffer: &std::collections::VecDeque<(Vec<f64>, String, f64, f64)>,
+    arms: &HashMap<String, ArmState>,
     feature_fn: impl Fn(&Array1<f64>) -> Array1<f64>,
 ) -> (f64, usize) {
-    let mut numerator   = 0.0f64;
+    let mut numerator = 0.0f64;
     let mut denominator = 0.0f64;
-    let mut coverage    = 0usize;
+    let mut coverage = 0usize;
 
     for (context, logged_arm, reward, propensity) in buffer {
         let features = feature_fn(&Array1::from_vec(context.clone()));
 
-        let best_arm = arms.iter()
+        let best_arm = arms
+            .iter()
             .max_by(|(_, a), (_, b)| {
-                a.theta.dot(&features)
+                a.theta
+                    .dot(&features)
                     .partial_cmp(&b.theta.dot(&features))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
@@ -3104,13 +3625,17 @@ fn snips_score(
 
         if best_arm == Some(logged_arm.as_str()) {
             let w = (1.0 / propensity.clamp(0.01, 1.0)).min(100.0);
-            numerator   += reward * w;
+            numerator += reward * w;
             denominator += w;
-            coverage    += 1;
+            coverage += 1;
         }
     }
 
-    let estimate = if denominator > 1e-10 { numerator / denominator } else { 0.0 };
+    let estimate = if denominator > 1e-10 {
+        numerator / denominator
+    } else {
+        0.0
+    };
     (estimate, coverage)
 }
 
@@ -3118,21 +3643,25 @@ fn snips_score(
 #[cfg(feature = "neural")]
 fn run_tournament(
     campaign_id: &str,
-    campaign:    &Campaign,
-    neural:      &crate::neural::NeuralLinUCBState,
-    cfg:         &ProgressiveConfig,
+    campaign: &Campaign,
+    neural: &crate::neural::NeuralLinUCBState,
+    cfg: &ProgressiveConfig,
 ) {
     match evaluate_tournament(campaign_id, campaign, neural, cfg) {
         TournamentOutcome::Hold => {}
         TournamentOutcome::ChallengerStep(new_bps) => {
-            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
+            let old = campaign
+                .challenger_traffic_bps
+                .swap(new_bps, Ordering::SeqCst);
             campaign.tournament_wins.store(0, Ordering::SeqCst);
             tracing::info!(campaign = %campaign_id,
                 from_pct = old / 100, to_pct = new_bps / 100,
                 "tournament: challenger traffic increased");
         }
         TournamentOutcome::BaseStep(new_bps) => {
-            let old = campaign.challenger_traffic_bps.swap(new_bps, Ordering::SeqCst);
+            let old = campaign
+                .challenger_traffic_bps
+                .swap(new_bps, Ordering::SeqCst);
             campaign.tournament_wins.store(0, Ordering::SeqCst);
             tracing::info!(campaign = %campaign_id,
                 from_pct = old / 100, to_pct = new_bps / 100,
@@ -3154,17 +3683,23 @@ fn run_tournament(
 #[cfg(feature = "neural")]
 fn evaluate_tournament(
     campaign_id: &str,
-    campaign:    &Campaign,
-    neural:      &crate::neural::NeuralLinUCBState,
-    cfg:         &ProgressiveConfig,
+    campaign: &Campaign,
+    neural: &crate::neural::NeuralLinUCBState,
+    cfg: &ProgressiveConfig,
 ) -> TournamentOutcome {
-    if neural.buffer.is_empty() { return TournamentOutcome::Hold; }
+    if neural.buffer.is_empty() {
+        return TournamentOutcome::Hold;
+    }
 
     // Minimum observations per arm before we trust the SNIPS estimate.
-    let per_arm_counts = neural.buffer.iter().fold(
-        HashMap::<&str, usize>::new(),
-        |mut m, (_, arm, _, _)| { *m.entry(arm.as_str()).or_insert(0) += 1; m },
-    );
+    let per_arm_counts =
+        neural
+            .buffer
+            .iter()
+            .fold(HashMap::<&str, usize>::new(), |mut m, (_, arm, _, _)| {
+                *m.entry(arm.as_str()).or_insert(0) += 1;
+                m
+            });
     let min_per_arm = per_arm_counts.values().copied().min().unwrap_or(0);
     if min_per_arm < cfg.min_obs {
         tracing::debug!(campaign = %campaign_id, min_per_arm, required = cfg.min_obs,
@@ -3172,24 +3707,19 @@ fn evaluate_tournament(
         return TournamentOutcome::Hold;
     }
 
-    let base_arms      = campaign.arms.read();
+    let base_arms = campaign.arms.read();
     let chal_arm_guard = campaign.challenger_arms.as_ref().map(|c| c.read());
 
-    let (base_snips, base_cov) = snips_score(
-        &neural.buffer, &base_arms,
-        |ctx| match cfg.base.as_ref() {
+    let (base_snips, base_cov) =
+        snips_score(&neural.buffer, &base_arms, |ctx| match cfg.base.as_ref() {
             Algorithm::NeuralLinUCB(_) => neural.embed(ctx),
             _ => ctx.clone(),
-        },
-    );
+        });
     let (chal_snips, chal_cov) = match &chal_arm_guard {
-        Some(c) => snips_score(
-            &neural.buffer, c,
-            |ctx| match cfg.challenger.as_ref() {
-                Algorithm::NeuralLinUCB(_) => neural.embed(ctx),
-                _ => ctx.clone(),
-            },
-        ),
+        Some(c) => snips_score(&neural.buffer, c, |ctx| match cfg.challenger.as_ref() {
+            Algorithm::NeuralLinUCB(_) => neural.embed(ctx),
+            _ => ctx.clone(),
+        }),
         None => (0.0, 0),
     };
 
@@ -3214,15 +3744,13 @@ fn evaluate_tournament(
 
     const MARGIN: f64 = 0.10;
     let current_bps = campaign.challenger_traffic_bps.load(Ordering::SeqCst);
-    let chal_wins   = chal_snips > base_snips * (1.0 + MARGIN);
-    let base_wins   = base_snips > chal_snips * (1.0 + MARGIN);
+    let chal_wins = chal_snips > base_snips * (1.0 + MARGIN);
+    let base_wins = base_snips > chal_snips * (1.0 + MARGIN);
 
     if chal_wins {
         let streak = campaign.tournament_wins.fetch_add(1, Ordering::SeqCst) + 1;
         if streak >= cfg.required_wins as i32 {
-            return TournamentOutcome::ChallengerStep(
-                (current_bps + cfg.step_bps).min(BPS_CEIL)
-            );
+            return TournamentOutcome::ChallengerStep((current_bps + cfg.step_bps).min(BPS_CEIL));
         }
         tracing::debug!(campaign = %campaign_id, streak, required = cfg.required_wins,
             "tournament: challenger win");
@@ -3230,7 +3758,7 @@ fn evaluate_tournament(
         let streak = campaign.tournament_wins.fetch_sub(1, Ordering::SeqCst) - 1;
         if streak <= -(cfg.required_wins as i32) {
             return TournamentOutcome::BaseStep(
-                current_bps.saturating_sub(cfg.step_bps).max(BPS_FLOOR)
+                current_bps.saturating_sub(cfg.step_bps).max(BPS_FLOOR),
             );
         }
         tracing::debug!(campaign = %campaign_id, streak = -streak, required = cfg.required_wins,
@@ -3238,8 +3766,11 @@ fn evaluate_tournament(
     } else {
         // Inconclusive: decay streak toward 0 to demand fresh evidence.
         let streak = campaign.tournament_wins.load(Ordering::SeqCst);
-        if streak > 0      { campaign.tournament_wins.fetch_sub(1, Ordering::SeqCst); }
-        else if streak < 0 { campaign.tournament_wins.fetch_add(1, Ordering::SeqCst); }
+        if streak > 0 {
+            campaign.tournament_wins.fetch_sub(1, Ordering::SeqCst);
+        } else if streak < 0 {
+            campaign.tournament_wins.fetch_add(1, Ordering::SeqCst);
+        }
         return TournamentOutcome::Inconclusive;
     }
 
@@ -3255,31 +3786,34 @@ fn evaluate_tournament(
 /// happen within the same second. This ensures O(1) write performance regardless
 /// of campaign history size.
 pub fn write_campaign_parquet(
-    export_dir:   &str,
-    campaign_id:  &str,
+    export_dir: &str,
+    campaign_id: &str,
     interactions: &[CompletedInteraction],
-    feature_dim:  usize,
+    feature_dim: usize,
 ) -> Result<(), String> {
     if interactions.is_empty() {
         return Ok(());
     }
 
     let timestamp_us = SystemTime::now()
-        .duration_since(UNIX_EPOCH).unwrap_or_default()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
         .as_micros() as u64;
 
     let mut df = interactions_to_df(interactions, feature_dim)?;
 
     // Guard against path traversal from WAL-sourced campaign IDs that bypass HTTP validation.
-    let filename  = format!("{campaign_id}_{timestamp_us}.parquet");
-    let tmp_name  = format!("{campaign_id}_{timestamp_us}.parquet.tmp");
-    let safe_name = Path::new(&filename).file_name()
+    let filename = format!("{campaign_id}_{timestamp_us}.parquet");
+    let tmp_name = format!("{campaign_id}_{timestamp_us}.parquet.tmp");
+    let safe_name = Path::new(&filename)
+        .file_name()
         .ok_or_else(|| format!("invalid parquet filename for campaign '{campaign_id}'"))?;
-    let safe_tmp  = Path::new(&tmp_name).file_name()
+    let safe_tmp = Path::new(&tmp_name)
+        .file_name()
         .ok_or_else(|| format!("invalid parquet tmp filename for campaign '{campaign_id}'"))?;
 
     let path = Path::new(export_dir).join(safe_name);
-    let tmp  = Path::new(export_dir).join(safe_tmp);
+    let tmp = Path::new(export_dir).join(safe_tmp);
 
     let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
     ParquetWriter::new(&mut file)
@@ -3291,21 +3825,27 @@ pub fn write_campaign_parquet(
     Ok(())
 }
 
-fn interactions_to_df(interactions: &[CompletedInteraction], feature_dim: usize) -> Result<DataFrame, String> {
-    let interaction_ids: Vec<&str>      = interactions.iter().map(|r| r.interaction_id.as_str()).collect();
-    let arm_ids:         Vec<&str>      = interactions.iter().map(|r| r.arm_id.as_str()).collect();
-    let rewards:         Vec<f64>       = interactions.iter().map(|r| r.reward).collect();
-    let predicted_ats:   Vec<i64>       = interactions.iter().map(|r| r.predicted_at as i64).collect();
-    let rewarded_ats:    Vec<i64>       = interactions.iter().map(|r| r.rewarded_at  as i64).collect();
-    let propensities:    Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
+fn interactions_to_df(
+    interactions: &[CompletedInteraction],
+    feature_dim: usize,
+) -> Result<DataFrame, String> {
+    let interaction_ids: Vec<&str> = interactions
+        .iter()
+        .map(|r| r.interaction_id.as_str())
+        .collect();
+    let arm_ids: Vec<&str> = interactions.iter().map(|r| r.arm_id.as_str()).collect();
+    let rewards: Vec<f64> = interactions.iter().map(|r| r.reward).collect();
+    let predicted_ats: Vec<i64> = interactions.iter().map(|r| r.predicted_at as i64).collect();
+    let rewarded_ats: Vec<i64> = interactions.iter().map(|r| r.rewarded_at as i64).collect();
+    let propensities: Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
 
     let mut series: Vec<Series> = vec![
         Series::new("interaction_id", interaction_ids),
-        Series::new("arm_id",         arm_ids),
-        Series::new("reward",         rewards),
-        Series::new("predicted_at",   predicted_ats),
-        Series::new("rewarded_at",    rewarded_ats),
-        Series::new("propensity",     propensities),
+        Series::new("arm_id", arm_ids),
+        Series::new("reward", rewards),
+        Series::new("predicted_at", predicted_ats),
+        Series::new("rewarded_at", rewarded_ats),
+        Series::new("propensity", propensities),
     ];
 
     for f in 0..feature_dim {
@@ -3357,19 +3897,27 @@ pub fn campaign_memory_estimate(arms: usize, arm_dim: usize, algorithm: &Algorit
     };
 
     let mut total = arms as u64 * per_arm;
-    if is_ts          { total *= 2; }
-    if is_progressive { total *= 2; }
+    if is_ts {
+        total *= 2;
+    }
+    if is_progressive {
+        total *= 2;
+    }
 
     if let Some(cfg) = neural_cfg {
         let (ctx, h, layers, embed) = (
-            cfg.context_dim as u64, cfg.hidden_dim as u64,
-            cfg.hidden_layers as u64, cfg.embed_dim as u64,
+            cfg.context_dim as u64,
+            cfg.hidden_dim as u64,
+            cfg.hidden_layers as u64,
+            cfg.embed_dim as u64,
         );
         let params = ctx * h + h * h * layers.saturating_sub(1) + h * embed;
         total += params * 4 * 3;
 
         let buffer_cap: u64 = std::env::var("BANDITDB_NEURAL_BUFFER_CAP")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_000);
         total += buffer_cap * (8 * ctx + 70);
     }
 
@@ -3382,24 +3930,24 @@ pub fn campaign_memory_estimate(arms: usize, arm_dim: usize, algorithm: &Algorit
 /// learned nothing contribute θ = 0, which pulls the mean toward zero — that is the
 /// honest answer, not a bug: a group whose members know nothing has nothing to lend.
 fn resolve_prior(
-    arms:       &HashMap<String, ArmState>,
+    arms: &HashMap<String, ArmState>,
     warm_start: &WarmStart,
-    group:      Option<&str>,
-    dim:        usize,
+    group: Option<&str>,
+    dim: usize,
 ) -> Result<Option<ArmPrior>, EngineError> {
     let (sources, strength): (Vec<&ArmState>, f64) = match warm_start {
         WarmStart::None => return Ok(None),
-        WarmStart::Population { strength } => (
-            arms.values().filter(|a| a.is_active()).collect(),
-            *strength,
-        ),
+        WarmStart::Population { strength } => {
+            (arms.values().filter(|a| a.is_active()).collect(), *strength)
+        }
         WarmStart::Group { strength } => {
             let Some(group) = group else {
                 return Err(EngineError::BadRequest(
-                    "warm_start from \"group\" requires the new arm to declare a group".into()
+                    "warm_start from \"group\" requires the new arm to declare a group".into(),
                 ));
             };
-            let members: Vec<&ArmState> = arms.values()
+            let members: Vec<&ArmState> = arms
+                .values()
                 .filter(|a| a.is_active() && a.group.as_deref() == Some(group))
                 .collect();
             if members.is_empty() {
@@ -3409,10 +3957,13 @@ fn resolve_prior(
             }
             (members, *strength)
         }
-        WarmStart::Arms { arms: names, strength } => {
+        WarmStart::Arms {
+            arms: names,
+            strength,
+        } => {
             if names.is_empty() {
                 return Err(EngineError::BadRequest(
-                    "warm_start from \"arms\" requires at least one source arm".into()
+                    "warm_start from \"arms\" requires at least one source arm".into(),
                 ));
             }
             let mut sources = Vec::with_capacity(names.len());
@@ -3420,9 +3971,9 @@ fn resolve_prior(
                 // Status is deliberately ignored here: warm-starting from an arm the
                 // caller named explicitly — including one just paused and replaced —
                 // is the point.
-                sources.push(arms.get(name).ok_or_else(|| EngineError::NotFound(
-                    format!("warm_start source arm '{name}' not found")
-                ))?);
+                sources.push(arms.get(name).ok_or_else(|| {
+                    EngineError::NotFound(format!("warm_start source arm '{name}' not found"))
+                })?);
             }
             (sources, *strength)
         }
@@ -3435,7 +3986,7 @@ fn resolve_prior(
     }
     if sources.is_empty() {
         return Err(EngineError::BadRequest(
-            "warm_start has no source arms to borrow from".into()
+            "warm_start has no source arms to borrow from".into(),
         ));
     }
 
@@ -3445,7 +3996,8 @@ fn resolve_prior(
         // otherwise slip in between reading the arms and building the prior.
         if state.theta.len() != dim {
             return Err(EngineError::Internal(format!(
-                "warm_start source has dimension {} but the campaign uses {dim}", state.theta.len()
+                "warm_start source has dimension {} but the campaign uses {dim}",
+                state.theta.len()
             )));
         }
         mean += &state.theta;
@@ -3454,11 +4006,14 @@ fn resolve_prior(
 
     if !mean.iter().all(|v| v.is_finite()) {
         return Err(EngineError::Internal(
-            "warm_start mean is not finite — refusing to seed an arm with NaN".into()
+            "warm_start mean is not finite — refusing to seed an arm with NaN".into(),
         ));
     }
 
-    Ok(Some(ArmPrior { mean: mean.to_vec(), strength }))
+    Ok(Some(ArmPrior {
+        mean: mean.to_vec(),
+        strength,
+    }))
 }
 
 /// Build the arm an `ArmAdded` event describes: warm-started when the event
@@ -3470,16 +4025,19 @@ fn resolve_prior(
 /// which is a worse estimate, not a corrupt one.
 fn new_arm_state(dim: usize, prior: Option<&ArmPrior>, group: Option<String>) -> ArmState {
     let mut state = match prior {
-        Some(p) if p.mean.len() == dim
-            && p.strength.is_finite()
-            && p.strength > 0.0
-            && p.mean.iter().all(|v| v.is_finite()) =>
+        Some(p)
+            if p.mean.len() == dim
+                && p.strength.is_finite()
+                && p.strength > 0.0
+                && p.mean.iter().all(|v| v.is_finite()) =>
         {
             ArmState::with_prior(dim, &Array1::from_vec(p.mean.clone()), p.strength)
         }
         Some(p) => {
             tracing::warn!(
-                dim, prior_len = p.mean.len(), strength = p.strength,
+                dim,
+                prior_len = p.mean.len(),
+                strength = p.strength,
                 "arm: unusable warm-start prior — starting the arm cold"
             );
             ArmState::new(dim)
@@ -3492,24 +4050,34 @@ fn new_arm_state(dim: usize, prior: Option<&ArmPrior>, group: Option<String>) ->
 
 fn selection_entropy(counts: &[u64]) -> f64 {
     let total: u64 = counts.iter().sum();
-    if total == 0 || counts.len() < 2 { return 1.0; }
+    if total == 0 || counts.len() < 2 {
+        return 1.0;
+    }
     let log_n = (counts.len() as f64).ln();
-    counts.iter()
+    counts
+        .iter()
         .filter(|&&c| c > 0)
-        .map(|&c| { let p = c as f64 / total as f64; -p * p.ln() })
-        .sum::<f64>() / log_n
+        .map(|&c| {
+            let p = c as f64 / total as f64;
+            -p * p.ln()
+        })
+        .sum::<f64>()
+        / log_n
 }
 
 /// Wilson-score convergence signal: true if the leading arm's 95% CI lower bound
 /// exceeds the second arm's upper bound (requires ≥ 30 rewards on both arms).
 fn convergence_signal(arms: &[&ArmState]) -> Option<bool> {
-    let mut ranked: Vec<(f64, f64, f64, u64)> = arms.iter()
+    let mut ranked: Vec<(f64, f64, f64, u64)> = arms
+        .iter()
         .filter_map(|s| {
             let r = s.reward_count.load(Ordering::Relaxed);
-            if r < 10 { return None; }
-            let tr   = f64::from_bits(s.total_reward.load(Ordering::Relaxed));
+            if r < 10 {
+                return None;
+            }
+            let tr = f64::from_bits(s.total_reward.load(Ordering::Relaxed));
             let mean = (tr / r as f64).clamp(0.0, 1.0);
-            let se   = ((mean * (1.0 - mean)) / r as f64).max(0.0).sqrt();
+            let se = ((mean * (1.0 - mean)) / r as f64).max(0.0).sqrt();
             Some((mean - 1.96 * se, mean + 1.96 * se, mean, r))
         })
         .collect();
@@ -3523,11 +4091,21 @@ fn convergence_signal(arms: &[&ArmState]) -> Option<bool> {
 /// Map entropy + guards to a status level.
 /// Guard 1: suppress if statistically converged.
 /// Guard 2: suppress if fewer than 500 total predictions (insufficient data).
-fn classify_entropy_status(entropy: f64, total_preds: u64, converged: Option<bool>) -> EntropyStatus {
-    if converged == Some(true) || total_preds < 500 { return EntropyStatus::Ok; }
-    if entropy >= 0.4 { EntropyStatus::Ok }
-    else if entropy >= 0.2 { EntropyStatus::Warning }
-    else { EntropyStatus::Critical }
+fn classify_entropy_status(
+    entropy: f64,
+    total_preds: u64,
+    converged: Option<bool>,
+) -> EntropyStatus {
+    if converged == Some(true) || total_preds < 500 {
+        return EntropyStatus::Ok;
+    }
+    if entropy >= 0.4 {
+        EntropyStatus::Ok
+    } else if entropy >= 0.2 {
+        EntropyStatus::Warning
+    } else {
+        EntropyStatus::Critical
+    }
 }
 
 /// Adaptive Monte Carlo sample count for Thompson Sampling propensity estimation.
@@ -3545,22 +4123,39 @@ fn classify_entropy_status(entropy: f64, total_preds: u64, converged: Option<boo
 /// This gives the ideal cost profile for production: high N when traffic is low (cold start),
 /// low N when traffic is high (converged) — the sample budget scales inversely with load.
 fn ts_propensity_samples(arms: &[(&String, &ArmState)]) -> usize {
-    let max_diag = arms.iter()
-        .map(|(_, s)| s.a_inv.diag().iter().cloned().fold(f64::NEG_INFINITY, f64::max))
+    let max_diag = arms
+        .iter()
+        .map(|(_, s)| {
+            s.a_inv
+                .diag()
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
         .fold(0.0f64, f64::max);
-    if max_diag > 0.7 { 64 }
-    else if max_diag > 0.3 { 32 }
-    else if max_diag > 0.1 { 16 }
-    else { 8 }
+    if max_diag > 0.7 {
+        64
+    } else if max_diag > 0.3 {
+        32
+    } else if max_diag > 0.1 {
+        16
+    } else {
+        8
+    }
 }
 
 /// Compute softmax-normalised propensities over arm UCB scores.
 /// Subtracts the max for numerical stability before exponentiating.
 fn softmax_propensities(scores: &[(String, f64)]) -> HashMap<String, f64> {
-    let max_score = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+    let max_score = scores
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = scores.iter().map(|(_, s)| (s - max_score).exp()).collect();
     let sum: f64 = exps.iter().sum();
-    scores.iter().zip(exps.iter())
+    scores
+        .iter()
+        .zip(exps.iter())
         .map(|((arm_id, _), exp)| (arm_id.clone(), exp / sum))
         .collect()
 }

@@ -14,11 +14,11 @@
 //! The fix publishes an immutable `NeuralWeights` snapshot that readers clone, so
 //! `predict` never touches the neural mutex at all.
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, NeuralLinUCBConfig};
+use banditdb::BanditDB;
 use std::fs;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CTX_DIM: usize = 6;
@@ -27,8 +27,8 @@ const EMBED_DIM: usize = 8;
 fn neural_cfg(retrain_every: usize, retrain_steps: usize) -> NeuralLinUCBConfig {
     NeuralLinUCBConfig {
         context_dim: CTX_DIM,
-        embed_dim:   EMBED_DIM,
-        hidden_dim:  64,
+        embed_dim: EMBED_DIM,
+        hidden_dim: 64,
         hidden_layers: 2,
         retrain_every,
         retrain_steps,
@@ -52,7 +52,8 @@ async fn setup(dir: &str, retrain_every: usize, retrain_steps: usize) -> Arc<Ban
         Algorithm::NeuralLinUCB(cfg),
         None,
         None,
-    ).await
+    )
+    .await
     .unwrap();
     db
 }
@@ -96,7 +97,10 @@ async fn predict_does_not_block_while_neural_lock_is_held() {
 
     match rx.recv_timeout(Duration::from_millis(1500)) {
         Ok((ok, elapsed)) => {
-            assert!(ok, "predict returned an error while the neural lock was held");
+            assert!(
+                ok,
+                "predict returned an error while the neural lock was held"
+            );
             assert!(
                 elapsed < Duration::from_millis(500),
                 "predict took {elapsed:?} — it is still contending with the neural mutex"
@@ -142,7 +146,8 @@ async fn snapshot_is_isolated_from_subsequent_training() {
     let (held, embedding_before) = before;
     let embedding_after = held.embed(&probe);
     assert_eq!(
-        embedding_before.to_vec(), embedding_after.to_vec(),
+        embedding_before.to_vec(),
+        embedding_after.to_vec(),
         "a snapshot handed to a reader changed after retraining — it is not a deep copy"
     );
 
@@ -154,7 +159,8 @@ async fn snapshot_is_isolated_from_subsequent_training() {
         w.embed(&probe)
     };
     assert_ne!(
-        embedding_before.to_vec(), republished.to_vec(),
+        embedding_before.to_vec(),
+        republished.to_vec(),
         "retraining did not republish new weights to the prediction path"
     );
 
@@ -203,7 +209,9 @@ async fn concurrent_predict_reward_retrain_stays_live() {
     // Force retrains concurrently with the traffic above.
     for _ in 0..6 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        db.checkpoint().await.expect("checkpoint under concurrent load");
+        db.checkpoint()
+            .await
+            .expect("checkpoint under concurrent load");
     }
 
     stop.store(true, Ordering::Relaxed);
@@ -213,7 +221,10 @@ async fn concurrent_predict_reward_retrain_stays_live() {
 
     let total = predicts.load(Ordering::Relaxed);
     let worst = Duration::from_micros(max_latency_us.load(Ordering::Relaxed));
-    assert!(total > 100, "only {total} predictions completed — traffic was starved");
+    assert!(
+        total > 100,
+        "only {total} predictions completed — traffic was starved"
+    );
     assert!(
         worst < Duration::from_secs(1),
         "worst prediction latency was {worst:?}; retraining is still stalling the hot path"

@@ -1,8 +1,8 @@
 use banditdb::state::{Algorithm, DbEvent};
 use banditdb::BanditDB;
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Each test gets its own data directory. BanditDB takes an exclusive lock on
@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 /// per test.
 fn data_dir_for(wal: &str) -> String {
     let stem = std::path::Path::new(wal)
-        .file_stem().map(|s| s.to_string_lossy().to_string())
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     let dir = format!("/tmp/bdb_{stem}");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
-
 
 /// Test 3.1 — Torn Write Recovery
 ///
@@ -108,7 +108,17 @@ async fn test_3_2_orphaned_reward_is_noop() {
     let _ = std::fs::remove_file(wal);
 
     let db = BanditDB::new(wal, &data_dir_for(wal));
-    let _ = db.add_campaign("orphan_test", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None).await;
+    let _ = db
+        .add_campaign(
+            "orphan_test",
+            vec!["arm".to_string()],
+            2,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     let theta_before = {
         let campaigns = db.campaigns.read();
@@ -166,7 +176,17 @@ async fn test_3_3_idempotent_recovery() {
     // Phase 1: train a model and capture its final theta.
     let theta_original = {
         let db = BanditDB::new(wal, &data_dir_for(wal));
-        let _ = db.add_campaign("recovery_campaign", vec!["arm".to_string()], 2, 1.0, Algorithm::Linucb, None, None).await;
+        let _ = db
+            .add_campaign(
+                "recovery_campaign",
+                vec!["arm".to_string()],
+                2,
+                1.0,
+                Algorithm::Linucb,
+                None,
+                None,
+            )
+            .await;
 
         for i in 0..N {
             let angle = i as f64 * 0.1;
@@ -227,7 +247,11 @@ async fn test_3_3_idempotent_recovery() {
         theta_original,
         theta_recovered
     );
-    for (i, (orig, rec)) in theta_original.iter().zip(theta_recovered.iter()).enumerate() {
+    for (i, (orig, rec)) in theta_original
+        .iter()
+        .zip(theta_recovered.iter())
+        .enumerate()
+    {
         assert!(
             (orig - rec).abs() < 1e-9,
             "Recovered theta[{i}] diverges beyond float tolerance — WAL replay is not lossless.\nOriginal:  {:?}\nRecovered: {:?}",
@@ -247,7 +271,7 @@ async fn test_3_3_idempotent_recovery() {
 /// reaching the end of this test without a panic.
 #[tokio::test]
 async fn test_3_4_concurrent_export_safety() {
-    let wal     = "/tmp/banditdb_test_3_4.jsonl";
+    let wal = "/tmp/banditdb_test_3_4.jsonl";
     let data_dir = "/tmp/banditdb_test_3_4_data";
     std::fs::create_dir_all(data_dir).unwrap();
     let _ = std::fs::remove_file(wal);
@@ -256,7 +280,17 @@ async fn test_3_4_concurrent_export_safety() {
     let _ = std::fs::remove_file(format!("{}/checkpoint.json", data_dir));
 
     let db = Arc::new(BanditDB::new(wal, data_dir));
-    let _ = db.add_campaign("export_stress", vec!["a".to_string(), "b".to_string()], 3, 1.0, Algorithm::Linucb, None, None).await;
+    let _ = db
+        .add_campaign(
+            "export_stress",
+            vec!["a".to_string(), "b".to_string()],
+            3,
+            1.0,
+            Algorithm::Linucb,
+            None,
+            None,
+        )
+        .await;
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
@@ -300,7 +334,10 @@ async fn test_3_4_concurrent_export_safety() {
             );
         }
         Err(e) => {
-            println!("Checkpoint returned a clean error (acceptable under concurrent writes): {}", e);
+            println!(
+                "Checkpoint returned a clean error (acceptable under concurrent writes): {}",
+                e
+            );
         }
     }
 

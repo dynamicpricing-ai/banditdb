@@ -17,7 +17,9 @@ use std::sync::atomic::Ordering;
 const MAGIC: &[u8] = b"BDMP";
 
 fn reward_count(db: &BanditDB) -> u64 {
-    db.campaigns.read()["c"].arms.read()["a"].reward_count.load(Ordering::Relaxed)
+    db.campaigns.read()["c"].arms.read()["a"]
+        .reward_count
+        .load(Ordering::Relaxed)
 }
 
 fn open(wal: &str, dir: &str, format: &str) -> BanditDB {
@@ -41,7 +43,9 @@ async fn switching_wal_format_loses_nothing_and_converts_at_rotation() {
         let is_msgpack = |path: &str| fs::read(path).unwrap().starts_with(MAGIC);
 
         let db = open(&wal, &dir, from);
-        db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None).await.unwrap();
+        db.add_campaign("c", vec!["a".into()], 2, 1.0, Algorithm::Linucb, None, None)
+            .await
+            .unwrap();
         interact_n(&db, 3).await;
         drop(db);
 
@@ -51,20 +55,34 @@ async fn switching_wal_format_loses_nothing_and_converts_at_rotation() {
         drop(db);
 
         let db = open(&wal, &dir, to);
-        assert_eq!(reward_count(&db), 7, "{from} -> {to}: acknowledged rewards lost after the switch");
-        assert_eq!(is_msgpack(&wal), from == "msgpack",
-            "{from} -> {to}: the WAL must stay in its existing format until rotation");
+        assert_eq!(
+            reward_count(&db),
+            7,
+            "{from} -> {to}: acknowledged rewards lost after the switch"
+        );
+        assert_eq!(
+            is_msgpack(&wal),
+            from == "msgpack",
+            "{from} -> {to}: the WAL must stay in its existing format until rotation"
+        );
 
         // A checkpoint rotates the WAL into the configured format, tail included.
         interact_n(&db, 2).await;
         db.checkpoint().await.unwrap();
         interact_n(&db, 5).await;
-        assert_eq!(is_msgpack(&wal), to == "msgpack",
-            "{from} -> {to}: rotation must convert the WAL to the configured format");
+        assert_eq!(
+            is_msgpack(&wal),
+            to == "msgpack",
+            "{from} -> {to}: rotation must convert the WAL to the configured format"
+        );
         drop(db);
 
         let db = open(&wal, &dir, to);
-        assert_eq!(reward_count(&db), 14, "{from} -> {to}: rewards lost across the converting rotation");
+        assert_eq!(
+            reward_count(&db),
+            14,
+            "{from} -> {to}: rewards lost across the converting rotation"
+        );
         drop(db);
         let _ = fs::remove_dir_all(&dir);
     }

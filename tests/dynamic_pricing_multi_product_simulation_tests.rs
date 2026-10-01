@@ -7,8 +7,8 @@
 //!     2. Balanced Product (Designer Jacket): 50% capacity. Smoothly clears stock at regular price.
 //!     3. Surplus Product (Audio Accessory): 92% capacity. Constraint never binds (lambda -> 0).
 
-use banditdb::BanditDB;
 use banditdb::state::{Algorithm, PacingConfig, ResourceConstraint};
+use banditdb::BanditDB;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -45,8 +45,8 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             prices: [("discount", 600.0), ("regular", 800.0), ("premium", 1000.0)],
             thetas: [
                 ("discount", [0.65, 0.30]),
-                ("regular",  [0.40, 0.30]),
-                ("premium",  [0.20, 0.25]),
+                ("regular", [0.40, 0.30]),
+                ("premium", [0.20, 0.25]),
             ],
             arm_costs: [("discount", 0.80), ("regular", 0.55), ("premium", 0.325)],
         },
@@ -58,8 +58,8 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             prices: [("discount", 90.0), ("regular", 140.0), ("premium", 200.0)],
             thetas: [
                 ("discount", [0.65, 0.30]),
-                ("regular",  [0.35, 0.30]),
-                ("premium",  [0.15, 0.20]),
+                ("regular", [0.35, 0.30]),
+                ("premium", [0.15, 0.20]),
             ],
             arm_costs: [("discount", 0.75), ("regular", 0.50), ("premium", 0.25)],
         },
@@ -71,14 +71,18 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             prices: [("discount", 15.0), ("regular", 25.0), ("premium", 40.0)],
             thetas: [
                 ("discount", [0.70, 0.20]),
-                ("regular",  [0.30, 0.20]),
-                ("premium",  [0.08, 0.10]),
+                ("regular", [0.30, 0.20]),
+                ("premium", [0.08, 0.10]),
             ],
             arm_costs: [("discount", 0.80), ("regular", 0.40), ("premium", 0.13)],
         },
     ];
 
-    let arms = vec!["discount".to_string(), "regular".to_string(), "premium".to_string()];
+    let arms = vec![
+        "discount".to_string(),
+        "regular".to_string(),
+        "premium".to_string(),
+    ];
 
     // Initialize all campaigns with PacingConfig
     for p in &products {
@@ -109,7 +113,9 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             None,
             None,
             Some(pacing_cfg),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
     }
 
     let mut ctx_rng = StdRng::seed_from_u64(42);
@@ -162,7 +168,10 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             }
         }
 
-        let report = db.campaign_pacing_report(p.campaign_id).unwrap().expect("pacing report");
+        let report = db
+            .campaign_pacing_report(p.campaign_id)
+            .unwrap()
+            .expect("pacing report");
         let res = &report.resources[0];
 
         println!("Product Campaign:              {}", p.campaign_id);
@@ -172,8 +181,14 @@ async fn test_multi_product_dynamic_pricing_simulation() {
         println!("  Total Realized Revenue:      ${:.2}", total_revenue);
         println!("  Stockout Arrivals Blocked:   {}", stockout_events);
         println!("  Arm Selections:              {:?}", arm_counts);
-        println!("  BanditDB Consumed Tracked:   {:.1} / {:.1}", res.consumed, res.budget);
-        println!("  BanditDB Utilization:        {:.1}%", res.utilization * 100.0);
+        println!(
+            "  BanditDB Consumed Tracked:   {:.1} / {:.1}",
+            res.consumed, res.budget
+        );
+        println!(
+            "  BanditDB Utilization:        {:.1}%",
+            res.utilization * 100.0
+        );
         println!("  BanditDB Final Shadow Price: {:.4}", res.lambda);
         println!("--------------------------------------------------------------------------");
 
@@ -182,7 +197,9 @@ async fn test_multi_product_dynamic_pricing_simulation() {
         assert!(
             res.consumed <= p.budget * 1.05,
             "Inventory violated on {}: consumed {} > budget {}",
-            p.campaign_id, res.consumed, p.budget
+            p.campaign_id,
+            res.consumed,
+            p.budget
         );
 
         // 2. High budget utilization (> 75% for binding products)
@@ -190,7 +207,8 @@ async fn test_multi_product_dynamic_pricing_simulation() {
             assert!(
                 res.utilization >= 0.75,
                 "Under-utilization on {}: got {:.1}%",
-                p.campaign_id, res.utilization * 100.0
+                p.campaign_id,
+                res.utilization * 100.0
             );
         }
 
@@ -204,10 +222,7 @@ async fn test_multi_product_dynamic_pricing_simulation() {
         }
 
         // 4. Arms explored
-        assert!(
-            !arm_counts.is_empty(),
-            "Should have arm counts recorded"
-        );
+        assert!(!arm_counts.is_empty(), "Should have arm counts recorded");
     }
 
     println!("All multi-product pricing pacing assertions passed successfully!");
