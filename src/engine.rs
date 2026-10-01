@@ -434,6 +434,13 @@ impl Campaign {
         }
     }
 
+    /// Memory this campaign reserves, as admission control counts it.
+    pub fn reserved_bytes(&self) -> u64 {
+        let arms = self.arms.read();
+        let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
+        campaign_memory_estimate(arms.len(), arm_dim, &self.algorithm)
+    }
+
     /// Check that a reward for `arm_id` with a context of `context_len` can be
     /// applied to this campaign's matrices.
     ///
@@ -769,6 +776,14 @@ pub struct BanditDB {
     /// see `campaign_memory_estimate`. Env: BANDITDB_MAX_CAMPAIGN_BYTES
     /// (default 0 = unlimited, preserving pre-existing behaviour).
     pub max_campaign_bytes: u64,
+    /// Upper bound on the estimated memory of all campaigns together.
+    ///
+    /// The per-campaign and per-tenant limits each cap one thing; this caps the
+    /// sum, so many valid campaigns cannot together exhaust the process. Checked
+    /// on campaign creation and on every added arm, never on recovery.
+    /// Env: BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES (default: half the memory this
+    /// process may use; 0 = unlimited).
+    pub max_total_campaign_bytes: u64,
     /// Largest absolute value accepted in a context vector.
     ///
     /// Finiteness alone is not enough. `update()` forms `x·A⁻¹·x` and an outer
@@ -833,6 +848,9 @@ pub struct BanditDB {
     /// the second rotation cuts a WAL the first has already rewritten, at an
     /// offset that no longer means anything, and discards acknowledged records.
     checkpoint_lock: tokio::sync::Mutex<()>,
+    /// Held from a growth check to the write that commits it, so concurrent
+    /// creations and arm additions cannot all pass a check that only one fits.
+    admission: parking_lot::Mutex<()>,
 }
 
 impl BanditDB {
@@ -1266,6 +1284,24 @@ impl BanditDB {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
+        // Unlike the per-campaign limit this defaults on: it is what keeps the sum
+        // of individually valid campaigns inside the machine. Half the memory the
+        // process may use leaves room for the pending cache, checkpoint
+        // serialisation and the OS. Unknown memory (non-Linux) means unlimited.
+        let memory_limit = detect_memory_limit();
+        let max_total_campaign_bytes: u64 = std::env::var("BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| memory_limit.map(|m| m / 2).unwrap_or(0));
+        if max_total_campaign_bytes > 0 {
+            tracing::info!(
+                max_total_campaign_bytes,
+                memory_limit,
+                "campaign memory ceiling"
+            );
+        } else {
+            tracing::warn!("no campaign memory ceiling: set BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES");
+        }
 
         // Ceiling on pending (predicted, not yet rewarded) interactions.
         //
@@ -1277,6 +1313,16 @@ impl BanditDB {
         //
         // Eviction is not free: an evicted prediction can never be matched to its
         // reward, so `banditdb_interactions_evicted_total` is an alerting signal.
+        // The entry cap alone does not bound memory: each entry carries its
+        // context, so 100k entries is ~70 MB at d=64 but ~3 GB at d=4096 — shared
+        // by every tenant and serialised into every checkpoint. The cache is
+        // therefore weighed in bytes. Each entry weighs at least
+        // budget / max_pending, so the entry cap still holds for small contexts.
+        let max_pending_bytes: u64 = std::env::var("BANDITDB_MAX_PENDING_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(512 * 1024 * 1024);
         let max_pending: usize = std::env::var("BANDITDB_MAX_PENDING_INTERACTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1327,7 +1373,11 @@ impl BanditDB {
             campaigns: RwLock::new(HashMap::new()),
             interactions: Cache::builder()
                 .time_to_live(Duration::from_secs(ttl_secs))
-                .max_capacity(max_pending as u64)
+                .max_capacity(max_pending_bytes)
+                .weigher(move |k: &String, v: &InteractionRecord| -> u32 {
+                    let floor = max_pending_bytes / max_pending as u64;
+                    pending_entry_bytes(k, v).max(floor).min(u32::MAX as u64) as u32
+                })
                 .eviction_listener(move |_k, _v, cause| {
                     // Only capacity pressure is a problem. Expiry is
                     // the TTL doing its job, and explicit invalidation
@@ -1345,6 +1395,7 @@ impl BanditDB {
             max_arms,
             max_campaigns,
             max_campaign_bytes,
+            max_total_campaign_bytes,
             max_context_magnitude,
             wal_healthy,
             wal_dropped: AtomicU64::new(0),
@@ -1359,6 +1410,7 @@ impl BanditDB {
             wal_base: AtomicU64::new(0),
             current_checkpoint_unreadable: AtomicBool::new(false),
             checkpoint_lock: tokio::sync::Mutex::new(()),
+            admission: parking_lot::Mutex::new(()),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -2432,6 +2484,35 @@ impl BanditDB {
         Ok(())
     }
 
+    /// Memory all campaigns reserve together. See `max_total_campaign_bytes`.
+    pub fn reserved_campaign_bytes(&self) -> u64 {
+        self.campaigns
+            .read()
+            .values()
+            .map(Campaign::reserved_bytes)
+            .sum()
+    }
+
+    /// Refuse growth of `wanted` bytes that would take all campaigns past the
+    /// process-wide ceiling. Callers hold `admission`.
+    fn check_total_ceiling(&self, wanted: u64, what: &str) -> Result<(), EngineError> {
+        if self.max_total_campaign_bytes == 0 {
+            return Ok(());
+        }
+        let reserved = self.reserved_campaign_bytes();
+        if reserved + wanted > self.max_total_campaign_bytes {
+            let mb = |b: u64| b as f64 / 1_048_576.0;
+            return Err(EngineError::LimitExceeded(format!(
+                "{what} would reserve {:.1} MB, bringing all campaigns to {:.1} MB — over the \
+                 {:.1} MB process-wide ceiling (BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES)",
+                mb(wanted),
+                mb(reserved + wanted),
+                mb(self.max_total_campaign_bytes)
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_pacing(pacing: &PacingConfig) -> Result<(), EngineError> {
         let mut names = std::collections::HashSet::new();
         for r in &pacing.resources {
@@ -2536,6 +2617,10 @@ impl BanditDB {
         decay_half_life_hours: Option<f64>,
         pacing: Option<PacingConfig>,
     ) -> Result<(), EngineError> {
+        // Held until the event is applied, so the checks below and the insert
+        // are one step: concurrent creations cannot all pass a check that only
+        // one of them fits, nor create the same id twice.
+        let admission = self.admission.lock();
         // Admission control runs on the create path ONLY. Recovery and WAL replay
         // deliberately bypass it — see `apply_event_to_memory`. Lowering a limit
         // below what a checkpoint already holds must not make an instance
@@ -2602,6 +2687,10 @@ impl BanditDB {
                 )));
             }
         }
+        self.check_total_ceiling(
+            campaign_memory_estimate(arms.len(), feature_dim, &algorithm),
+            &format!("creating campaign '{campaign_id}'"),
+        )?;
         let event = Arc::new(DbEvent::CampaignCreated {
             campaign_id: campaign_id.to_string(),
             arms,
@@ -2614,6 +2703,7 @@ impl BanditDB {
         });
         // WAL before memory. See BanditDB consistency-model doc comment.
         let ack = self.log_and_apply(event, Durability::Acked)?;
+        drop(admission);
         self.audit("create", campaign_id, None);
         Self::await_ack(ack).await
     }
@@ -2658,6 +2748,9 @@ impl BanditDB {
             }
         }
 
+        // See `add_campaign_pacing`: the checks and the write are one step.
+        let admission = self.admission.lock();
+        let growth;
         let event = {
             let campaigns = self.campaigns.read();
             let campaign = campaigns
@@ -2710,11 +2803,13 @@ impl BanditDB {
                     "campaign '{campaign_id}' has no arms to infer the feature dimension from"
                 ))
             })?;
-            // Same limit as creation, applied to the size this arm grows it to —
-            // otherwise a campaign created small grows past it one arm at a time.
+            // Same limits as creation, applied to the size this arm grows it to —
+            // otherwise a campaign created small grows past them one arm at a time.
+            let grown = campaign_memory_estimate(arms.len() + 1, base_dim, &campaign.algorithm);
+            let current = campaign_memory_estimate(arms.len(), base_dim, &campaign.algorithm);
+            growth = grown.saturating_sub(current);
             if self.max_campaign_bytes > 0 {
-                let estimate =
-                    campaign_memory_estimate(arms.len() + 1, base_dim, &campaign.algorithm);
+                let estimate = grown;
                 if estimate > self.max_campaign_bytes {
                     return Err(EngineError::LimitExceeded(format!(
                         "adding arm '{arm_id}' would grow campaign '{campaign_id}' to an estimated \
@@ -2754,9 +2849,14 @@ impl BanditDB {
                 timestamp_secs: now_secs(),
             })
         };
+        self.check_total_ceiling(
+            growth,
+            &format!("adding arm '{arm_id}' to campaign '{campaign_id}'"),
+        )?;
 
         // WAL before memory. See BanditDB consistency-model doc comment.
         let ack = self.log_and_apply(event, Durability::Acked)?;
+        drop(admission);
         self.audit("arm_add", campaign_id, Some(arm_id));
         Self::await_ack(ack).await
     }
@@ -3945,6 +4045,40 @@ fn interactions_to_df(
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
+}
+
+/// Approximate heap footprint of one pending interaction.
+fn pending_entry_bytes(key: &str, record: &InteractionRecord) -> u64 {
+    let propensities = record
+        .arm_propensities
+        .as_ref()
+        .map(|m| m.keys().map(|k| k.len() as u64 + 48).sum::<u64>())
+        .unwrap_or(0);
+    128 + key.len() as u64
+        + record.campaign_id.len() as u64
+        + record.arm_id.len() as u64
+        + record.context.len() as u64 * 8
+        + propensities
+}
+
+/// Memory this process may use: its cgroup limit if it has one, else physical
+/// RAM. `None` where neither can be read (anything but Linux).
+fn detect_memory_limit() -> Option<u64> {
+    let read = |p: &str| std::fs::read_to_string(p).ok();
+    let physical = read("/proc/meminfo").and_then(|s| {
+        s.lines()
+            .find(|l| l.starts_with("MemTotal:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    });
+    // cgroup v2 reports "max" when unlimited; v1 reports a huge sentinel instead,
+    // so anything above physical RAM is treated as no limit.
+    let cgroup = read("/sys/fs/cgroup/memory.max")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&c| physical.is_none_or(|p| c < p));
+    cgroup.or(physical)
 }
 
 /// Normalised Shannon entropy of an arm selection distribution (0 = collapsed, 1 = uniform).

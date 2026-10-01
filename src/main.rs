@@ -1373,11 +1373,7 @@ fn tenant_reserved_bytes(state: &AppState, tenant_id: &str) -> u64 {
         .read()
         .iter()
         .filter(|(id, _)| id.starts_with(&prefix))
-        .map(|(_, campaign)| {
-            let arms = campaign.arms.read();
-            let arm_dim = arms.values().next().map(|a| a.theta.len()).unwrap_or(0);
-            banditdb::engine::campaign_memory_estimate(arms.len(), arm_dim, &campaign.algorithm)
-        })
+        .map(|(_, campaign)| campaign.reserved_bytes())
         .sum()
 }
 
@@ -2012,6 +2008,24 @@ async fn handle_metrics(
         out.push_str(&format!(
             "banditdb_interactions_evicted_total {}\n\n",
             state.db.interactions_evicted.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP banditdb_interactions_pending_bytes Estimated memory held by pending interactions\n");
+        out.push_str("# TYPE banditdb_interactions_pending_bytes gauge\n");
+        out.push_str(&format!(
+            "banditdb_interactions_pending_bytes {}\n\n",
+            state.db.interactions.weighted_size()
+        ));
+        out.push_str("# HELP banditdb_campaign_bytes_reserved Memory all campaigns reserve, as admission control counts it\n");
+        out.push_str("# TYPE banditdb_campaign_bytes_reserved gauge\n");
+        out.push_str(&format!(
+            "banditdb_campaign_bytes_reserved {}\n\n",
+            state.db.reserved_campaign_bytes()
+        ));
+        out.push_str("# HELP banditdb_campaign_bytes_limit Process-wide campaign memory ceiling (0 = unlimited)\n");
+        out.push_str("# TYPE banditdb_campaign_bytes_limit gauge\n");
+        out.push_str(&format!(
+            "banditdb_campaign_bytes_limit {}\n\n",
+            state.db.max_total_campaign_bytes
         ));
     }
 

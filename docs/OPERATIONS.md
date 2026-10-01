@@ -52,8 +52,10 @@ Every variable the binary reads. Defaults are what you get with the variable uns
 | `BANDITDB_MAX_ARMS` | `1000` | Per campaign. |
 | `BANDITDB_MAX_FEATURE_DIM` | `4096` | Also caps context length at predict time. |
 | `BANDITDB_MAX_CAMPAIGN_BYTES` | `0` (unlimited) | Largest estimated footprint of one campaign, checked at creation and on every added arm. **Set it in production**: at d=4096 each LinUCB arm reserves 128 MiB, so unlimited lets one request exhaust the machine. `deploy/setup-vm.sh` sets 2 GiB. |
+| `BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES` | half the memory the process may use (cgroup limit, else RAM; unlimited off Linux) | Ceiling on the estimated memory of **all** campaigns together, checked at creation and on every added arm. Recovery never refuses: an instance over the ceiling restarts normally and admits nothing new until campaigns are deleted. `0` disables it. |
 | `BANDITDB_MAX_CONTEXT_MAGNITUDE` | `1e6` | Rejects values that would overflow the rank-one update. Finiteness is not enough: `1e155` and above squares to infinity, and the resulting NaN persists into the checkpoint. |
 | `BANDITDB_MAX_PENDING_INTERACTIONS` | `100000` | Predictions awaiting a reward. ~1 KB each at `context_dim=64`, so the default is ≈70–130 MB. Eviction permanently breaks matching for that prediction. |
+| `BANDITDB_MAX_PENDING_BYTES` | `536870912` (512 MiB) | Byte budget for the same cache, which binds first for wide contexts: an entry at d=4096 carries a 32 KB context, so 512 MiB holds ~16k of them. Pending interactions are also written into every checkpoint, so this bounds checkpoint size too. |
 
 Campaign count is **not** capped — an admin key can create campaigns until memory runs out.
 
@@ -93,6 +95,9 @@ Campaign count is **not** capped — an admin key can create campaigns until mem
 | Metric | Type | Meaning |
 |---|---|---|
 | `banditdb_interactions_pending` | gauge | Predictions awaiting a reward. Approaching `BANDITDB_MAX_PENDING_INTERACTIONS` means evictions are imminent. |
+| `banditdb_interactions_pending_bytes` | gauge | Estimated memory held by pending interactions. Approaching `BANDITDB_MAX_PENDING_BYTES` means evictions are imminent. |
+| `banditdb_campaign_bytes_reserved` | gauge | Memory all campaigns reserve, as admission control counts it. |
+| `banditdb_campaign_bytes_limit` | gauge | The process-wide ceiling (`0` = unlimited). New campaigns and arms are refused once reserved would pass it. |
 | `banditdb_interactions_evicted_total` | counter | Pending interactions dropped at the capacity limit. **Each one permanently breaks reward matching for that prediction.** |
 
 ### Campaigns and arms
