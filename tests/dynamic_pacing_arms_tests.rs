@@ -130,3 +130,154 @@ async fn test_pacing_with_dynamic_arms() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_dynamic_arm_with_custom_costs() {
+    let (wal, dir) = temp_paths("dynamic_arm_custom_costs");
+    let db = BanditDB::new(&wal, &dir);
+
+    let mut costs = HashMap::new();
+    costs.insert("seed".to_string(), 1.0);
+
+    let pacing = PacingConfig {
+        resources: vec![ResourceConstraint {
+            name: "tokens".to_string(),
+            budget: 5.0,
+            horizon: 50,
+            step_size: Some(0.01),
+            lambda_max: Some(5.0),
+            initial_lambda: Some(0.0),
+            arm_costs: costs,
+        }],
+        adaptive: false,
+    };
+
+    db.add_campaign_pacing(
+        "pacing_dyn_costs",
+        arms(&["seed"]),
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+        Some(pacing),
+    )
+    .await
+    .unwrap();
+
+    // Dynamically add a paid arm with cost 2.0
+    let mut arm2_costs = HashMap::new();
+    arm2_costs.insert("tokens".to_string(), 2.0);
+
+    db.add_arm_with_costs(
+        "pacing_dyn_costs",
+        "paid_dynamic",
+        None,
+        &WarmStart::None,
+        Some(arm2_costs),
+    )
+    .await
+    .unwrap();
+
+    // Force selection of paid_dynamic
+    let filter = banditdb::engine::ArmFilter::include(vec!["paid_dynamic".to_string()]);
+    let (chosen, iid) = db
+        .predict_filtered("pacing_dyn_costs", vec![1.0, 0.0], &filter)
+        .unwrap();
+    assert_eq!(chosen, "paid_dynamic");
+    db.reward(&iid, 1.0).await.unwrap();
+
+    let report = db
+        .campaign_pacing_report("pacing_dyn_costs")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report.resources[0].consumed, 2.0,
+        "Dynamic arm cost must be charged to budget"
+    );
+    assert_eq!(report.resources[0].remaining, 3.0);
+}
+
+#[tokio::test]
+async fn test_dynamic_arm_unknown_resource_rejected() {
+    let (wal, dir) = temp_paths("dyn_unknown_res");
+    let db = BanditDB::new(&wal, &dir);
+
+    let mut costs = HashMap::new();
+    costs.insert("tokens".to_string(), 1.0);
+
+    let pacing = PacingConfig {
+        resources: vec![ResourceConstraint {
+            name: "tokens".to_string(),
+            budget: 5.0,
+            horizon: 50,
+            step_size: Some(0.01),
+            lambda_max: Some(5.0),
+            initial_lambda: Some(0.0),
+            arm_costs: costs,
+        }],
+        adaptive: false,
+    };
+
+    db.add_campaign_pacing(
+        "camp_res_check",
+        arms(&["seed"]),
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+        Some(pacing),
+    )
+    .await
+    .unwrap();
+
+    let mut bad_costs = HashMap::new();
+    bad_costs.insert("non_existent".to_string(), 1.0);
+
+    let res = db
+        .add_arm_with_costs(
+            "camp_res_check",
+            "bad_arm",
+            None,
+            &WarmStart::None,
+            Some(bad_costs),
+        )
+        .await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("unknown resource 'non_existent'"));
+}
+
+#[tokio::test]
+async fn test_dynamic_arm_unpaced_campaign_with_costs_rejected() {
+    let (wal, dir) = temp_paths("dyn_unpaced_costs");
+    let db = BanditDB::new(&wal, &dir);
+
+    db.add_campaign(
+        "camp_unpaced",
+        arms(&["seed"]),
+        2,
+        1.0,
+        Algorithm::Linucb,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut costs = HashMap::new();
+    costs.insert("tokens".to_string(), 1.0);
+
+    let res = db
+        .add_arm_with_costs(
+            "camp_unpaced",
+            "arm_with_cost",
+            None,
+            &WarmStart::None,
+            Some(costs),
+        )
+        .await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("has no pacing configured"));
+}
+

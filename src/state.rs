@@ -1,4 +1,5 @@
 use ndarray::{Array1, Array2};
+use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -479,7 +480,7 @@ pub struct ResourceState {
     pub horizon: u64,
     pub step_size: f64,
     pub lambda_max: f64,
-    pub arm_costs: HashMap<String, f64>,
+    pub arm_costs: RwLock<HashMap<String, f64>>,
     pub consumed: AtomicU64,  // f64::to_bits
     pub lambda: AtomicU64,    // f64::to_bits
     pub decisions: AtomicU64, // total decisions evaluated in this window
@@ -518,7 +519,7 @@ impl ResourceState {
             horizon,
             step_size,
             lambda_max,
-            arm_costs: cfg.arm_costs.clone(),
+            arm_costs: RwLock::new(cfg.arm_costs.clone()),
             consumed: AtomicU64::new(0.0f64.to_bits()),
             lambda: AtomicU64::new(init_lambda.to_bits()),
             decisions: AtomicU64::new(0),
@@ -527,7 +528,11 @@ impl ResourceState {
 
     #[inline(always)]
     pub fn cost(&self, arm_id: &str) -> f64 {
-        self.arm_costs.get(arm_id).copied().unwrap_or(0.0)
+        self.arm_costs.read().get(arm_id).copied().unwrap_or(0.0)
+    }
+
+    pub fn set_arm_cost(&self, arm_id: &str, cost: f64) {
+        self.arm_costs.write().insert(arm_id.to_string(), cost);
     }
 
     #[inline(always)]
@@ -554,17 +559,16 @@ impl ResourceState {
     }
 
     /// Target consumption rate per decision epoch rho_{j, t}.
-    ///
-    /// When called without a snapshot, reads `decisions` from the atomic. Prefer
-    /// `target_rate_at` when the epoch is already known to avoid a second load.
     pub fn target_rate(&self, adaptive: bool) -> f64 {
-        self.target_rate_at(self.decisions.load(Ordering::Relaxed), adaptive)
+        self.target_rate_at(
+            self.decisions.load(Ordering::Relaxed),
+            self.remaining_budget(),
+            adaptive,
+        )
     }
 
     /// Compute target rate at a specific epoch `t` (number of decisions already taken).
-    /// Used by `record_and_update` to avoid a double-load race where `fetch_add`
-    /// returns `t` but a bare `load` would see `t+1`.
-    fn target_rate_at(&self, t: u64, adaptive: bool) -> f64 {
+    fn target_rate_at(&self, t: u64, remaining_budget: f64, adaptive: bool) -> f64 {
         if !adaptive {
             self.budget / (self.horizon.max(1) as f64)
         } else {
@@ -573,22 +577,23 @@ impl ResourceState {
             // When (T - t) < max(50, 0.05 * T), clamp remaining horizon to avoid singularity.
             let min_rem = (50u64).max((self.horizon as f64 * 0.05) as u64);
             let clamped_rem = rem_h.max(min_rem) as f64;
-            self.remaining_budget() / clamped_rem
+            remaining_budget / clamped_rem
         }
     }
 
     /// Dual projected gradient descent step on consumption:
     /// lambda_{j, t+1} = \Pi_{[0, lambda_max]} [ lambda_j + eta * (c_{j, a} - rho_{j, t}) ]
-    ///
-    /// `t` is snapshotted via `fetch_add` and used consistently for both the endgame
-    /// freeze guard and `target_rate_at`, eliminating the double-load race where the
-    /// atomic would return `t` from `fetch_add` but `t+1` from a subsequent `load`.
     pub fn record_and_update(&self, consumed_amount: f64, adaptive: bool) {
         // t = epoch BEFORE this decision (fetch_add returns the old value).
         let t = self.decisions.fetch_add(1, Ordering::Relaxed);
 
+        // Pre-decision remaining budget for accurate target pacing rate calculation.
+        let cur_consumed_bits = self.consumed.load(Ordering::Relaxed);
+        let cur_consumed = f64::from_bits(cur_consumed_bits);
+        let pre_remaining = (self.budget - cur_consumed).max(0.0);
+
         if consumed_amount > 0.0 {
-            let mut cur = self.consumed.load(Ordering::Relaxed);
+            let mut cur = cur_consumed_bits;
             loop {
                 let next = (f64::from_bits(cur) + consumed_amount).to_bits();
                 match self.consumed.compare_exchange_weak(
@@ -604,15 +609,12 @@ impl ResourceState {
         }
 
         // Freeze dual multiplier in the endgame window to avoid singularity.
-        // Use the same epoch `t` that drives the target_rate below — consistency matters.
         let min_rem = (50u64).max((self.horizon as f64 * 0.05) as u64);
         if self.horizon > min_rem && t >= self.horizon - min_rem {
             return;
         }
 
-        // Use target_rate_at(t) so both the freeze guard and the gradient step
-        // reference the pre-increment epoch, not t+1.
-        let rho = self.target_rate_at(t, adaptive);
+        let rho = self.target_rate_at(t, pre_remaining, adaptive);
         let delta = consumed_amount - rho;
         let mut cur_lambda = self.lambda.load(Ordering::Relaxed);
         loop {
@@ -626,6 +628,25 @@ impl ResourceState {
             ) {
                 Ok(_) => break,
                 Err(b) => cur_lambda = b,
+            }
+        }
+    }
+
+    pub fn rollback_consumption(&self, amount: f64) {
+        if amount > 0.0 {
+            let mut cur = self.consumed.load(Ordering::Relaxed);
+            loop {
+                let cur_f = f64::from_bits(cur);
+                let next = (cur_f - amount).max(0.0).to_bits();
+                match self.consumed.compare_exchange_weak(
+                    cur,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(b) => cur = b,
+                }
             }
         }
     }
@@ -663,6 +684,101 @@ impl PacingState {
         for r in &self.resources {
             let cost = r.cost(arm_id);
             r.record_and_update(cost, self.adaptive);
+        }
+    }
+
+    pub fn try_record_consumption(&self, arm_id: &str) -> bool {
+        // Fast pre-check: if any resource is already masked, return false immediately.
+        for r in &self.resources {
+            let cost = r.cost(arm_id);
+            if cost > 0.0 && r.remaining_budget() < cost {
+                return false;
+            }
+        }
+
+        let mut reserved: Vec<(&ResourceState, f64)> = Vec::with_capacity(self.resources.len());
+        for r in &self.resources {
+            let cost = r.cost(arm_id);
+            if cost > 0.0 {
+                let mut cur = r.consumed.load(Ordering::Relaxed);
+                let mut ok = false;
+                loop {
+                    let cur_f = f64::from_bits(cur);
+                    if cur_f + cost > r.budget + 1e-9 {
+                        break;
+                    }
+                    let next = (cur_f + cost).to_bits();
+                    match r.consumed.compare_exchange_weak(
+                        cur,
+                        next,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            ok = true;
+                            break;
+                        }
+                        Err(b) => cur = b,
+                    }
+                }
+                if !ok {
+                    // Rollback any earlier resources that were already reserved
+                    for (prev_r, prev_cost) in reserved {
+                        prev_r.rollback_consumption(prev_cost);
+                    }
+                    return false;
+                }
+                reserved.push((r, cost));
+            }
+        }
+
+        // All resources successfully reserved consumption! Now perform dual step updates.
+        for r in &self.resources {
+            let cost = r.cost(arm_id);
+            let t = r.decisions.fetch_add(1, Ordering::Relaxed);
+            let cur_consumed = f64::from_bits(r.consumed.load(Ordering::Relaxed));
+            let pre_remaining = (r.budget - (cur_consumed - cost)).max(0.0);
+
+            let min_rem = (50u64).max((r.horizon as f64 * 0.05) as u64);
+            if r.horizon > min_rem && t >= r.horizon - min_rem {
+                continue;
+            }
+
+            let rho = r.target_rate_at(t, pre_remaining, self.adaptive);
+            let delta = cost - rho;
+            let mut cur_lambda = r.lambda.load(Ordering::Relaxed);
+            loop {
+                let updated =
+                    (f64::from_bits(cur_lambda) + r.step_size * delta).clamp(0.0, r.lambda_max);
+                match r.lambda.compare_exchange_weak(
+                    cur_lambda,
+                    updated.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(b) => cur_lambda = b,
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn rollback_consumption(&self, arm_id: &str) {
+        for r in &self.resources {
+            let cost = r.cost(arm_id);
+            if cost > 0.0 {
+                r.rollback_consumption(cost);
+            }
+        }
+    }
+
+    pub fn set_arm_costs(&self, arm_id: &str, costs: &HashMap<String, f64>) {
+        for r in &self.resources {
+            if let Some(&cost) = costs.get(&r.name) {
+                r.set_arm_cost(arm_id, cost);
+            }
         }
     }
 
@@ -709,7 +825,7 @@ impl PacingState {
                     horizon: r.horizon,
                     step_size: r.step_size,
                     lambda_max: r.lambda_max,
-                    arm_costs: r.arm_costs.clone(),
+                    arm_costs: r.arm_costs.read().clone(),
                     consumed: r.consumed(),
                     lambda: r.lambda(),
                     decisions: r.decisions.load(Ordering::Relaxed),
@@ -730,7 +846,7 @@ impl PacingState {
                     horizon: r.horizon,
                     step_size: r.step_size,
                     lambda_max: r.lambda_max,
-                    arm_costs: r.arm_costs,
+                    arm_costs: RwLock::new(r.arm_costs),
                     consumed: AtomicU64::new(r.consumed.to_bits()),
                     lambda: AtomicU64::new(r.lambda.to_bits()),
                     decisions: AtomicU64::new(r.decisions),
@@ -1042,6 +1158,8 @@ pub enum DbEvent {
         challenger_dim: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         challenger_prior: Option<ArmPrior>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        costs: Option<HashMap<String, f64>>,
         #[serde(default)]
         timestamp_secs: u64,
     },

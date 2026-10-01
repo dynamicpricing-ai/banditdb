@@ -451,7 +451,7 @@ impl Campaign {
             .get(arm_id)
             .map(|a| a.theta.len())
             .ok_or_else(|| EngineError::NotFound(format!("Arm '{arm_id}' not found")))?;
-        
+
         let expected_base = expected_context_dim(base_algo, arm_dim);
         if context_len != expected_base {
             return Err(EngineError::BadRequest(format!(
@@ -492,6 +492,21 @@ impl Campaign {
     pub fn record_consumption(&self, arm_id: &str) {
         if let Some(p) = &self.pacing {
             p.record_consumption(arm_id);
+        }
+    }
+
+    #[inline(always)]
+    pub fn try_record_consumption(&self, arm_id: &str) -> bool {
+        match &self.pacing {
+            Some(p) => p.try_record_consumption(arm_id),
+            None => true,
+        }
+    }
+
+    #[inline(always)]
+    pub fn rollback_consumption(&self, arm_id: &str) {
+        if let Some(p) = &self.pacing {
+            p.rollback_consumption(arm_id);
         }
     }
 
@@ -2137,6 +2152,7 @@ impl BanditDB {
                 prior,
                 challenger_dim,
                 challenger_prior,
+                costs,
                 ..
             } => {
                 let campaigns = self.campaigns.read();
@@ -2155,6 +2171,9 @@ impl BanditDB {
                     c_arms.write().entry(arm_id.clone()).or_insert_with(|| {
                         new_arm_state(dim, challenger_prior.as_ref(), group.clone())
                     });
+                }
+                if let (Some(p), Some(c)) = (&campaign.pacing, costs) {
+                    p.set_arm_costs(arm_id, c);
                 }
             }
             DbEvent::ArmStatusChanged {
@@ -2557,6 +2576,15 @@ impl BanditDB {
             Self::validate_pacing(p)?;
         }
         Self::validate_algorithm(&algorithm, self.max_feature_dim)?;
+        if let Algorithm::Progressive(cfg) = &algorithm {
+            let base_ctx_dim = expected_context_dim(&cfg.base, feature_dim);
+            let chal_ctx_dim = expected_context_dim(&cfg.challenger, feature_dim);
+            if base_ctx_dim != chal_ctx_dim {
+                return Err(EngineError::BadRequest(format!(
+                    "Progressive campaign context dimension mismatch: base algorithm expects {base_ctx_dim}, challenger expects {chal_ctx_dim}"
+                )));
+            }
+        }
 
         // Size check. Campaign count alone is a poor bound: the same count can mean
         // 30 KB or 10 GB depending on dimension and algorithm.
@@ -2603,9 +2631,31 @@ impl BanditDB {
         group: Option<String>,
         warm_start: &WarmStart,
     ) -> Result<(), EngineError> {
+        self.add_arm_with_costs(campaign_id, arm_id, group, warm_start, None)
+            .await
+    }
+
+    /// Add an arm to a live campaign with optional resource costs for Lagrangian pacing.
+    pub async fn add_arm_with_costs(
+        &self,
+        campaign_id: &str,
+        arm_id: &str,
+        group: Option<String>,
+        warm_start: &WarmStart,
+        costs: Option<HashMap<String, f64>>,
+    ) -> Result<(), EngineError> {
         Self::validate_arm_id(arm_id)?;
         if let Some(g) = &group {
             Self::validate_arm_id(g)?;
+        }
+        if let Some(c) = &costs {
+            for (res, cost) in c {
+                if !cost.is_finite() || *cost < 0.0 {
+                    return Err(EngineError::BadRequest(format!(
+                        "arm cost for resource '{res}' must be finite and non-negative, got {cost}"
+                    )));
+                }
+            }
         }
 
         let event = {
@@ -2617,6 +2667,27 @@ impl BanditDB {
                 return Err(EngineError::Archived(format!(
                     "Campaign '{campaign_id}' is archived — restore it before adding arms"
                 )));
+            }
+
+            if let Some(c) = &costs {
+                match &campaign.pacing {
+                    Some(p) => {
+                        for res in c.keys() {
+                            if !p.resources.iter().any(|r| &r.name == res) {
+                                return Err(EngineError::BadRequest(format!(
+                                    "unknown resource '{res}' for campaign '{campaign_id}'"
+                                )));
+                            }
+                        }
+                    }
+                    None => {
+                        if !c.is_empty() {
+                            return Err(EngineError::BadRequest(format!(
+                                "campaign '{campaign_id}' has no pacing configured; cannot set arm costs"
+                            )));
+                        }
+                    }
+                }
             }
 
             let arms = campaign.arms.read();
@@ -2679,6 +2750,7 @@ impl BanditDB {
                 prior,
                 challenger_dim,
                 challenger_prior,
+                costs,
                 timestamp_secs: now_secs(),
             })
         };
@@ -2767,7 +2839,7 @@ impl BanditDB {
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
-        let (best_arm, arm_propensities) = {
+        let (best_arm, arm_propensities, has_pacing) = {
             let campaigns = self.campaigns.read();
             let campaign = campaigns
                 .get(campaign_id)
@@ -2848,11 +2920,30 @@ impl BanditDB {
                 })
                 .collect();
 
-            let best_arm = scores
-                .iter()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(id, _)| id.clone())
-                .unwrap_or_default();
+            // Rank candidate arms descending by penalized score.
+            let mut ranked_arms = scores.clone();
+            ranked_arms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Atomically reserve capacity for the highest-scoring arm with remaining budget.
+            // Under concurrency, if a race exhausts an arm between filtering and selection,
+            // this falls back to the next-best eligible arm with zero budget oversell.
+            let mut chosen_arm = None;
+            for (arm_id, _) in &ranked_arms {
+                if campaign.try_record_consumption(arm_id) {
+                    chosen_arm = Some(arm_id.clone());
+                    break;
+                }
+            }
+
+            let best_arm = match chosen_arm {
+                Some(arm) => arm,
+                None => {
+                    return Err(EngineError::BadRequest(format!(
+                        "campaign '{campaign_id}' has no eligible arms for this request — \
+                         every arm is paused, retired, excluded by the request filter, or constrained by exhausted capacity"
+                    )));
+                }
+            };
 
             // Increment prediction counter here — avoids a second lock acquisition below.
             if let Some(arm_state) = arms_guard.get(best_arm.as_str()) {
@@ -2899,21 +2990,9 @@ impl BanditDB {
                 _ => Some(softmax_propensities(&scores)),
             };
 
-            (best_arm, arm_propensities)
+            let has_pacing = campaign.pacing.is_some();
+            (best_arm, arm_propensities, has_pacing)
             // All guards (campaigns, arms_guard) are dropped here.
-        };
-
-        // Record consumption AFTER all locks are dropped: the pacing CAS loops
-        // must not run while holding campaigns.read(), as that forces concurrent
-        // predictions to spin under a shared reader slot.
-        let has_pacing = {
-            let campaigns = self.campaigns.read();
-            if let Some(campaign) = campaigns.get(campaign_id) {
-                campaign.record_consumption(&best_arm);
-                campaign.pacing.is_some()
-            } else {
-                false
-            }
         };
 
         let interaction_id = Uuid::new_v4().to_string();
@@ -2941,18 +3020,29 @@ impl BanditDB {
         // pacing replay — the Predicted handler intentionally does NOT call
         // record_consumption to avoid double-counting.
         //
-        // Same BestEffort durability as Predicted: if the WAL is saturated, both
-        // records are dropped together, preserving the invariant that pacing state
-        // and prediction counts stay in sync (both lose the same decision).
+        // This is sent as Required because pacing constraints are hard limits. If
+        // the WAL is saturated, we must surface the failure to the client rather
+        // than dropping the consumption and allowing a budget oversell on restart.
         if has_pacing {
-            self.wal_send(
+            if let Err(e) = self.wal_send(
                 Arc::new(DbEvent::PacingConsumed {
                     campaign_id: campaign_id.to_string(),
                     arm_id: best_arm.clone(),
                     timestamp_secs: now,
                 }),
-                Durability::BestEffort,
-            )?;
+                Durability::Required,
+            ) {
+                // The client will get a 503 WAL Full error. We must roll back the
+                // in-memory consumption to prevent budget leaks, since the request
+                // was rejected.
+                if let Some(c) = self.campaigns.read().get(campaign_id) {
+                    c.rollback_consumption(&best_arm);
+                    if let Some(arm_state) = c.arms.read().get(best_arm.as_str()) {
+                        arm_state.prediction_count.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                return Err(e);
+            }
         }
 
         // Direct cache insert — no lock needed. We skip apply_event_to_memory here

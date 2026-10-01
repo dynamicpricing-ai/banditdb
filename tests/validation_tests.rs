@@ -322,3 +322,42 @@ async fn magnitude_sweep_never_corrupts_arm_state() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+#[cfg(feature = "neural")]
+#[tokio::test]
+async fn test_progressive_dimension_mismatch_rejected() {
+    let dir = "/tmp/banditdb_progressive_dim_check";
+    let db = setup(dir).await;
+
+    use banditdb::state::{NeuralLinUCBConfig, ProgressiveConfig};
+    let bad_prog = Algorithm::Progressive(ProgressiveConfig {
+        base: Box::new(Algorithm::Linucb), // expects feature_dim = 2
+        challenger: Box::new(Algorithm::NeuralLinUCB(NeuralLinUCBConfig {
+            context_dim: 4, // expects 4 != 2!
+            ..Default::default()
+        })),
+        min_obs: 100,
+        required_wins: 3,
+        step_bps: 1000,
+    });
+
+    let res = db
+        .add_campaign(
+            "bad_prog",
+            vec!["A".into(), "B".into()],
+            2,
+            1.0,
+            bad_prog,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        res.is_err(),
+        "Progressive campaign with mismatched context dimensions must be rejected at creation"
+    );
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("Progressive campaign context dimension mismatch"));
+
+    let _ = fs::remove_dir_all(dir);
+}

@@ -470,6 +470,8 @@ struct AddArmRequest {
     group: Option<String>,
     #[serde(default)]
     warm_start: WarmStart,
+    #[serde(default)]
+    costs: Option<HashMap<String, f64>>,
 }
 
 #[derive(Deserialize)]
@@ -1516,11 +1518,12 @@ async fn handle_add_arm(
 
     state
         .db
-        .add_arm(
+        .add_arm_with_costs(
             &ns(&auth, &campaign_id),
             &payload.arm_id,
             payload.group,
             &payload.warm_start,
+            payload.costs,
         )
         .await
         .map(|_| Json("Arm Added"))
@@ -1813,6 +1816,7 @@ async fn handle_campaign_pacing(
     Extension(auth): Extension<AuthContext>,
     Path(campaign_id): Path<String>,
 ) -> Result<Json<Option<PacingReport>>, AppError> {
+    validate_id(&campaign_id, "campaign_id")?;
     let stored_id = ns(&auth, &campaign_id);
     state
         .db
@@ -2096,10 +2100,11 @@ async fn handle_metrics(
 
     let mut pacing_metrics = Vec::new();
     for (cid, campaign) in campaigns.iter() {
+        let Some(label) = visible(cid) else { continue };
         if let Some(pacing) = campaign.pacing_report() {
             for res in pacing.resources {
                 pacing_metrics.push((
-                    prom_label(cid),
+                    label.clone(),
                     prom_label(&res.name),
                     res.budget,
                     res.consumed,
