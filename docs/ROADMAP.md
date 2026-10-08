@@ -104,6 +104,14 @@ they bound the host but do not stop one tenant from consuming the whole allowanc
 that becomes a cross-tenant denial of service rather than an OOM. Per-tenant budgets
 belong in the control plane; see [CLOUD_PLAN_REVIEW.md](CLOUD_PLAN_REVIEW.md).
 
+### Memory estimate ignores pacing state
+`campaign_memory_estimate` (and so `Campaign::reserved_bytes`, the per-campaign,
+per-tenant and process-wide `BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES` checks) counts arms,
+dimension and algorithm only. Campaigns created with `pacing` also hold a
+`ResourceState` per resource, each with an `arm_costs` map, so they are slightly
+under-counted. Small next to `A⁻¹`, but admission control is meant to over-estimate.
+Fix: pass the `PacingConfig` (or resource × arm count) into the estimate.
+
 ### Promotion / rollback untested in CI
 The three Progressive tournament tests are `#[ignore]`d because candle 0.10.2 cannot
 seed the CPU RNG (`cpu_backend/mod.rs`: `bail!("cannot seed the CPU rng with
