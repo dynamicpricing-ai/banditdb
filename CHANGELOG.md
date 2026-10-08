@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.3.0 — Budget constraints (Lagrangian pacing)
+
+**Capacity-constrained campaigns.** `POST /campaign` accepts a `pacing` block:
+one or more resources, each with a `budget`, a `horizon` (in decisions) and
+per-arm `arm_costs`. Scoring subtracts a learned shadow price per unit of cost,
+and an arm whose cost exceeds the remaining budget is masked. Prices adapt by
+projected gradient descent toward the target spend rate. Arms added later accept
+`costs`. `GET /campaign/:id/pacing` reports budget, consumption and prices;
+`banditdb_pacing_*` metrics are tenant-scoped. Theory in
+`docs/lagrangian_pacing_mathematics.md`.
+
+Behaviours worth knowing:
+
+- Budget is spent at **predict**, not reward. A recommendation never acted on
+  still consumes budget.
+- Budget never resets. Once spent, costly arms stay masked until the campaign is
+  recreated. Pacing config is immutable after creation.
+- `arm_costs` keys are not checked against the campaign's arms; a misspelt arm
+  name leaves the real arm at cost 0.
+- A pacing predict writes one extra WAL record and returns 503 when the WAL cannot
+  take it; non-pacing campaigns are unaffected.
+- **Downgrading to 2.2.x silently drops pacing**: older binaries ignore the
+  `pacing` field and skip `PacingConsumed` records, so constrained campaigns
+  become unconstrained without error.
+
+**Memory limits**
+
+- `BANDITDB_MAX_TOTAL_CAMPAIGN_BYTES` bounds the estimated memory of all campaigns
+  together (default: half the memory available to the process; `0` disables).
+  Recovery never refuses; an instance over the ceiling admits nothing new.
+- `BANDITDB_MAX_PENDING_BYTES` (default 512 MiB) bounds the pending-interaction
+  cache by bytes, which binds first for wide contexts.
+- New gauges: `banditdb_interactions_pending_bytes`,
+  `banditdb_campaign_bytes_reserved`, `banditdb_campaign_bytes_limit`.
+
+**Access**
+
+- `POST /checkpoint` now requires an operator key; tenant keys get 403.
+
 ## v2.2.1 — Durability and isolation fixes
 
 Fixes from a durability and multi-tenant audit. No API changes; data written by
