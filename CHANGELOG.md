@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — Per-tenant Parquet exports
+
+**Tenant shards get a directory per tenant.** A tenant campaign's shards are now
+written to `exports/{tenant}/{campaign}_{micros}.parquet`. Before, the writer kept
+only the last path component of the namespaced id, so in tenant mode:
+
+- every tenant's shards landed flat in `exports/` as `{campaign}_{micros}.parquet`,
+  and two tenants' same-named campaigns could not be told apart;
+- retention never matched them, so tenant shards were **never pruned** and
+  `exports/` grew until the volume filled;
+- `GET /export` with a tenant key listed nothing.
+
+Retention also matched by prefix, so pruning `checkout` deleted `checkout_v2`'s
+shards too; it now matches the campaign exactly. Campaigns without a tenant keep
+the flat layout, unchanged.
+
+Upgrading: shards already written flat by tenant campaigns are left in place and
+no longer pruned or listed to tenants; they cannot be attributed to a tenant.
+On a tenant-mode instance, every top-level `exports/*.parquet` is such a shard
+and can be deleted once nothing reads it.
+
 ## v2.3.0 — Budget constraints (Lagrangian pacing)
 
 **Capacity-constrained campaigns.** `POST /campaign` accepts a `pacing` block:

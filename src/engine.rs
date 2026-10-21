@@ -16,7 +16,7 @@ use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -663,6 +663,50 @@ extern "C" {
     fn libc_flock(fd: i32, operation: i32) -> i32;
 }
 
+/// Where a campaign's Parquet shards live: a directory and the file-name stem.
+///
+/// Tenant campaigns are stored as `{tenant}/{campaign}`, and their shards go in a
+/// directory per tenant: `exports/{tenant}/{campaign}_{micros}.parquet`. Before
+/// this, the writer kept only the last path component, so every tenant's shards
+/// landed flat as `{campaign}_{micros}.parquet`: two tenants' `checkout` shards
+/// could not be told apart, and pruning (which looked for `{tenant}/{campaign}_`)
+/// never matched them, so they were never deleted. Campaigns without a tenant
+/// keep the flat layout.
+///
+/// Each part must be a plain id (`[A-Za-z0-9_-]{1,128}`, the HTTP and tenant
+/// rule). WAL-sourced ids bypass HTTP validation, so anything else — `..`, an
+/// empty part, a nested path — is refused rather than written somewhere else.
+pub fn export_location(export_dir: &str, campaign_id: &str) -> Result<(PathBuf, String), String> {
+    let part = |s: &str| -> Result<String, String> {
+        let ok = !s.is_empty()
+            && s.len() <= 128
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if ok {
+            Ok(s.to_string())
+        } else {
+            Err(format!(
+                "campaign id '{campaign_id}' cannot name an export path"
+            ))
+        }
+    };
+    match campaign_id.split_once('/') {
+        Some((tenant, name)) => Ok((Path::new(export_dir).join(part(tenant)?), part(name)?)),
+        None => Ok((PathBuf::from(export_dir), part(campaign_id)?)),
+    }
+}
+
+/// The campaign a shard file belongs to: `checkout` for `checkout_1700….parquet`.
+///
+/// The timestamp is always the last `_` part, so `checkout_v2_1700….parquet` is
+/// `checkout_v2`, never `checkout`. Matching by prefix alone would confuse them.
+pub fn shard_stem(file_name: &str) -> Option<&str> {
+    let stem = file_name.strip_suffix(".parquet")?;
+    let (name, ts) = stem.rsplit_once('_')?;
+    let ok = !name.is_empty() && !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit());
+    ok.then_some(name)
+}
+
 /// Delete the oldest Parquet shards once a campaign exceeds the retention limit.
 ///
 /// Every checkpoint writes a new shard and nothing ever removed them, so `exports/`
@@ -671,23 +715,28 @@ extern "C" {
 /// checkpoint.json plus the WAL), so pruning is safe: the cost is only that
 /// offline analysis loses the oldest history.
 ///
-/// Retention is per campaign, newest first. `BANDITDB_EXPORT_RETAIN_SHARDS=0`
-/// disables pruning entirely.
-fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
+/// Retention is per campaign, newest first, matched exactly by `shard_stem` in
+/// the campaign's own directory (`export_location`): pruning `checkout` never
+/// touches `checkout_v2`, nor another tenant's `checkout`.
+/// `BANDITDB_EXPORT_RETAIN_SHARDS=0` disables pruning entirely.
+pub fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
     if retain == 0 {
         return;
     }
 
-    let prefix = format!("{campaign_id}_");
-    let Ok(entries) = fs::read_dir(export_dir) else {
+    let Ok((dir, stem)) = export_location(export_dir, campaign_id) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
         return;
     };
 
     // Shard names embed a microsecond timestamp, so lexical order is chronological.
     let mut shards: Vec<String> = entries
         .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&prefix) && n.ends_with(".parquet"))
+        .filter(|n| shard_stem(n) == Some(stem.as_str()))
         .collect();
     if shards.len() <= retain {
         return;
@@ -696,8 +745,7 @@ fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
 
     let doomed = shards.len() - retain;
     for name in shards.into_iter().take(doomed) {
-        let path = format!("{export_dir}/{name}");
-        match fs::remove_file(&path) {
+        match fs::remove_file(dir.join(&name)) {
             Ok(()) => tracing::debug!(shard = %name, "export: pruned old shard"),
             Err(e) => tracing::warn!(shard = %name, error = %e, "export: could not prune shard"),
         }
@@ -3971,7 +4019,8 @@ fn evaluate_tournament(
 ///
 /// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 … feature_N
 ///
-/// Each checkpoint writes a new shard: `{campaign_id}_{timestamp_us}.parquet`.
+/// Each checkpoint writes a new shard: `{campaign}_{timestamp_us}.parquet`, in
+/// `exports/{tenant}/` for a tenant campaign (see `export_location`).
 /// The timestamp is in microseconds to prevent collisions when two checkpoints
 /// happen within the same second. This ensures O(1) write performance regardless
 /// of campaign history size.
@@ -3992,18 +4041,12 @@ pub fn write_campaign_parquet(
 
     let mut df = interactions_to_df(interactions, feature_dim)?;
 
-    // Guard against path traversal from WAL-sourced campaign IDs that bypass HTTP validation.
-    let filename = format!("{campaign_id}_{timestamp_us}.parquet");
-    let tmp_name = format!("{campaign_id}_{timestamp_us}.parquet.tmp");
-    let safe_name = Path::new(&filename)
-        .file_name()
-        .ok_or_else(|| format!("invalid parquet filename for campaign '{campaign_id}'"))?;
-    let safe_tmp = Path::new(&tmp_name)
-        .file_name()
-        .ok_or_else(|| format!("invalid parquet tmp filename for campaign '{campaign_id}'"))?;
-
-    let path = Path::new(export_dir).join(safe_name);
-    let tmp = Path::new(export_dir).join(safe_tmp);
+    // `export_location` refuses ids that are not plain names, so a WAL-sourced id
+    // that bypassed HTTP validation cannot write outside its directory.
+    let (dir, stem) = export_location(export_dir, campaign_id)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{stem}_{timestamp_us}.parquet"));
+    let tmp = dir.join(format!("{stem}_{timestamp_us}.parquet.tmp"));
 
     let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
     ParquetWriter::new(&mut file)

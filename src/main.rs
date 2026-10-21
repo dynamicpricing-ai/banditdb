@@ -1843,37 +1843,69 @@ async fn handle_checkpoint(
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
-async fn handle_export(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<Json<ExportResponse>, AppError> {
-    let export_dir = state.db.export_dir();
-    let entries = std::fs::read_dir(&export_dir)
-        .map_err(|e| AppError(StatusCode::NOT_FOUND, format!("No exports yet: {e}")))?;
-
+/// Parquet shards in one directory, grouped by campaign (`shard_stem`), sorted.
+fn shards_in(dir: &std::path::Path) -> Option<HashMap<String, Vec<String>>> {
+    let entries = std::fs::read_dir(dir).ok()?;
     let mut shards: HashMap<String, Vec<String>> = HashMap::new();
     for entry in entries.filter_map(|e| e.ok()) {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.ends_with(".parquet") {
-            continue;
+        if let Some(stem) = banditdb::engine::shard_stem(&name) {
+            shards.entry(stem.to_string()).or_default().push(name);
         }
-        let stem = name.strip_suffix(".parquet").unwrap_or(&name);
-        let cid = stem
-            .rfind('_')
-            .filter(|&pos| stem[pos + 1..].chars().all(|c| c.is_ascii_digit()))
-            .map(|pos| stem[..pos].to_string())
-            .unwrap_or_else(|| stem.to_string());
-        // Shard filenames embed the namespaced campaign id, so listing them
-        // unfiltered exposed every tenant's campaign names to any reader key.
-        if !owns(&auth, &cid) {
-            continue;
-        }
-        shards.entry(strip_ns(&auth, &cid)).or_default().push(name);
     }
     for v in shards.values_mut() {
         v.sort();
     }
-    Ok(Json(ExportResponse { export_dir, shards }))
+    Some(shards)
+}
+
+/// List Parquet shards.
+///
+/// A tenant key sees only `exports/{tenant}/`, the directory its campaigns'
+/// shards are written to (`export_location`), keyed by its own campaign ids.
+/// Flat shards in `exports/` predate per-tenant directories and carry no tenant,
+/// so no tenant is ever shown them. A key with no tenant sees the flat shards
+/// keyed by campaign, and every tenant directory's keyed `{tenant}/{campaign}`
+/// with file names relative to `exports/`.
+async fn handle_export(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<ExportResponse>, AppError> {
+    let root = state.db.export_dir();
+    let no_exports = || AppError(StatusCode::NOT_FOUND, "No exports yet".to_string());
+
+    if let Some(tenant) = &auth.tenant_id {
+        let (dir, _) = banditdb::engine::export_location(&root, &format!("{tenant}/_"))
+            .map_err(|_| no_exports())?;
+        let shards = shards_in(&dir).ok_or_else(no_exports)?;
+        return Ok(Json(ExportResponse {
+            export_dir: dir.to_string_lossy().to_string(),
+            shards,
+        }));
+    }
+
+    let mut shards = shards_in(std::path::Path::new(&root)).ok_or_else(no_exports)?;
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let tenant = entry.file_name().to_string_lossy().to_string();
+            for (stem, names) in shards_in(&entry.path()).unwrap_or_default() {
+                shards.insert(
+                    format!("{tenant}/{stem}"),
+                    names.into_iter().map(|n| format!("{tenant}/{n}")).collect(),
+                );
+            }
+        }
+    }
+    Ok(Json(ExportResponse {
+        export_dir: root,
+        shards,
+    }))
 }
 
 async fn metrics_middleware(
