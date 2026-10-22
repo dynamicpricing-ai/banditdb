@@ -239,7 +239,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 | `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
 | `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
 | `POST` | `/checkpoint` | admin, operator only | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. Process-wide, so tenant keys are refused at any role. |
-| `GET` | `/export` | reader | List per-campaign Parquet files in the `exports/` directory. |
+| `GET` | `/export` | reader | List per-campaign Parquet files. A tenant key lists `exports/{tenant}/`, its own campaigns only. |
 
 Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
 

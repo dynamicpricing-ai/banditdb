@@ -403,6 +403,35 @@ fn export_listing_is_tenant_scoped() {
         .expect("checkpoint writes parquet");
     assert_eq!(status, 200, "operator checkpoint failed: {body}");
 
+    // The owner sees its own shard, by its own campaign id, from its own
+    // directory. Before per-tenant directories this listing was always empty:
+    // the shard was written flat, without the tenant, so no tenant owned it.
+    let (status, body) = srv.get("/export", Some(READER_A)).expect("reachable");
+    assert_eq!(status, 200, "owner could not list its exports: {body}");
+    let listing: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let files = listing["shards"]["exp_a"]
+        .as_array()
+        .unwrap_or_else(|| panic!("owner's campaign missing from listing: {body}"));
+    assert_eq!(files.len(), 1, "one checkpoint, one shard: {body}");
+    let file = files[0].as_str().unwrap();
+    assert!(
+        file.starts_with("exp_a_") && file.ends_with(".parquet") && !file.contains('/'),
+        "shard named by campaign alone, inside the tenant directory: {file}"
+    );
+    assert!(
+        listing["export_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("/exports/tenant_a"),
+        "listing is of the tenant's directory: {body}"
+    );
+    let on_disk = format!("/tmp/banditdb_http_test_18306/exports/tenant_a/{file}");
+    assert!(
+        std::path::Path::new(&on_disk).is_file(),
+        "missing {on_disk}"
+    );
+
+    // Another tenant sees nothing of it.
     let (status, body) = srv.get("/export", Some(ADMIN_B)).expect("reachable");
     // 404 is acceptable when no exports exist at all; 200 must not name tenant A.
     if status == 200 {
