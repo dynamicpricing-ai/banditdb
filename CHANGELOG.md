@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Per-tenant Parquet exports
+## v2.3.1 — Per-tenant Parquet exports
 
 **Tenant shards get a directory per tenant.** A tenant campaign's shards are now
 written to `exports/{tenant}/{campaign}_{micros}.parquet`. Before, the writer kept
