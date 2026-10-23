@@ -57,8 +57,13 @@ def load_parquet(path: str):
     return df
 
 
+# Every shard starts with these; the feature columns follow, in context order,
+# named from the campaign's metadata (`requested_gb`) or numbered (`feature_0`).
+FIXED_COLUMNS = ("interaction_id", "arm_id", "reward", "predicted_at", "rewarded_at", "propensity")
+
+
 def feature_matrix(df):
-    cols = sorted(c for c in df.columns if c.startswith("feature_"))
+    cols = [c for c in df.columns if c not in FIXED_COLUMNS]
     return df[cols].values, cols
 
 

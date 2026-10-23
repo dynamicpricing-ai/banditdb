@@ -13,6 +13,7 @@ use ndarray::Array1;
 use parking_lot::RwLock;
 use polars::prelude::*;
 use rand::Rng;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
@@ -1932,6 +1933,12 @@ impl BanditDB {
             .and_then(|v| v.parse().ok())
             .unwrap_or(50);
 
+        // Each campaign's metadata names its shard's feature columns (`export_columns`).
+        let export_metadata: HashMap<String, Option<Value>> = campaigns_snapshot
+            .iter()
+            .map(|(id, c)| (id.clone(), c.metadata.clone()))
+            .collect();
+
         let parquet_rows = tokio::task::spawn_blocking(move || {
             // Scan the WAL for matched Predicted+Rewarded pairs.
             #[allow(clippy::type_complexity)] // matched-pair accumulator; a named type alias would not aid clarity here
@@ -1974,9 +1981,9 @@ impl BanditDB {
 
             let mut rows = 0usize;
             for (campaign_id, interactions) in &by_campaign {
-                let feature_dim = interactions[0].context.len();
                 prune_export_shards(&export_dir_clone, campaign_id, export_retain);
-                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
+                let metadata = export_metadata.get(campaign_id).and_then(Option::as_ref);
+                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, metadata) {
                     Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
                     Ok(())  => rows += interactions.len(),
                 }
@@ -4015,9 +4022,104 @@ fn evaluate_tournament(
     TournamentOutcome::Hold
 }
 
+/// Columns every shard starts with; feature columns may not reuse these names.
+const FIXED_EXPORT_COLUMNS: [&str; 6] = [
+    "interaction_id",
+    "arm_id",
+    "reward",
+    "predicted_at",
+    "rewarded_at",
+    "propensity",
+];
+
+/// How a campaign's context becomes columns in its Parquet shards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportColumns {
+    /// One header per feature column, in context order.
+    pub names: Vec<String>,
+    /// The context ends in the constant term: divide each value by it (undoing
+    /// the scale to unit length, if any) and leave it out of the file.
+    pub strip_bias: bool,
+}
+
+impl ExportColumns {
+    /// `feature_0 … feature_{width-1}`, values as the model saw them.
+    pub fn numbered(width: usize) -> Self {
+        ExportColumns {
+            names: (0..width).map(|i| format!("feature_{i}")).collect(),
+            strip_bias: false,
+        }
+    }
+}
+
+/// Feature headers for a campaign's shards, from its metadata when it describes them.
+///
+/// The layout is the one the SDKs read: `metadata.features` names the values in
+/// order, and `metadata.context` says whether a constant 1 was appended (`bias`)
+/// and the vector scaled to unit length (`normalize`); both default to true.
+/// Without `context`, `bias` is told from the width, as the SDKs do.
+///
+/// - With the constant, each value is divided by it — exactly undoing the scale
+///   — so a column named `requested_gb` holds what the app sent, and the
+///   constant is left out.
+/// - Scaled without a constant, the original values cannot be recovered, so the
+///   headers say so: `requested_gb_normalized`.
+/// - Anything that does not line up (no or duplicate names, a name clashing with
+///   a fixed column, a width that does not match) falls back to
+///   `feature_0 … feature_N`, values as the model saw them.
+pub fn export_columns(metadata: Option<&Value>, width: usize) -> ExportColumns {
+    let fallback = || ExportColumns::numbered(width);
+    let Some(meta) = metadata else {
+        return fallback();
+    };
+    let Some(list) = meta.get("features").and_then(Value::as_array) else {
+        return fallback();
+    };
+
+    let mut names: Vec<String> = Vec::with_capacity(list.len());
+    for f in list {
+        let Some(name) = f.as_str() else {
+            return fallback();
+        };
+        let ok = !name.is_empty()
+            && name.len() <= 128
+            && !FIXED_EXPORT_COLUMNS.contains(&name)
+            && !names.iter().any(|n| n == name);
+        if !ok {
+            return fallback();
+        }
+        names.push(name.to_string());
+    }
+    if names.is_empty() {
+        return fallback();
+    }
+
+    let layout = meta.get("context").filter(|c| c.is_object());
+    let flag = |key: &str| layout.and_then(|c| c.get(key)).and_then(Value::as_bool) != Some(false);
+    let bias = if layout.is_some() {
+        flag("bias")
+    } else {
+        width == names.len() + 1
+    };
+    let normalize = flag("normalize");
+
+    if width != names.len() + usize::from(bias) {
+        return fallback();
+    }
+    if !bias && normalize {
+        names.iter_mut().for_each(|n| n.push_str("_normalized"));
+    }
+    ExportColumns {
+        names,
+        strip_bias: bias,
+    }
+}
+
 /// Append completed interactions to a per-campaign Parquet file shard.
 ///
-/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 … feature_N
+/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at |
+/// propensity | one column per feature, named from the campaign's metadata when
+/// it describes them (`export_columns`), else `feature_0 … feature_N`.
 ///
 /// Each checkpoint writes a new shard: `{campaign}_{timestamp_us}.parquet`, in
 /// `exports/{tenant}/` for a tenant campaign (see `export_location`).
@@ -4028,7 +4130,7 @@ pub fn write_campaign_parquet(
     export_dir: &str,
     campaign_id: &str,
     interactions: &[CompletedInteraction],
-    feature_dim: usize,
+    metadata: Option<&Value>,
 ) -> Result<(), String> {
     if interactions.is_empty() {
         return Ok(());
@@ -4039,7 +4141,8 @@ pub fn write_campaign_parquet(
         .unwrap_or_default()
         .as_micros() as u64;
 
-    let mut df = interactions_to_df(interactions, feature_dim)?;
+    let columns = export_columns(metadata, interactions[0].context.len());
+    let mut df = interactions_to_df(interactions, &columns)?;
 
     // `export_location` refuses ids that are not plain names, so a WAL-sourced id
     // that bypassed HTTP validation cannot write outside its directory.
@@ -4060,7 +4163,7 @@ pub fn write_campaign_parquet(
 
 fn interactions_to_df(
     interactions: &[CompletedInteraction],
-    feature_dim: usize,
+    columns: &ExportColumns,
 ) -> Result<DataFrame, String> {
     let interaction_ids: Vec<&str> = interactions
         .iter()
@@ -4081,9 +4184,21 @@ fn interactions_to_df(
         Series::new("propensity", propensities),
     ];
 
-    for f in 0..feature_dim {
-        let col: Vec<f64> = interactions.iter().map(|r| r.context[f]).collect();
-        let name = format!("feature_{}", f);
+    // A value missing from a short context, or a constant that is not a positive
+    // number, is written as null rather than guessed.
+    let width = columns.names.len() + usize::from(columns.strip_bias);
+    for (f, name) in columns.names.iter().enumerate() {
+        let col: Vec<Option<f64>> = interactions
+            .iter()
+            .map(|r| {
+                let v = *r.context.get(f)?;
+                if !columns.strip_bias {
+                    return Some(v);
+                }
+                let c = *r.context.get(width - 1)?;
+                (c.is_finite() && c > 0.0).then(|| v / c)
+            })
+            .collect();
         series.push(Series::new(name.as_str(), col));
     }
 

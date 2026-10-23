@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — Named Parquet columns
+
+**Shard feature columns are named from the campaign's metadata.** When a
+campaign's `metadata.features` lists its feature names (the layout the SDKs and
+the console already write), its shards' feature columns take those names, and
+the values are the ones the app sent: the encoding in `metadata.context` is
+undone (each value divided by the constant term, which is left out). Before, a
+shard held `feature_0 … feature_N` of the encoded vector, unreadable without the
+campaign's metadata beside it.
+
+- Scaled to unit length without a constant term, the original values can't be
+  recovered; those columns are named `{feature}_normalized` and hold the values
+  the model saw.
+- No names, duplicate names, a name equal to a fixed column, or a width that
+  doesn't match: `feature_0 … feature_N` as before.
+- **Readers that pick feature columns by the `feature_` prefix need updating:**
+  take every column after the six fixed ones instead. `scripts/causal_analysis.py`
+  does; `banditdb.eval` in banditdb-python needs the same change.
+
 ## v2.3.1 — Per-tenant Parquet exports
 
 **Tenant shards get a directory per tenant.** A tenant campaign's shards are now
