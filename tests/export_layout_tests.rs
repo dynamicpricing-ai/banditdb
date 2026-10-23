@@ -84,7 +84,13 @@ fn interaction_ids(path: impl AsRef<Path>) -> Vec<String> {
 /// Write `n` shards with distinct microsecond timestamps.
 fn write_n(exports: &str, campaign: &str, n: usize) {
     for i in 0..n {
-        write_campaign_parquet(exports, campaign, &rows(&format!("{campaign}-{i}"), 1), 2).unwrap();
+        write_campaign_parquet(
+            exports,
+            campaign,
+            &rows(&format!("{campaign}-{i}"), 1),
+            None,
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(2));
     }
 }
@@ -173,7 +179,7 @@ fn stem_takes_the_last_underscore_part_as_the_timestamp() {
 fn tenant_shard_is_written_in_its_tenant_directory() {
     let tmp = TempDir::new("tenant_write");
     let exports = tmp.exports();
-    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 3), 2).unwrap();
+    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 3), None).unwrap();
 
     assert!(
         files_in(&exports).is_empty(),
@@ -193,8 +199,8 @@ fn tenant_shard_is_written_in_its_tenant_directory() {
 fn same_campaign_in_two_tenants_never_mixes() {
     let tmp = TempDir::new("two_tenants");
     let exports = tmp.exports();
-    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 2), 2).unwrap();
-    write_campaign_parquet(&exports, "tenant_b/checkout", &rows("b", 3), 2).unwrap();
+    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 2), None).unwrap();
+    write_campaign_parquet(&exports, "tenant_b/checkout", &rows("b", 3), None).unwrap();
 
     let a = files_in(format!("{exports}/tenant_a"));
     let b = files_in(format!("{exports}/tenant_b"));
@@ -213,7 +219,7 @@ fn same_campaign_in_two_tenants_never_mixes() {
 fn campaign_without_tenant_is_written_flat() {
     let tmp = TempDir::new("flat_write");
     let exports = tmp.exports();
-    write_campaign_parquet(&exports, "solo", &rows("s", 1), 2).unwrap();
+    write_campaign_parquet(&exports, "solo", &rows("s", 1), None).unwrap();
 
     let files = files_in(&exports);
     assert_eq!(files.len(), 1, "{files:?}");
@@ -224,7 +230,7 @@ fn campaign_without_tenant_is_written_flat() {
 fn no_tmp_file_is_left_behind() {
     let tmp = TempDir::new("no_tmp");
     let exports = tmp.exports();
-    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 1), 2).unwrap();
+    write_campaign_parquet(&exports, "tenant_a/checkout", &rows("a", 1), None).unwrap();
     let files = files_in(format!("{exports}/tenant_a"));
     assert!(files.iter().all(|f| f.ends_with(".parquet")), "{files:?}");
 }
@@ -236,7 +242,7 @@ fn traversal_ids_write_nothing_anywhere() {
     fs::create_dir_all(&exports).unwrap();
     for bad in ["../evil", "t/../../evil", "t/../evil", "../evil/c", "t/c/d"] {
         assert!(
-            write_campaign_parquet(&exports, bad, &rows("x", 1), 2).is_err(),
+            write_campaign_parquet(&exports, bad, &rows("x", 1), None).is_err(),
             "wrote {bad:?}"
         );
     }
