@@ -235,7 +235,7 @@ All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is 
 | `POST` | `/campaign/:id/arms/:arm_id/status` | admin | Pause, retire, or reactivate an arm. Body: `{status: "active"\|"paused"\|"retired"}`. |
 | `GET` | `/campaign/:id/report` | reader | Convergence report: mean reward per arm with 95% CI, leading arm, `converged` flag. |
 | `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size, **selection entropy with collapse detection**. |
-| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. Accepts optional `eligible_arms` / `exclude_arms` for per-request exclusion. |
+| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. Accepts optional `eligible_arms` / `exclude_arms` for per-request exclusion, and `input_ref` to record what the decision was made from. |
 | `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
 | `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
 | `POST` | `/checkpoint` | admin, operator only | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. Process-wide, so tenant keys are refused at any role. |
@@ -324,6 +324,21 @@ context /= np.linalg.norm(context) or 1.0   # guard the all-zeros row
 ```
 
 `provider`, `name` and `version` identify the model. `questions` lists what it was asked, using the same names as the `features` that hold its answers. Bump `version` with each model change. A new version is best started as a new campaign, since the meaning of the context has changed.
+
+### Decision Inputs
+
+`/predict`, `/batch_predict` and `/campaign/:id/interact` accept an optional `input_ref`: a pointer to what the decision was made from. BanditDB stores the pointer in the WAL with the decision and never fetches it.
+
+```json
+"input_ref": {"uri": "postgres://crm/tickets/4412",
+              "sha256": "9f2c…", "media_type": "application/json"}
+```
+
+`uri` is required (≤ 512 bytes, any scheme). `sha256` is the hash of the exact bytes the model received, so a later join can prove the source is unchanged. For multimodal inputs, point to a manifest that lists the parts.
+
+- **Never put credentials in the URI.** `user:password@host` and signed-URL parameters (`X-Amz-Signature`, `sig`, `token`, …) are refused with a 400, because the URI is copied into the WAL and every export.
+- **No personal data in the URI** either, for the same reason. Use opaque IDs.
+- **Rows change.** A database row joined later shows its current state, not what the model saw. Use append-only or versioned rows, a version in the URI (`…/4412?v=17`), or copy inputs to immutable storage.
 
 ### Convergence Report
 
