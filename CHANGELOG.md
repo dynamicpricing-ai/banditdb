@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Documented the campaign `metadata` keys the SDKs and tools read: `features`,
+  `context`, and `decision_model` (`provider`, `name`, `version`, `questions`) for
+  campaigns whose context comes from a decision model. No server change.
+
 ## v2.3.1 — Per-tenant Parquet exports
 
 **Tenant shards get a directory per tenant.** A tenant campaign's shards are now

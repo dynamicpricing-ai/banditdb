@@ -299,6 +299,32 @@ context = np.array(raw_features, dtype=float)
 context /= np.linalg.norm(context) or 1.0   # guard the all-zeros row
 ```
 
+### Campaign Metadata
+
+`metadata` on `POST /campaign` is a JSON object (≤ 64 KB) stored with the campaign and returned by `GET /campaign/:id` and `GET /campaigns`. The server does not interpret it. The SDKs and tools read these keys:
+
+| Key | Holds |
+|-----|-------|
+| `features` | Name of each context position, in order. The SDKs' `features=[...]` and MCP `create_campaign` write it, so contexts can be passed as dicts. |
+| `context` | How the SDK builds the vector from `features`: `{"bias": true, "normalize": true}` appends a constant 1 and scales to unit length. |
+| `decision_model` | The model that produced the context, when one did: a classifier or an LLM scoring the input. |
+
+`decision_model` records the facts that are the same for every decision, so logged data can be traced to the model version that produced it:
+
+```json
+"metadata": {
+  "features": ["damage_visible", "damage_matches_claim", "customer_distressed", "fraud_signals", "bias"],
+  "decision_model": {
+    "provider": "typesafe",
+    "name": "jev",
+    "version": "claims-v3",
+    "questions": ["damage_visible", "damage_matches_claim", "customer_distressed", "fraud_signals"]
+  }
+}
+```
+
+`provider`, `name` and `version` identify the model. `questions` lists what it was asked, using the same names as the `features` that hold its answers. Bump `version` with each model change. A new version is best started as a new campaign, since the meaning of the context has changed.
+
 ### Convergence Report
 
 `GET /campaign/:id/report` answers "is this campaign done?":
