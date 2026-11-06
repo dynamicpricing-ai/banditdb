@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## v2.3.2 — Decision input references
+
+**`input_ref` on every decision.** `/predict`, `/batch_predict` and
+`/campaign/:id/interact` accept an optional
+`{"uri", "sha256"?, "media_type"?}`: a pointer to the document, record or
+manifest the decision was made from. It is written to the WAL with the
+prediction, survives restarts and checkpoints while the reward is pending, and
+travels with the reward when the prediction's own WAL record was dropped under
+load. BanditDB stores the pointer only, never the content.
+
+URIs with credentials (`user:password@host`) or credential query parameters
+(`X-Amz-Signature`, `sig`, `token`, `access_token`, `api_key`, …) are refused with
+a 400 before anything is scored or logged, since the WAL cannot be purged. `uri`
+is capped at 512 bytes and counts toward `BANDITDB_MAX_PENDING_BYTES`. A bad
+`input_ref` in `/batch_predict` fails only its own item.
+
+Older WALs and checkpoints replay unchanged. Parquet export columns for
+`input_ref` follow in a later release.
 
 - Documented the campaign `metadata` keys the SDKs and tools read: `features`,
   `context`, and `decision_model` (`provider`, `name`, `version`, `questions`) for

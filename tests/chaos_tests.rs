@@ -60,6 +60,7 @@ async fn test_3_1_torn_write_recovery() {
                 timestamp_secs: 0,
                 arm_propensities: None,
                 is_reemit: false,
+                input_ref: None,
             };
             writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
         }

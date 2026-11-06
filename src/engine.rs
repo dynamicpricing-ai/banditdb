@@ -3,8 +3,8 @@ use crate::neural::{NeuralLinUCBState, NeuralWeights};
 use crate::state::{
     Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint,
     CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent,
-    EngineError, EntropyStatus, EntropyTrend, InteractionRecord, PacingCheckpoint, PacingConfig,
-    PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
+    EngineError, EntropyStatus, EntropyTrend, InputRef, InteractionRecord, PacingCheckpoint,
+    PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
 };
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
@@ -2127,6 +2127,7 @@ impl BanditDB {
                 timestamp_secs,
                 arm_propensities,
                 is_reemit,
+                input_ref,
             } => {
                 // WAL replay path: insert into the interactions cache so delayed rewards
                 // can match.
@@ -2138,6 +2139,7 @@ impl BanditDB {
                         context: Array1::from_vec(context.clone()),
                         arm_propensities: arm_propensities.clone(),
                         timestamp_secs: *timestamp_secs,
+                        input_ref: input_ref.clone(),
                         logged: true,
                     },
                 );
@@ -2980,7 +2982,22 @@ impl BanditDB {
         context: Vec<f64>,
         filter: &ArmFilter,
     ) -> Result<(String, String), EngineError> {
+        self.predict_with_ref(campaign_id, context, filter, None)
+    }
+
+    /// `predict_filtered`, recording what the decision was made from.
+    ///
+    /// `input_ref` is validated here, before scoring, so a rejected reference
+    /// consumes no budget and counts no prediction.
+    pub fn predict_with_ref(
+        &self,
+        campaign_id: &str,
+        context: Vec<f64>,
+        filter: &ArmFilter,
+        input_ref: Option<InputRef>,
+    ) -> Result<(String, String), EngineError> {
         self.validate_context(&context)?;
+        let input_ref = input_ref.map(InputRef::validated).transpose()?;
         // prediction_count is bumped during scoring, well before the WAL record is
         // enqueued, so the whole prediction sits inside the gate. See `write_gate`.
         let _gate = self.write_gate.read();
@@ -3153,6 +3170,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: arm_propensities.clone(),
             is_reemit: false,
+            input_ref: input_ref.clone(),
         });
 
         // Best-effort: a prediction record is a log entry, not state. If the writer
@@ -3203,6 +3221,7 @@ impl BanditDB {
                 context: Array1::from_vec(context),
                 arm_propensities,
                 timestamp_secs: now,
+                input_ref,
                 logged,
             },
         );
@@ -3219,6 +3238,20 @@ impl BanditDB {
         context: Vec<f64>,
         reward: f64,
     ) -> Result<String, EngineError> {
+        self.interact_with_ref(campaign_id, arm_id, context, reward, None)
+            .await
+    }
+
+    /// `interact`, recording what the historical decision was made from.
+    pub async fn interact_with_ref(
+        &self,
+        campaign_id: &str,
+        arm_id: &str,
+        context: Vec<f64>,
+        reward: f64,
+        input_ref: Option<InputRef>,
+    ) -> Result<String, EngineError> {
+        let input_ref = input_ref.map(InputRef::validated).transpose()?;
         // The HTTP handler for this route validated only the IDs, so an unchecked
         // context and an out-of-range reward reached the matrix math directly.
         self.validate_context(&context)?;
@@ -3243,6 +3276,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: None, // Historical data doesn't usually have propensities
             is_reemit: false,
+            input_ref,
         });
         self.log_and_apply(pred_event, Durability::Required)?;
 
@@ -4102,6 +4136,7 @@ fn pending_entry_bytes(key: &str, record: &InteractionRecord) -> u64 {
         + record.arm_id.len() as u64
         + record.context.len() as u64 * 8
         + propensities
+        + record.input_ref.as_ref().map_or(0, InputRef::heap_bytes)
 }
 
 /// Memory this process may use: its cgroup limit if it has one, else physical

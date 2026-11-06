@@ -27,6 +27,36 @@ components:
         Roles: admin (all operations), writer (predict/reward), reader (GET only).
 
   schemas:
+    InputRef:
+      type: object
+      required: [uri]
+      description: >
+        Pointer to what the decision was made from: a document, a database row, a
+        multimodal manifest. Stored with the decision in the WAL; BanditDB never
+        fetches it. Use opaque IDs, not personal data: the URI is copied into the
+        WAL and exports and cannot be purged.
+      properties:
+        uri:
+          type: string
+          maxLength: 512
+          description: >
+            Any URI with a scheme, e.g. s3://bucket/key, postgres://db/table/id,
+            mongodb://db/collection/id. Refused with 400 if it contains whitespace,
+            credentials (user:password@host) or a credential query parameter
+            (X-Amz-Signature, sig, token, access_token, api_key, …): use the
+            unsigned object URI.
+          example: s3://acme-inputs/c-4412/manifest.json
+        sha256:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+          description: >
+            Hex SHA-256 of the exact bytes the model received. Stored lowercase.
+            Lets a later join prove the source has not changed.
+        media_type:
+          type: string
+          maxLength: 255
+          description: MIME type of what uri points to.
+          example: application/json
     Algorithm:
       oneOf:
         - type: string
@@ -562,6 +592,7 @@ paths:
                     Filtering happens before propensities are computed, so the
                     logged propensity describes the policy that actually ran and
                     off-policy evaluation stays valid.
+                input_ref: { $ref: "#/components/schemas/InputRef" }
       responses:
         "200":
           description: Selected arm
@@ -599,6 +630,7 @@ paths:
                       context:       { type: array, items: { type: number } }
                       eligible_arms: { type: array, items: { type: string }, description: "Per-item allow-list. See /predict." }
                       exclude_arms:  { type: array, items: { type: string }, description: "Per-item deny-list. See /predict." }
+                      input_ref:     { $ref: "#/components/schemas/InputRef" }
       responses:
         "200":
           description: Per-item results (partial failures included inline)
@@ -643,6 +675,7 @@ paths:
                   items: { type: number }
                   description: Same constraints as /predict — L2-normalise before sending.
                 reward:  { type: number, minimum: 0, maximum: 1 }
+                input_ref: { $ref: "#/components/schemas/InputRef" }
       responses:
         "200":
           description: Recorded and durable

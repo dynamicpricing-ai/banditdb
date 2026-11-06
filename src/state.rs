@@ -394,6 +394,149 @@ impl ArmState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Decision input reference
+// ---------------------------------------------------------------------------
+
+/// Longest `uri` accepted. Counted in the pending-cache byte bound.
+pub const MAX_INPUT_URI_BYTES: usize = 512;
+const MAX_MEDIA_TYPE_BYTES: usize = 255;
+
+/// Query parameters that carry credentials. A URI holding one would be copied
+/// into the WAL and every export, where it cannot be purged.
+const CREDENTIAL_PARAMS: &[&str] = &[
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-goog-signature",
+    "x-goog-credential",
+    "sig",
+    "signature",
+    "token",
+    "access_token",
+    "id_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "client_secret",
+];
+
+/// Pointer to the input a decision was made from: a document, a record, a
+/// multimodal manifest. BanditDB stores the pointer, never the content.
+///
+/// An object rather than a bare string so fields can be added later. Unknown
+/// fields are ignored rather than rejected, so a WAL written by a newer server
+/// still replays on this one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InputRef {
+    pub uri: String,
+    /// Hex SHA-256 of the exact bytes the model received. Stored lowercase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// MIME type of what `uri` points to, e.g. `application/json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+impl InputRef {
+    /// Check the reference and return it normalised (`sha256` lowercased).
+    pub fn validated(self) -> Result<InputRef, EngineError> {
+        let bad = |m: String| Err(EngineError::BadRequest(format!("input_ref: {m}")));
+        let uri = self.uri;
+        if uri.is_empty() {
+            return bad("uri must not be empty".into());
+        }
+        if uri.len() > MAX_INPUT_URI_BYTES {
+            return bad(format!(
+                "uri is {} bytes, limit is {MAX_INPUT_URI_BYTES}",
+                uri.len()
+            ));
+        }
+        if uri.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return bad("uri must not contain whitespace or control characters".into());
+        }
+        let Some((scheme, rest)) = uri.split_once(':') else {
+            return bad(
+                "uri needs a scheme, e.g. s3://bucket/key or postgres://db/table/id".into(),
+            );
+        };
+        let scheme_ok = scheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if !scheme_ok {
+            return bad(format!("uri scheme '{scheme}' is not valid"));
+        }
+        if let Some(after) = rest.strip_prefix("//") {
+            let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+            if authority.contains('@') {
+                return bad("uri must not contain credentials (user:password@host); \
+                     it is stored in the WAL and every export"
+                    .into());
+            }
+        }
+        if let Some((_, query)) = rest.split_once('?') {
+            let query = query.split('#').next().unwrap_or("");
+            for pair in query.split(['&', ';']) {
+                let name = pair.split('=').next().unwrap_or("").to_ascii_lowercase();
+                if CREDENTIAL_PARAMS.contains(&name.as_str()) {
+                    return bad(format!(
+                        "uri must not carry credentials (query parameter '{name}'); \
+                         signed URLs expire and would be stored in the WAL and every \
+                         export. Use the unsigned object URI"
+                    ));
+                }
+            }
+        }
+        let sha256 = match self.sha256 {
+            None => None,
+            Some(h) => {
+                if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return bad("sha256 must be 64 hex characters".into());
+                }
+                Some(h.to_ascii_lowercase())
+            }
+        };
+        if let Some(mt) = &self.media_type {
+            let token = |t: &str| {
+                !t.is_empty()
+                    && t.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "!#$&^_.+-".contains(c))
+            };
+            let essence = mt.split(';').next().unwrap_or("");
+            let well_formed = mt.len() <= MAX_MEDIA_TYPE_BYTES
+                && !mt.chars().any(|c| c.is_control())
+                && essence
+                    .split_once('/')
+                    .is_some_and(|(t, sub)| token(t) && token(sub));
+            if !well_formed {
+                return bad(format!(
+                    "media_type '{mt}' is not a MIME type like application/json"
+                ));
+            }
+        }
+        Ok(InputRef {
+            uri,
+            sha256,
+            media_type: self.media_type,
+        })
+    }
+
+    /// Approximate heap bytes, for the pending-cache byte bound.
+    pub fn heap_bytes(&self) -> u64 {
+        72 + self.uri.len() as u64
+            + self.sha256.as_ref().map_or(0, |s| s.len() as u64)
+            + self.media_type.as_ref().map_or(0, |s| s.len() as u64)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionRecord {
     pub campaign_id: String,
@@ -403,6 +546,11 @@ pub struct InteractionRecord {
     pub arm_propensities: Option<HashMap<String, f64>>,
     #[serde(default)]
     pub timestamp_secs: u64,
+    /// What the decision was made from. Kept here as well as on `Predicted`:
+    /// that record is best-effort, and when it is dropped this one reaches the
+    /// WAL via the reward's `unlogged_prediction`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ref: Option<InputRef>,
     /// False when this prediction's WAL record was dropped under load, so replay
     /// cannot find it and its reward must carry it instead. Not persisted: a
     /// record restored from a checkpoint is recoverable from that checkpoint.
@@ -1128,6 +1276,9 @@ pub enum DbEvent {
         /// records (written before this field) deserialise to false.
         #[serde(default)]
         is_reemit: bool,
+        /// What the decision was made from. Absent in older WALs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_ref: Option<InputRef>,
     },
     Rewarded {
         interaction_id: String,

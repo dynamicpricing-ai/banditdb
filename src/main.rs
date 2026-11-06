@@ -10,8 +10,8 @@ use axum::{
 use banditdb::engine::ArmFilter;
 use banditdb::reqlog::{RequestLog, RequestRecord};
 use banditdb::state::{
-    Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, PacingConfig, PacingReport,
-    WarmStart, DEFAULT_ALPHA,
+    Algorithm, ArmStatus, CampaignReport, EngineError, EntropyStatus, InputRef, PacingConfig,
+    PacingReport, WarmStart, DEFAULT_ALPHA,
 };
 use banditdb::tenancy::{Tenant, TenantQuotas, TenantStore};
 use banditdb::BanditDB;
@@ -489,6 +489,9 @@ struct PredictRequest {
     /// Drop these arms from this request. Applied after `eligible_arms`.
     #[serde(default)]
     exclude_arms: Option<Vec<String>>,
+    /// What the decision is made from. Stored with the decision, never fetched.
+    #[serde(default)]
+    input_ref: Option<InputRef>,
 }
 
 #[derive(Serialize)]
@@ -505,6 +508,8 @@ struct BatchPredictItem {
     eligible_arms: Option<Vec<String>>,
     #[serde(default)]
     exclude_arms: Option<Vec<String>>,
+    #[serde(default)]
+    input_ref: Option<InputRef>,
 }
 
 #[derive(Deserialize)]
@@ -533,6 +538,8 @@ struct InteractRequest {
     context: Vec<f64>,
     arm_id: String,
     reward: f64,
+    #[serde(default)]
+    input_ref: Option<InputRef>,
 }
 
 async fn handle_interact(
@@ -546,11 +553,12 @@ async fn handle_interact(
 
     let interaction_id = state
         .db
-        .interact(
+        .interact_with_ref(
             &ns(&auth, &campaign_id),
             &payload.arm_id,
             payload.context,
             payload.reward,
+            payload.input_ref,
         )
         .await
         .map_err(map_engine_err)?;
@@ -1579,7 +1587,8 @@ async fn handle_predict(
     let filter = arm_filter(payload.eligible_arms, payload.exclude_arms)?;
     let db = Arc::clone(&state.db);
     let cid = ns(&auth, &payload.campaign_id);
-    tokio::task::spawn_blocking(move || db.predict_filtered(&cid, payload.context, &filter))
+    let (context, input_ref) = (payload.context, payload.input_ref);
+    tokio::task::spawn_blocking(move || db.predict_with_ref(&cid, context, &filter, input_ref))
         .await
         .map_err(|e| {
             AppError(
@@ -1614,17 +1623,22 @@ async fn handle_batch_predict(
     let db = Arc::clone(&state.db);
     let max_dim = state.db.max_feature_dim;
     // Namespace campaign IDs upfront before moving into spawn_blocking.
-    let mut namespaced: Vec<(String, Vec<f64>, ArmFilter)> =
+    let mut namespaced: Vec<(String, Vec<f64>, ArmFilter, Option<InputRef>)> =
         Vec::with_capacity(payload.predictions.len());
     for item in payload.predictions {
         let filter = arm_filter(item.eligible_arms, item.exclude_arms)?;
-        namespaced.push((ns(&auth, &item.campaign_id), item.context, filter));
+        namespaced.push((
+            ns(&auth, &item.campaign_id),
+            item.context,
+            filter,
+            item.input_ref,
+        ));
     }
 
     let results = tokio::task::spawn_blocking(move || {
         namespaced
             .into_iter()
-            .map(|(cid, context, filter)| {
+            .map(|(cid, context, filter, input_ref)| {
                 if context.len() > max_dim {
                     return BatchPredictResult {
                         arm_id: None,
@@ -1632,7 +1646,7 @@ async fn handle_batch_predict(
                         error: Some(format!("context length {} exceeds limit", context.len())),
                     };
                 }
-                match db.predict_filtered(&cid, context, &filter) {
+                match db.predict_with_ref(&cid, context, &filter, input_ref) {
                     Ok((arm_id, iid)) => BatchPredictResult {
                         arm_id: Some(arm_id),
                         interaction_id: Some(iid),
