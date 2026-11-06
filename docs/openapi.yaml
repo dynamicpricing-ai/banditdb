@@ -305,7 +305,14 @@ paths:
                 feature_dim: { type: integer, example: 10 }
                 alpha:       { type: number, default: 1.0 }
                 algorithm:   { $ref: "#/components/schemas/Algorithm" }
-                metadata:    { type: object }
+                metadata:
+                  type: object
+                  description: >
+                    Free-form JSON (64 KB max), stored with the campaign and not
+                    interpreted by the server. Conventional keys: `features` (name of
+                    each context position), `context` (SDK vector layout) and
+                    `decision_model` ({provider, name, version, questions}) for the
+                    model that produced the context.
                 decay_half_life_hours:
                   type: number
                   nullable: true
