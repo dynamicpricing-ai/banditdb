@@ -30,6 +30,23 @@
 - Archived campaigns are frozen for rewards too: `POST /reward` and
   `/campaign/:id/interact` return 404 while the campaign is archived. The pending
   interaction is kept and can be rewarded after a restore.
+- Progressive campaigns with a `neural_thompson_sampling` challenger now size the
+  challenger's arms for the embedding space. They were sized for the raw context,
+  so challenger predictions, retrains and checkpoints panicked. Existing campaigns
+  return an error on challenger draws until their next retrain rebuilds the arms.
+- Progressive rejects a neural `base` and nested Progressive at creation.
+- The neural replay buffer is written with each checkpoint
+  (`neural/<campaign>.buffer.<generation>`) and restored at startup. Arms are
+  rebuilt from this buffer at every retrain, so an empty buffer after a restart
+  made the first retrain discard what they had learned. The regularisation
+  anchor W₀ is saved beside the weights (`<campaign>.safetensors.w0`) instead of
+  being re-randomised on restart.
+- Retrains no longer add the whole replay buffer to each arm's `reward_count`
+  and `total_reward` again.
+- Training no longer holds the neural lock or the campaign map: rewards and
+  diagnostics for a campaign are not blocked while its network trains, and a
+  campaign create or delete no longer stalls every request behind a retrain.
+  Re-accumulation embeds the buffer in batches instead of one entry at a time.
 
 ## v2.3.2 — Decision input references
 

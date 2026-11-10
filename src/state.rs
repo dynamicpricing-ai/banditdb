@@ -131,6 +131,20 @@ pub enum Algorithm {
     Progressive(ProgressiveConfig),
 }
 
+impl Algorithm {
+    /// The MLP configuration, for the algorithms that score in embedding space.
+    ///
+    /// Every place that asks "is this neural?" goes through here. Matching on
+    /// `NeuralLinUCB` alone left `NeuralThompsonSampling` with arms sized for the
+    /// raw context while predictions scored them against embeddings.
+    pub fn neural_config(&self) -> Option<&NeuralLinUCBConfig> {
+        match self {
+            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
+}
+
 /// Outcome of a single tournament SNIPS evaluation round, returned by the extracted
 /// evaluate_tournament helper so the checkpoint loop can act on it without 7-level nesting.
 #[cfg(feature = "neural")]
