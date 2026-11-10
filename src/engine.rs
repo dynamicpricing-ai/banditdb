@@ -30,6 +30,9 @@ const BPS_FLOOR: u32 = 1_000; // 10% — minimum challenger exploration
 const BPS_CEIL: u32 = 9_000; // 90% — maximum before full promotion
 const BPS_SCALE: u32 = 10_000; // denominator for the U[0, BPS_SCALE) draw
 
+/// Largest exploration coefficient accepted at campaign creation.
+pub const MAX_ALPHA: f64 = 1e6;
+
 pub enum WalMessage {
     Event {
         event: Arc<DbEvent>,
@@ -113,17 +116,34 @@ fn detect_wal_format(path: &str) -> WalFormat {
     WalFormat::Json
 }
 
-/// Read `DbEvent`s from a WAL file slice, auto-detecting the format.
+/// Stream the events of a WAL file slice to `on_event`, without collecting them.
 /// `start_offset` is the byte to start reading from (0 for the full file).
 /// `end_offset`   is the exclusive byte limit (0 means read to end-of-file).
-fn read_wal_slice(
+///
+/// Returns the byte offset up to which the slice is well framed. For JSON that
+/// is always the end of the slice: records are newline-delimited, so a damaged
+/// line is skipped and reading resumes at the next one. A binary WAL has no such
+/// resync point — a damaged length prefix makes everything after it unreadable —
+/// so there the offset is where the last complete record ends.
+///
+/// Recovery and the Parquet export go through this: a WAL that has grown to
+/// gigabytes must not have to fit in memory as a `Vec<DbEvent>` before the first
+/// event is applied.
+fn for_each_wal_event(
     path: &str,
     start_offset: u64,
     end_offset: u64,
     format: WalFormat,
-) -> Vec<DbEvent> {
+    mut on_event: impl FnMut(DbEvent),
+) -> u64 {
     let Ok(mut file) = File::open(path) else {
-        return vec![];
+        return start_offset;
+    };
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let slice_end = if end_offset > 0 {
+        end_offset.min(file_len)
+    } else {
+        file_len
     };
 
     // For binary files the first 4 bytes are the magic header.
@@ -134,10 +154,10 @@ fn read_wal_slice(
     };
 
     if file.seek(SeekFrom::Start(data_start)).is_err() {
-        return vec![];
+        return data_start;
     }
 
-    let mut events = Vec::new();
+    let mut good_end = slice_end.max(data_start);
 
     match format {
         WalFormat::Json => {
@@ -146,47 +166,148 @@ fn read_wal_slice(
             } else {
                 Box::new(file)
             };
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                match serde_json::from_str::<DbEvent>(&line) {
+            // Read raw bytes per line. `BufRead::lines()` fails on a line that is
+            // not valid UTF-8, and stopping there silently dropped every record
+            // after one damaged line — which the next checkpoint then rotated away.
+            let mut reader = BufReader::new(reader);
+            let mut line: Vec<u8> = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(error = %err, path,
+                            "wal replay: read error — records after this point were not replayed");
+                        break;
+                    }
+                }
+                let record = line.trim_ascii();
+                if record.is_empty() {
+                    continue;
+                }
+                match serde_json::from_slice::<DbEvent>(record) {
                     Ok(DbEvent::Unknown) => {
                         tracing::warn!("wal replay: unknown event variant encountered; skipping");
                     }
-                    Ok(e) => events.push(e),
+                    Ok(e) => on_event(e),
                     Err(err) => {
-                        tracing::warn!(line = %line, error = %err, "wal replay: skipping unparseable record");
+                        tracing::warn!(line = %String::from_utf8_lossy(record), error = %err,
+                            "wal replay: skipping unparseable record");
                     }
                 }
             }
         }
         WalFormat::Msgpack => {
-            let limit = if end_offset > 0 {
-                end_offset.saturating_sub(data_start)
-            } else {
-                u64::MAX
-            };
-            let mut reader = file.take(limit);
+            let mut reader = file.take(slice_end.saturating_sub(data_start));
             let mut len_buf = [0u8; 4];
-            while reader.read_exact(&mut len_buf).is_ok() {
-                let len = u32::from_le_bytes(len_buf) as usize;
-                let mut bytes = vec![0u8; len];
+            let mut pos = data_start;
+            good_end = pos;
+            while pos < slice_end {
+                // A frame that does not fit in what is left is a torn final write or
+                // a damaged length prefix. Checked before allocating: a corrupt
+                // prefix can claim up to 4 GB.
+                let remaining = slice_end - pos;
+                if remaining < 4 || reader.read_exact(&mut len_buf).is_err() {
+                    break;
+                }
+                let len = u32::from_le_bytes(len_buf) as u64;
+                if len > remaining - 4 {
+                    break;
+                }
+                let mut bytes = vec![0u8; len as usize];
                 if reader.read_exact(&mut bytes).is_err() {
                     break;
                 }
+                pos += 4 + len;
+                good_end = pos;
                 match rmp_serde::from_slice::<DbEvent>(&bytes) {
                     Ok(DbEvent::Unknown) => {
                         tracing::warn!(
                             "wal replay: unknown binary event variant encountered; skipping"
                         );
                     }
-                    Ok(e) => events.push(e),
+                    Ok(e) => on_event(e),
                     Err(err) => {
                         tracing::warn!(error = %err, "wal replay: skipping unparseable binary record");
                     }
                 }
             }
+            if good_end < slice_end {
+                tracing::error!(
+                    path,
+                    offset = good_end,
+                    unreadable_bytes = slice_end - good_end,
+                    "wal replay: binary WAL is not well framed past this offset — \
+                     the remaining bytes cannot be replayed"
+                );
+            }
         }
     }
-    events
+    good_end
+}
+
+/// Make a WAL that ends in a torn or damaged record safe to append to.
+///
+/// The writer appends. After a crash mid-write the file can end in a partial
+/// record, and the first record written after restart would be glued onto it:
+/// one unparseable JSON line, or a binary frame whose stale length prefix
+/// swallows the records that follow. Either way an acknowledged write would be
+/// lost at the next replay.
+///
+/// JSON only needs the missing newline. A binary WAL is cut back to
+/// `good_end`, the end of its last complete frame; the removed bytes are kept in
+/// `<wal>.damaged-tail` for inspection.
+fn repair_wal_tail(path: &str, format: WalFormat, good_end: u64) {
+    let Ok(file_len) = fs::metadata(path).map(|m| m.len()) else {
+        return;
+    };
+    let result = (|| -> std::io::Result<()> {
+        match format {
+            WalFormat::Json => {
+                if file_len == 0 {
+                    return Ok(());
+                }
+                let mut f = OpenOptions::new().read(true).append(true).open(path)?;
+                f.seek(SeekFrom::End(-1))?;
+                let mut last = [0u8; 1];
+                f.read_exact(&mut last)?;
+                if last[0] != b'\n' {
+                    tracing::warn!(
+                        path,
+                        "recovery: WAL ends in a partial record — terminating it"
+                    );
+                    f.write_all(b"\n")?;
+                    f.sync_all()?;
+                }
+            }
+            WalFormat::Msgpack => {
+                if good_end >= file_len || good_end < WAL_MAGIC.len() as u64 {
+                    return Ok(());
+                }
+                let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+                f.seek(SeekFrom::Start(good_end))?;
+                let mut tail = Vec::new();
+                f.read_to_end(&mut tail)?;
+                let keep = format!("{path}.damaged-tail");
+                fs::write(&keep, &tail)?;
+                f.set_len(good_end)?;
+                f.sync_all()?;
+                tracing::error!(path, offset = good_end, bytes = tail.len(), kept = %keep,
+                    "recovery: removed an unreadable tail from the binary WAL");
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        tracing::error!(path, error = %e, "recovery: could not repair the WAL tail");
+    }
+}
+
+/// The neural replay buffer written with checkpoint `generation`.
+#[cfg(feature = "neural")]
+fn neural_buffer_path(neural_dir: &str, campaign_id: &str, generation: u64) -> String {
+    format!("{neural_dir}/{campaign_id}.buffer.{generation}")
 }
 
 /// Where rotation by checkpoint `generation` keeps the WAL segment it discarded.
@@ -330,6 +451,11 @@ pub struct Campaign {
     pub decay_half_life_hours: Option<f64>,
     /// Live Lagrangian pacing / capacity constraints runtime state. None = unconstrained.
     pub pacing: Option<PacingState>,
+    /// Serialises retraining and tournament evaluation for this campaign, so the
+    /// background worker and a checkpoint never train the same network at once.
+    /// Lock order: `retrain_lock` → `neural` → `arms`.
+    #[cfg(feature = "neural")]
+    pub retrain_lock: parking_lot::Mutex<()>,
 }
 
 impl Campaign {
@@ -353,10 +479,10 @@ impl Campaign {
                     let dim = r.values().next().map(|a| a.theta.len()).unwrap_or(0);
                     (r.keys().cloned().collect(), dim)
                 };
-                let challenger_dim = match cfg.challenger.as_ref() {
-                    Algorithm::NeuralLinUCB(ncfg) => ncfg.embed_dim,
-                    _ => base_dim,
-                };
+                let challenger_dim = cfg
+                    .challenger
+                    .neural_config()
+                    .map_or(base_dim, |ncfg| ncfg.embed_dim);
                 let c_map: HashMap<String, ArmState> = arm_names
                     .into_iter()
                     .map(|name| (name, ArmState::new(challenger_dim)))
@@ -431,6 +557,8 @@ impl Campaign {
             last_checkpoint_entropy: AtomicU64::new(f64::NAN.to_bits()),
             decay_half_life_hours,
             pacing,
+            #[cfg(feature = "neural")]
+            retrain_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -763,9 +891,21 @@ pub fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
 /// lose everything. Three barriers close it: fsync the data, rename, then fsync
 /// the directory so the rename itself is durable.
 fn write_file_durable(dir: &str, tmp: &str, dest: &str, bytes: &[u8]) -> std::io::Result<()> {
+    write_file_durable_with(dir, tmp, dest, |out| out.write_all(bytes))
+}
+
+/// `write_file_durable` for content produced by `fill`, so a large file can be
+/// streamed to disk rather than assembled in memory first.
+fn write_file_durable_with(
+    dir: &str,
+    tmp: &str,
+    dest: &str,
+    fill: impl FnOnce(&mut std::io::BufWriter<File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     {
-        let mut f = File::create(tmp)?;
-        f.write_all(bytes)?;
+        let mut out = std::io::BufWriter::new(File::create(tmp)?);
+        fill(&mut out)?;
+        let f = out.into_inner().map_err(|e| e.into_error())?;
         f.sync_all()?;
     }
     fs::rename(tmp, dest)?;
@@ -796,7 +936,11 @@ fn write_file_durable(dir: &str, tmp: &str, dest: &str, bytes: &[u8]) -> std::io
 /// WAL-order == memory-order consistency, the WAL writer would need to become the
 /// sole applier of events to memory, at the cost of one round-trip latency per request.
 pub struct BanditDB {
-    pub campaigns: RwLock<HashMap<String, Campaign>>,
+    /// Campaigns are reference counted so long-running work — a neural retrain, a
+    /// diagnostics call waiting on one — can hold a campaign without holding this
+    /// map's lock. A read guard held for seconds lets one queued writer (any
+    /// campaign create or delete) block every other reader behind it.
+    pub campaigns: RwLock<HashMap<String, Arc<Campaign>>>,
     pub interactions: Cache<String, InteractionRecord>,
     pub event_tx: Sender<WalMessage>,
     pub rewarded_count: AtomicU64,
@@ -842,6 +986,9 @@ pub struct BanditDB {
     /// from any writer-role caller is enough.
     /// Env: BANDITDB_MAX_CONTEXT_MAGNITUDE (default 1e6).
     pub max_context_magnitude: f64,
+    /// Posterior draws used to estimate Thompson Sampling propensities for each
+    /// prediction. Env: BANDITDB_TS_PROPENSITY_SAMPLES (default 1024).
+    pub ts_propensity_samples: usize,
     /// False when the WAL writer task has encountered an unrecoverable I/O error.
     /// Exposed to the /health endpoint and checked by all write paths.
     pub wal_healthy: Arc<AtomicBool>,
@@ -899,6 +1046,11 @@ pub struct BanditDB {
     /// Held from a growth check to the write that commits it, so concurrent
     /// creations and arm additions cannot all pass a check that only one fits.
     admission: parking_lot::Mutex<()>,
+    /// Counts checkpoint barriers. A pending interaction stamped with an older
+    /// value had its `Predicted` record written before a barrier, so rotation has
+    /// discarded it (or is about to) and its reward must carry the prediction.
+    /// Bumped and read only under `write_gate`.
+    wal_epoch: AtomicU64,
 }
 
 impl BanditDB {
@@ -1203,38 +1355,30 @@ impl BanditDB {
                                 let header = header_for(write_format);
                                 let seg_from = segment_start.max(header.len() as u64);
 
-                                let mut old = File::open(&path)?;
-                                old.seek(SeekFrom::Start(seg_from))?;
-                                let mut segment = header.to_vec();
-                                (&mut old)
-                                    .take(checkpoint_offset.saturating_sub(seg_from))
-                                    .read_to_end(&mut segment)?;
-                                old.seek(SeekFrom::Start(checkpoint_offset))?;
-                                let mut tail = Vec::new();
-                                old.read_to_end(&mut tail)?;
-                                drop(old);
-
-                                // The rewrite is where a configured format change takes
-                                // effect: the tail is re-encoded, not copied.
-                                if write_format != configured_format {
-                                    tail.clear();
-                                    for e in
-                                        read_wal_slice(&path, checkpoint_offset, 0, write_format)
-                                    {
-                                        tail.extend(encode_wal_record(configured_format, &e)?);
-                                    }
-                                }
-
                                 // Keep the discarded segment before discarding it. The
                                 // previous checkpoint plus this segment plus the new WAL
                                 // is the full history, which is what makes
                                 // checkpoint.prev a lossless fallback.
+                                //
+                                // Both files are streamed from the old WAL. Reading the
+                                // segment and the tail into memory first meant a WAL of
+                                // several gigabytes needed that much RAM to rotate.
                                 let seg_path = wal_segment_path(&writer_data_dir, generation);
-                                write_file_durable(
+                                write_file_durable_with(
                                     &writer_data_dir,
                                     &format!("{seg_path}.tmp"),
                                     &seg_path,
-                                    &segment,
+                                    |out| {
+                                        out.write_all(header)?;
+                                        let mut old = File::open(&path)?;
+                                        old.seek(SeekFrom::Start(seg_from))?;
+                                        std::io::copy(
+                                            &mut old
+                                                .take(checkpoint_offset.saturating_sub(seg_from)),
+                                            out,
+                                        )?;
+                                        Ok(())
+                                    },
                                 )?;
                                 // Only the newest segment is ever needed: it pairs with
                                 // checkpoint.prev, which this checkpoint just replaced.
@@ -1255,20 +1399,49 @@ impl BanditDB {
                                 }
 
                                 // The new WAL opens with a marker naming this checkpoint,
-                                // so recovery knows which history the file continues.
-                                let mut new_content = header_for(configured_format).to_vec();
-                                new_content.extend(encode_wal_record(
-                                    configured_format,
-                                    &DbEvent::WalStart { generation },
-                                )?);
-                                new_content.extend(tail);
-
+                                // so recovery knows which history the file continues,
+                                // followed by everything after the barrier.
+                                //
                                 // Durable: the pre-rotation WAL is discarded here, so a
                                 // half-written replacement is unrecoverable.
                                 let tmp = format!("{writer_data_dir}/wal_rotation.tmp");
-                                write_file_durable(&writer_data_dir, &tmp, &path, &new_content)?;
+                                write_file_durable_with(&writer_data_dir, &tmp, &path, |out| {
+                                    out.write_all(header_for(configured_format))?;
+                                    out.write_all(&encode_wal_record(
+                                        configured_format,
+                                        &DbEvent::WalStart { generation },
+                                    )?)?;
+                                    if write_format == configured_format {
+                                        let mut old = File::open(&path)?;
+                                        old.seek(SeekFrom::Start(checkpoint_offset))?;
+                                        std::io::copy(&mut old, out)?;
+                                    } else {
+                                        // The rewrite is where a configured format change
+                                        // takes effect: the tail is re-encoded, not copied.
+                                        let mut failed: Option<std::io::Error> = None;
+                                        for_each_wal_event(
+                                            &path,
+                                            checkpoint_offset,
+                                            0,
+                                            write_format,
+                                            |e| {
+                                                if failed.is_none() {
+                                                    failed =
+                                                        encode_wal_record(configured_format, &e)
+                                                            .and_then(|bytes| out.write_all(&bytes))
+                                                            .err();
+                                                }
+                                            },
+                                        );
+                                        if let Some(e) = failed {
+                                            return Err(e);
+                                        }
+                                    }
+                                    Ok(())
+                                })?;
                                 let new_file = OpenOptions::new().append(true).open(&path)?;
-                                Ok((new_content.len(), new_file))
+                                let total_len = new_file.metadata()?.len() as usize;
+                                Ok((total_len, new_file))
                             })();
                             match rotate {
                                 Ok((total_len, new_file)) => {
@@ -1319,6 +1492,11 @@ impl BanditDB {
             .and_then(|v| v.parse().ok())
             .filter(|v: &f64| v.is_finite() && *v > 0.0)
             .unwrap_or(1e6);
+        let ts_propensity_samples: usize = std::env::var("BANDITDB_TS_PROPENSITY_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1024);
         let max_campaigns: usize = std::env::var("BANDITDB_MAX_CAMPAIGNS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1445,6 +1623,7 @@ impl BanditDB {
             max_campaign_bytes,
             max_total_campaign_bytes,
             max_context_magnitude,
+            ts_propensity_samples,
             wal_healthy,
             wal_dropped: AtomicU64::new(0),
             wal_fsyncs,
@@ -1459,6 +1638,7 @@ impl BanditDB {
             current_checkpoint_unreadable: AtomicBool::new(false),
             checkpoint_lock: tokio::sync::Mutex::new(()),
             admission: parking_lot::Mutex::new(()),
+            wal_epoch: AtomicU64::new(0),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1563,6 +1743,8 @@ impl BanditDB {
             Some(checkpoint) => {
                 wal_start_offset = checkpoint.wal_offset;
                 checkpoint_generation = Some(checkpoint.generation);
+                #[cfg(feature = "neural")]
+                let generation = checkpoint.generation;
                 self.last_checkpoint_secs
                     .store(checkpoint.timestamp_secs, Ordering::Relaxed);
 
@@ -1616,7 +1798,9 @@ impl BanditDB {
                             .last_checkpoint_entropy
                             .store(e.to_bits(), Ordering::Relaxed);
                     }
-                    self.campaigns.write().insert(campaign_id, campaign);
+                    self.campaigns
+                        .write()
+                        .insert(campaign_id, Arc::new(campaign));
                 }
 
                 // Load saved neural weights if present
@@ -1639,6 +1823,21 @@ impl BanditDB {
                                     }
                                     Err(e) => {
                                         tracing::warn!(campaign = %campaign_id, error = %e, "recovery: failed to load neural weights")
+                                    }
+                                }
+                            }
+                            // The replay buffer written with this checkpoint. Rewards
+                            // in the WAL tail are appended to it by the replay below.
+                            let path = neural_buffer_path(&neural_dir, campaign_id, generation);
+                            if std::path::Path::new(&path).exists() {
+                                match crate::neural::BufferSnapshot::load(&path) {
+                                    Ok(snapshot) => {
+                                        let entries = snapshot.entries.len();
+                                        neural.lock().restore_buffer(snapshot);
+                                        tracing::info!(campaign = %campaign_id, entries, "recovery: loaded neural replay buffer");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(campaign = %campaign_id, error = %e, "recovery: failed to load neural replay buffer")
                                     }
                                 }
                             }
@@ -1721,16 +1920,22 @@ impl BanditDB {
             );
             self.wal_base.store(start, Ordering::SeqCst);
 
-            let mut events = Vec::new();
+            // Applied as they are read: the WAL is never held in memory whole.
+            let mut count = 0usize;
             if let Some(seg) = &segment {
                 tracing::warn!(segment = %seg, "recovery: replaying the retained WAL segment");
-                events = read_wal_slice(seg, 0, 0, detect_wal_format(seg));
+                for_each_wal_event(seg, 0, 0, detect_wal_format(seg), |event| {
+                    self.apply_event_to_memory(&event);
+                    count += 1;
+                });
             }
-            events.extend(read_wal_slice(wal_path, start, 0, fmt));
-            let count = events.len();
-            for event in events {
+            let good_end = for_each_wal_event(wal_path, start, 0, fmt, |event| {
                 self.apply_event_to_memory(&event);
-            }
+                count += 1;
+            });
+            // Before the writer appends anything: it opens the file only once the
+            // runtime first polls its task, which is after this returns.
+            repair_wal_tail(wal_path, fmt, good_end);
             tracing::info!(events = count, ?fmt, "recovery: WAL tail replayed");
         }
 
@@ -1754,14 +1959,21 @@ impl BanditDB {
             let neural_dir = self.neural_dir();
             fs::create_dir_all(&neural_dir).ok();
 
-            let campaigns = self.campaigns.read();
+            // Cloned out so the campaign map is not locked while networks train.
+            let campaigns: Vec<(String, Arc<Campaign>)> = self
+                .campaigns
+                .read()
+                .iter()
+                .map(|(id, c)| (id.clone(), Arc::clone(c)))
+                .collect();
             for (campaign_id, campaign) in campaigns.iter() {
                 let Some(neural_mutex) = &campaign.neural else {
                     continue;
                 };
 
-                // Scope the probe so no neural lock is held across retrain_campaign_locked,
-                // which acquires it itself.
+                // Retrain and tournament as one step with respect to the background
+                // worker: the tournament reads the live network.
+                let _training = campaign.retrain_lock.lock();
                 let needs_retrain = neural_mutex.lock().should_retrain();
                 let is_progressive = matches!(&campaign.algorithm, Algorithm::Progressive(_));
 
@@ -1774,7 +1986,7 @@ impl BanditDB {
                 //     worker keeps up with arriving rewards; retained so checkpoints
                 //     still train when the worker is disabled.
                 if needs_retrain {
-                    Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "checkpoint");
+                    Self::retrain_holding_lock(campaign_id, campaign, &neural_dir, "checkpoint");
                 }
 
                 // 1b. Tournament — neural lock re-acquired with no arms lock held.
@@ -1803,23 +2015,25 @@ impl BanditDB {
                     continue;
                 }
 
-                let lambda = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
-                let inv_lambda = 1.0 / lambda;
+                // Discount factor γ (D-LinUCB). Not to be confused with the pacing
+                // shadow price λ.
+                let gamma = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
 
                 let apply_decay = |arms: &RwLock<HashMap<String, ArmState>>| {
                     for arm in arms.write().values_mut() {
-                        arm.a_inv *= inv_lambda;
-                        arm.b *= lambda;
-                        arm.theta = arm.a_inv.dot(&arm.b);
-                        *arm.chol_cache.lock() = None;
+                        arm.decay(gamma);
                     }
                 };
                 apply_decay(&campaign.arms);
                 if let Some(c_arms) = &campaign.challenger_arms {
                     apply_decay(c_arms);
                 }
-                tracing::debug!(campaign = %campaign_id, lambda, elapsed_hours, "checkpoint: decay applied");
+                tracing::debug!(campaign = %campaign_id, gamma, elapsed_hours, "checkpoint: decay applied");
             }
+            // The interval up to `now` has been applied to memory, whether or not the
+            // rest of this checkpoint succeeds. Recording it only on success made a
+            // failing checkpoint re-apply the whole interval on every retry.
+            self.last_checkpoint_secs.store(now, Ordering::Relaxed);
         }
 
         // 3. Barrier and snapshot, as one step with respect to writers. Done AFTER
@@ -1842,9 +2056,19 @@ impl BanditDB {
             .await
             .map_err(|_| "WAL channel closed".to_string())?;
         let (reply_tx, reply_rx) = oneshot::channel::<u64>();
+        #[cfg(feature = "neural")]
+        let mut neural_buffers: Vec<(String, crate::neural::BufferSnapshot)> = Vec::new();
         let (campaigns_snapshot, pending_interactions) = {
             let _gate = self.write_gate.write();
             permit.send(WalMessage::Checkpoint { reply: reply_tx });
+            self.wal_epoch.fetch_add(1, Ordering::SeqCst);
+            // Replay buffers, cut at the same barrier as the arms they rebuild.
+            #[cfg(feature = "neural")]
+            for (id, campaign) in self.campaigns.read().iter() {
+                if let Some(neural) = &campaign.neural {
+                    neural_buffers.push((id.clone(), neural.lock().buffer_snapshot()));
+                }
+            }
             let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
                 let campaigns = self.campaigns.read();
                 campaigns
@@ -1907,6 +2131,31 @@ impl BanditDB {
         };
         let reemit_count = pending_interactions.len();
 
+        // serde_json writes NaN and infinity as `null`, which does not parse back as
+        // a number. A snapshot holding one would produce a checkpoint.json that this
+        // call reports as written and the next start cannot read. Refuse here, before
+        // anything on disk changes: the previous checkpoint and the WAL stay intact.
+        let mut pending_interactions = pending_interactions;
+        for record in pending_interactions.values_mut() {
+            // Propensities are evaluation metadata; dropping a bad set loses nothing
+            // the model needs.
+            if record
+                .arm_propensities
+                .as_ref()
+                .is_some_and(|m| m.values().any(|p| !p.is_finite()))
+            {
+                record.arm_propensities = None;
+            }
+        }
+        if let Some(what) = non_finite_state(&campaigns_snapshot) {
+            tracing::error!(%what, "checkpoint: refusing to write non-finite state");
+            return Err(format!(
+                "checkpoint aborted: {what} holds NaN or infinity, which would make \
+                 checkpoint.json unreadable. The previous checkpoint and the WAL are \
+                 untouched. Delete or recreate the affected campaign, then checkpoint again."
+            ));
+        }
+
         // The writer replies once everything enqueued before the barrier is on disk.
         let wal_offset = reply_rx
             .await
@@ -1938,7 +2187,7 @@ impl BanditDB {
             let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
             let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
 
-            for event in read_wal_slice(&wal_path_clone, 0, wal_offset, wal_fmt) {
+            for_each_wal_event(&wal_path_clone, 0, wal_offset, wal_fmt, |event| {
                 match event {
                     DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
                         predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
@@ -1953,7 +2202,7 @@ impl BanditDB {
                     }
                     _ => {}
                 }
-            }
+            });
 
             let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
 
@@ -1973,30 +2222,89 @@ impl BanditDB {
             }
 
             let mut rows = 0usize;
-            for (campaign_id, interactions) in &by_campaign {
-                let feature_dim = interactions[0].context.len();
-                prune_export_shards(&export_dir_clone, campaign_id, export_retain);
-                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
-                    Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
-                    Ok(())  => rows += interactions.len(),
+            for (campaign_id, interactions) in by_campaign {
+                prune_export_shards(&export_dir_clone, &campaign_id, export_retain);
+                // One shard per context length. A campaign id that was deleted and
+                // recreated with another feature_dim leaves both lengths in the same
+                // WAL segment, and a Parquet shard has one fixed set of feature columns.
+                let mut by_dim: std::collections::BTreeMap<usize, Vec<CompletedInteraction>> =
+                    std::collections::BTreeMap::new();
+                for interaction in interactions {
+                    by_dim.entry(interaction.context.len()).or_default().push(interaction);
+                }
+                for (feature_dim, group) in &by_dim {
+                    match write_campaign_parquet(&export_dir_clone, &campaign_id, group, *feature_dim) {
+                        Err(e) => tracing::error!(campaign = %campaign_id, feature_dim, error = %e, "checkpoint: Parquet write failed"),
+                        Ok(())  => rows += group.len(),
+                    }
                 }
             }
 
             rows
-        }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
+        }).await;
+        // The export is an analytics side-product; recovery never reads it. A failure
+        // here must not stop the checkpoint, or the WAL would never rotate again and
+        // every later checkpoint would re-read the same records and fail the same way.
+        let parquet_rows = parquet_rows.unwrap_or_else(|e| {
+            tracing::error!(error = %e,
+                "checkpoint: Parquet export task failed — continuing without an export for this segment");
+            0
+        });
 
         let timestamp_secs = now_secs();
-        self.last_checkpoint_secs
-            .store(timestamp_secs, Ordering::Relaxed);
         let generation = self.checkpoint_generation.load(Ordering::SeqCst) + 1;
-        let mut data = CheckpointData {
+        let data = CheckpointData {
             wal_offset,
             timestamp_secs,
             campaigns: campaigns_snapshot,
             pending_interactions,
             generation,
         };
-        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        let campaign_count = data.campaigns.len();
+        // Off the async threads: serialising every arm matrix and pending context
+        // takes seconds on a large instance, and run inline it stalled every
+        // request sharing the worker.
+        let json = tokio::task::spawn_blocking(move || {
+            serde_json::to_string(&data).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("checkpoint serialisation task failed: {e}"))??;
+
+        // Written before checkpoint.json, so a checkpoint on disk always has the
+        // buffer of its own generation beside it. Failure is not fatal: the
+        // campaign then restarts with an empty buffer, as it did before buffers
+        // were persisted at all.
+        #[cfg(feature = "neural")]
+        {
+            let neural_dir = self.neural_dir();
+            let written = tokio::task::spawn_blocking(move || {
+                for (campaign_id, snapshot) in neural_buffers {
+                    let path = neural_buffer_path(&neural_dir, &campaign_id, generation);
+                    if let Err(e) = snapshot.save(&path) {
+                        tracing::warn!(campaign = %campaign_id, error = %e,
+                            "checkpoint: could not write the neural replay buffer");
+                    }
+                }
+                // Keep this generation and the previous one (it pairs with
+                // checkpoint.prev); anything older is unreachable.
+                if let Ok(entries) = fs::read_dir(&neural_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let old = name
+                            .rsplit_once(".buffer.")
+                            .and_then(|(_, g)| g.parse::<u64>().ok())
+                            .is_some_and(|g| g + 1 < generation);
+                        if old {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            })
+            .await;
+            if let Err(e) = written {
+                tracing::warn!(error = %e, "checkpoint: neural replay buffer task failed");
+            }
+        }
 
         let tmp_path = format!("{}/checkpoint.tmp", self.data_dir);
         let dest_path = format!("{}/checkpoint.json", self.data_dir);
@@ -2012,18 +2320,34 @@ impl BanditDB {
         // unreadable, that file must not become the fallback. It is set aside for
         // inspection, and the new checkpoint is written to both slots.
         let current_unreadable = self.current_checkpoint_unreadable.load(Ordering::SeqCst);
+        // The renames and fsyncs block; they run on a blocking thread and hand the
+        // serialised checkpoint back for the post-rotation rewrite.
+        let json = {
+            let (data_dir, tmp_path, dest_path, prev_path) = (
+                self.data_dir.clone(),
+                tmp_path.clone(),
+                dest_path.clone(),
+                prev_path.clone(),
+            );
+            tokio::task::spawn_blocking(move || -> Result<String, String> {
+                if current_unreadable {
+                    fs::rename(&dest_path, format!("{data_dir}/checkpoint.corrupt"))
+                        .map_err(|e| e.to_string())?;
+                } else if Path::new(&dest_path).exists() {
+                    fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
+                }
+                write_file_durable(&data_dir, &tmp_path, &dest_path, json.as_bytes())
+                    .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
+                if current_unreadable {
+                    write_file_durable(&data_dir, &tmp_path, &prev_path, json.as_bytes())
+                        .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
+                }
+                Ok(json)
+            })
+            .await
+            .map_err(|e| format!("checkpoint write task failed: {e}"))??
+        };
         if current_unreadable {
-            fs::rename(&dest_path, format!("{}/checkpoint.corrupt", self.data_dir))
-                .map_err(|e| e.to_string())?;
-        } else if Path::new(&dest_path).exists() {
-            fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
-        }
-
-        write_file_durable(&self.data_dir, &tmp_path, &dest_path, json.as_bytes())
-            .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
-        if current_unreadable {
-            write_file_durable(&self.data_dir, &tmp_path, &prev_path, json.as_bytes())
-                .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
             self.current_checkpoint_unreadable
                 .store(false, Ordering::SeqCst);
         }
@@ -2063,22 +2387,27 @@ impl BanditDB {
         //
         // checkpoint.prev is deliberately left alone here — this is a correction
         // to the current generation, not a new one.
-        data.wal_offset = 0;
-        let rotated_json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-        write_file_durable(
-            &self.data_dir,
-            &tmp_path,
-            &dest_path,
-            rotated_json.as_bytes(),
-        )
-        .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))?;
+        //
+        // `wal_offset` is the first field of the serialised checkpoint, so the
+        // rewrite patches that prefix instead of serialising the whole snapshot
+        // a second time.
+        {
+            let data_dir = self.data_dir.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let rotated_json = checkpoint_json_with_zero_offset(json, wal_offset)?;
+                write_file_durable(&data_dir, &tmp_path, &dest_path, rotated_json.as_bytes())
+                    .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))
+            })
+            .await
+            .map_err(|e| format!("checkpoint rewrite task failed: {e}"))??;
+        }
 
         let msg = format!(
             "Checkpoint written and WAL rotated: {} campaigns, offset {} bytes, {} interactions exported, {} in-flight re-emitted",
-            data.campaigns.len(), wal_offset, parquet_rows, reemit_count
+            campaign_count, wal_offset, parquet_rows, reemit_count
         );
         tracing::info!(
-            campaigns = data.campaigns.len(),
+            campaigns = campaign_count,
             wal_offset,
             parquet_rows,
             reemit_count,
@@ -2108,7 +2437,7 @@ impl BanditDB {
                 // challenger_arms derived by Campaign::new from algorithm (None = derive).
                 self.campaigns.write().insert(
                     campaign_id.clone(),
-                    Campaign::new(
+                    Arc::new(Campaign::new(
                         *alpha,
                         algorithm.clone(),
                         RwLock::new(arms_map),
@@ -2116,7 +2445,7 @@ impl BanditDB {
                         metadata.clone(),
                         *decay_half_life_hours,
                         pacing.clone().map(PacingState::new),
-                    ),
+                    )),
                 );
             }
             DbEvent::Predicted {
@@ -2141,6 +2470,7 @@ impl BanditDB {
                         timestamp_secs: *timestamp_secs,
                         input_ref: input_ref.clone(),
                         logged: true,
+                        wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
                     },
                 );
                 // Restore the prediction counter on replay so it survives restart
@@ -2196,9 +2526,10 @@ impl BanditDB {
                     if let Some(campaign) = campaign {
                         // Helper: pick embedding based on which sub-algorithm a branch uses.
                         let embed_for = |algo: &Algorithm| -> Array1<f64> {
-                            match algo {
-                                Algorithm::NeuralLinUCB(_) => campaign.embed(&record.context),
-                                _ => record.context.clone(),
+                            if algo.neural_config().is_some() {
+                                campaign.embed(&record.context)
+                            } else {
+                                record.context.clone()
                             }
                         };
 
@@ -2213,7 +2544,12 @@ impl BanditDB {
                         if let Some(arm_state) =
                             campaign.arms.write().get_mut(record.arm_id.as_str())
                         {
-                            arm_state.update(&base_features, *reward);
+                            // Same space or nothing: `update` panics on a length
+                            // mismatch, and this also runs during replay, where a
+                            // panic would stop the server from starting.
+                            if arm_state.theta.len() == base_features.len() {
+                                arm_state.update(&base_features, *reward);
+                            }
                         }
 
                         if let Some(c_arms) = &campaign.challenger_arms {
@@ -2223,7 +2559,11 @@ impl BanditDB {
                             };
                             if let Some(arm_state) = c_arms.write().get_mut(record.arm_id.as_str())
                             {
-                                arm_state.update(&challenger_features, *reward);
+                                // A challenger arm not yet in embedding space is
+                                // rebuilt from the replay buffer at the next retrain.
+                                if arm_state.theta.len() == challenger_features.len() {
+                                    arm_state.update(&challenger_features, *reward);
+                                }
                             }
                         }
 
@@ -2404,6 +2744,12 @@ impl BanditDB {
         EngineError::NotFound(format!("Campaign '{id}' not found"))
     }
 
+    fn campaign_archived(id: &str) -> EngineError {
+        EngineError::Archived(format!(
+            "Campaign '{id}' is archived — restore it before recording rewards"
+        ))
+    }
+
     /// Namespaced campaign an interaction belongs to, if it is still pending.
     ///
     /// `/reward` identifies its target by interaction id alone, so this is what lets
@@ -2539,7 +2885,7 @@ impl BanditDB {
         self.campaigns
             .read()
             .values()
-            .map(Campaign::reserved_bytes)
+            .map(|c| c.reserved_bytes())
             .sum()
     }
 
@@ -2695,9 +3041,12 @@ impl BanditDB {
         }
         // A non-finite alpha makes every score NaN from the first prediction; a
         // negative one inverts exploration into a penalty on uncertainty.
-        if !alpha.is_finite() || alpha < 0.0 {
+        // The upper bound keeps `alpha * sqrt(variance)` finite. An infinite score
+        // makes the softmax propensities NaN, and those are logged with every
+        // prediction and carried in the checkpoint.
+        if !alpha.is_finite() || !(0.0..=MAX_ALPHA).contains(&alpha) {
             return Err(EngineError::BadRequest(format!(
-                "alpha must be finite and non-negative, got {alpha}"
+                "alpha must be finite and in [0, {MAX_ALPHA}], got {alpha}"
             )));
         }
         if let Some(hl) = decay_half_life_hours {
@@ -2712,6 +3061,29 @@ impl BanditDB {
         }
         Self::validate_algorithm(&algorithm, self.max_feature_dim)?;
         if let Algorithm::Progressive(cfg) = &algorithm {
+            // A Progressive campaign owns one network, and it belongs to the
+            // challenger. A neural base would have no network to embed with and
+            // would silently run as its linear counterpart.
+            if cfg.base.neural_config().is_some() {
+                return Err(EngineError::BadRequest(
+                    "Progressive base must be linucb or thompson_sampling — \
+                     put the neural algorithm in the challenger slot"
+                        .into(),
+                ));
+            }
+            if matches!(cfg.base.as_ref(), Algorithm::Progressive(_))
+                || matches!(cfg.challenger.as_ref(), Algorithm::Progressive(_))
+            {
+                return Err(EngineError::BadRequest(
+                    "Progressive cannot be nested inside Progressive".into(),
+                ));
+            }
+            if cfg.challenger.neural_config().is_none() {
+                tracing::warn!(campaign = %campaign_id,
+                    "Progressive campaign has no neural challenger: base and challenger learn \
+                     identical models, so the tournament will always tie and challenger \
+                     traffic stays at 10%");
+            }
             let base_ctx_dim = expected_context_dim(&cfg.base, feature_dim);
             let chal_ctx_dim = expected_context_dim(&cfg.challenger, feature_dim);
             if base_ctx_dim != chal_ctx_dim {
@@ -3071,19 +3443,61 @@ impl BanditDB {
                 )));
             }
 
-            let scores: Vec<(String, f64)> = eligible
+            // Arms and features must be in the same space, or the dot product in
+            // scoring panics. They can disagree for a neural campaign whose arms
+            // were sized for the raw context (created before that was fixed) until
+            // its next retrain rebuilds them in embedding space.
+            if let Some((arm_id, state)) = eligible
                 .iter()
-                .map(|(arm_id, state)| {
-                    let score = match active_algo {
-                        Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
-                            state.score_ts(&features, campaign.alpha)
-                        }
-                        _ => state.score(&features, campaign.alpha),
-                    };
-                    let price = campaign.arm_price(arm_id);
-                    ((*arm_id).clone(), score - price)
-                })
-                .collect();
+                .find(|(_, state)| state.theta.len() != features.len())
+            {
+                return Err(EngineError::Internal(format!(
+                    "campaign '{campaign_id}': arm '{arm_id}' has dimension {} but the features \
+                     have {} — the arm is rebuilt at the campaign's next neural retrain",
+                    state.theta.len(),
+                    features.len()
+                )));
+            }
+
+            let is_ts = matches!(
+                active_algo,
+                Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_)
+            );
+            // Thompson sampling: each arm's sampled score is Gaussian with this
+            // (mean − price, alpha·sd). Computed once per arm — the O(d²) part —
+            // and reused for the decision draw and every propensity draw below.
+            let ts_posteriors: Vec<(f64, f64)> = if is_ts {
+                eligible
+                    .iter()
+                    .map(|(arm_id, state)| {
+                        let (mean, sd) = state.posterior(&features);
+                        (mean - campaign.arm_price(arm_id), campaign.alpha * sd)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let scores: Vec<(String, f64)> = if is_ts {
+                use rand_distr::{Distribution, StandardNormal};
+                let mut rng = rand::thread_rng();
+                eligible
+                    .iter()
+                    .zip(&ts_posteriors)
+                    .map(|((arm_id, _), (mean, sd))| {
+                        let z: f64 = StandardNormal.sample(&mut rng);
+                        ((*arm_id).clone(), mean + sd * z)
+                    })
+                    .collect()
+            } else {
+                eligible
+                    .iter()
+                    .map(|(arm_id, state)| {
+                        let score = state.score(&features, campaign.alpha);
+                        ((*arm_id).clone(), score - campaign.arm_price(arm_id))
+                    })
+                    .collect()
+            };
 
             // Rank candidate arms descending by penalized score.
             let mut ranked_arms = scores.clone();
@@ -3115,44 +3529,19 @@ impl BanditDB {
                 arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            let arm_propensities = match active_algo {
-                Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
-                    // Adaptive Monte Carlo: draw N trials and count wins per arm.
-                    // N scales with posterior spread (A_inv diagonal) — large near cold-start
-                    // where many samples are needed; small once the posterior concentrates.
-                    // The first trial's winner is already known (best_arm from initial scores draw).
-                    let n = ts_propensity_samples(&eligible);
-                    let mut counts: HashMap<String, u32> = eligible
-                        .iter()
-                        .map(|(id, _)| ((*id).clone(), 0u32))
-                        .collect();
-                    *counts.entry(best_arm.clone()).or_insert(0) += 1;
-                    for _ in 1..n {
-                        if let Some((winner, _)) = eligible
-                            .iter()
-                            .map(|(id, state)| {
-                                (
-                                    (*id).clone(),
-                                    state.score_ts(&features, campaign.alpha)
-                                        - campaign.arm_price(id),
-                                )
-                            })
-                            .max_by(|a, b| {
-                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                        {
-                            *counts.entry(winner).or_insert(0) += 1;
-                        }
-                    }
-                    let n_f = n as f64;
-                    Some(
-                        counts
-                            .into_iter()
-                            .map(|(id, c)| (id, c as f64 / n_f))
-                            .collect(),
-                    )
-                }
-                _ => Some(softmax_propensities(&scores)),
+            let arm_propensities = if is_ts {
+                // Monte Carlo estimate of each arm's probability of being the
+                // sampled maximum. The draws are independent of the decision draw
+                // above: counting that draw as a sample floors the chosen arm at
+                // 1/N, which inflates the propensity of rarely chosen arms and
+                // shrinks their importance weights.
+                Some(ts_propensities(
+                    &eligible,
+                    &ts_posteriors,
+                    self.ts_propensity_samples,
+                ))
+            } else {
+                Some(softmax_propensities(&scores))
             };
 
             let has_pacing = campaign.pacing.is_some();
@@ -3203,8 +3592,15 @@ impl BanditDB {
                 // was rejected.
                 if let Some(c) = self.campaigns.read().get(campaign_id) {
                     c.rollback_consumption(&best_arm);
+                    // Saturating: for a Progressive campaign the increment may have
+                    // gone to the challenger's copy of the arm, and a plain
+                    // fetch_sub on a base counter still at 0 wraps to u64::MAX.
                     if let Some(arm_state) = c.arms.read().get(best_arm.as_str()) {
-                        arm_state.prediction_count.fetch_sub(1, Ordering::Relaxed);
+                        let _ = arm_state.prediction_count.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |v| v.checked_sub(1),
+                        );
                     }
                 }
                 return Err(e);
@@ -3223,6 +3619,9 @@ impl BanditDB {
                 timestamp_secs: now,
                 input_ref,
                 logged,
+                // Read under the gate taken at the top, so it names the side of
+                // the barrier the Predicted record above landed on.
+                wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
             },
         );
 
@@ -3258,11 +3657,16 @@ impl BanditDB {
         Self::validate_reward(reward)?;
         // Checked before anything is logged: a record that cannot be applied would
         // otherwise reach the WAL, and recovery would replay it.
-        self.campaigns
-            .read()
-            .get(campaign_id)
-            .ok_or_else(|| Self::campaign_not_found(campaign_id))?
-            .check_interaction(arm_id, context.len())?;
+        {
+            let campaigns = self.campaigns.read();
+            let campaign = campaigns
+                .get(campaign_id)
+                .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+            if campaign.archived.load(Ordering::Relaxed) {
+                return Err(Self::campaign_archived(campaign_id));
+            }
+            campaign.check_interaction(arm_id, context.len())?;
+        }
 
         let interaction_id = Uuid::new_v4().to_string();
         let now = now_secs();
@@ -3278,18 +3682,27 @@ impl BanditDB {
             is_reemit: false,
             input_ref,
         });
-        self.log_and_apply(pred_event, Durability::Required)?;
+        // Both records go in under one hold of the gate, so a checkpoint barrier
+        // cannot fall between them. Split, the prediction would be rotated away
+        // while its reward stayed, and the pair would never be exported.
+        let ack = {
+            let _gate = self.write_gate.read();
+            self.wal_enqueue(Arc::clone(&pred_event), Durability::Required)?;
+            self.apply_event_to_memory(&pred_event);
 
-        // 2. Emit Rewarded event
-        let reward_event = Arc::new(DbEvent::Rewarded {
-            interaction_id: interaction_id.clone(),
-            reward,
-            timestamp_secs: now,
-            unlogged_prediction: None,
-        });
-        // One ack covers both records: the prediction was enqueued first, so any
-        // fsync that reaches the reward has necessarily already covered it.
-        let ack = self.log_and_apply(reward_event, Durability::Acked)?;
+            // 2. Emit Rewarded event
+            let reward_event = Arc::new(DbEvent::Rewarded {
+                interaction_id: interaction_id.clone(),
+                reward,
+                timestamp_secs: now,
+                unlogged_prediction: None,
+            });
+            // One ack covers both records: the prediction was enqueued first, so any
+            // fsync that reaches the reward has necessarily already covered it.
+            let ack = self.wal_enqueue(Arc::clone(&reward_event), Durability::Acked)?;
+            self.apply_event_to_memory(&reward_event);
+            ack
+        };
 
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await?;
@@ -3326,20 +3739,39 @@ impl BanditDB {
                 "Interaction '{interaction_id}' not found or already rewarded"
             )));
         };
-        // A prediction whose WAL record was dropped leaves replay nothing to match
-        // this reward against, so the reward carries it. Without that, an
-        // acknowledged reward would vanish on restart.
-        let unlogged_prediction = (!record.logged).then_some(record);
-        let event = Arc::new(DbEvent::Rewarded {
-            interaction_id: interaction_id.to_string(),
-            reward,
-            timestamp_secs: now_secs(),
-            unlogged_prediction,
-        });
+        // Archived means frozen. The interaction stays pending, so the reward can
+        // still be recorded once the campaign is restored.
+        if self
+            .campaigns
+            .read()
+            .get(&record.campaign_id)
+            .is_some_and(|c| c.archived.load(Ordering::Relaxed))
+        {
+            return Err(Self::campaign_archived(&record.campaign_id));
+        }
         // WAL before memory. See BanditDB consistency-model doc comment.
         // Applied before awaiting: the update is visible to concurrent readers
         // immediately, while the caller's ack still means "durable".
-        let ack = self.log_and_apply(event, Durability::Acked)?;
+        let ack = {
+            let _gate = self.write_gate.read();
+            // The reward carries its prediction whenever the current WAL does not
+            // hold the `Predicted` record: it was dropped under load, or it was
+            // written before a checkpoint barrier and rotated away. Replay needs
+            // it in the first case, and the Parquet export — which joins
+            // predictions to rewards within one WAL — in both. Decided under the
+            // gate so a barrier cannot slip in between the check and the enqueue.
+            let in_current_wal =
+                record.logged && record.wal_epoch == self.wal_epoch.load(Ordering::SeqCst);
+            let event = Arc::new(DbEvent::Rewarded {
+                interaction_id: interaction_id.to_string(),
+                reward,
+                timestamp_secs: now_secs(),
+                unlogged_prediction: (!in_current_wal).then_some(record),
+            });
+            let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
+            self.apply_event_to_memory(&event);
+            ack
+        };
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await
     }
@@ -3391,10 +3823,32 @@ impl BanditDB {
         &self,
         campaign_id: &str,
     ) -> Result<CampaignDiagnosticsData, EngineError> {
-        let campaigns = self.campaigns.read();
-        let campaign = campaigns
+        // Cloned out of the map: the neural lock below can be busy for a moment,
+        // and waiting for it must not hold the campaign map.
+        let campaign = self
+            .campaigns
+            .read()
             .get(campaign_id)
+            .cloned()
             .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+
+        // Neural state is read before the arms lock is taken. Retraining takes
+        // `neural` then `arms`; taking them here in the opposite order could
+        // deadlock against it once a reward queued for `arms.write()`.
+        #[cfg(feature = "neural")]
+        let (neural_buffer_size, neural_last_retrain_losses) = match &campaign.neural {
+            Some(n) => {
+                let n = n.lock();
+                let losses = n.last_retrain_losses.clone();
+                (Some(n.buffer.len()), (!losses.is_empty()).then_some(losses))
+            }
+            None => (None, None),
+        };
+        #[cfg(not(feature = "neural"))]
+        let (neural_buffer_size, neural_last_retrain_losses): (
+            Option<usize>,
+            Option<Vec<f32>>,
+        ) = (None, None);
 
         let arms_guard = campaign.arms.read();
         let mut total_predictions = 0u64;
@@ -3445,23 +3899,6 @@ impl BanditDB {
             } else {
                 (None, None)
             };
-
-        #[cfg(feature = "neural")]
-        let neural_buffer_size = campaign.neural.as_ref().map(|n| n.lock().buffer.len());
-        #[cfg(not(feature = "neural"))]
-        let neural_buffer_size: Option<usize> = None;
-
-        #[cfg(feature = "neural")]
-        let neural_last_retrain_losses = campaign.neural.as_ref().and_then(|n| {
-            let v = n.lock().last_retrain_losses.clone();
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
-            }
-        });
-        #[cfg(not(feature = "neural"))]
-        let neural_last_retrain_losses: Option<Vec<f32>> = None;
 
         // --- Entropy alerting ---
 
@@ -3712,12 +4149,28 @@ impl BanditDB {
 
     /// Run Algorithm 2 for one campaign: retrain the MLP on its replay buffer, then
     /// re-accumulate arm matrices in the new embedding space (warm start).
-    ///
-    /// Lock order: the neural lock is taken here and released before `arms.write()`.
-    /// predict() takes arms.read() and then neural.lock() via embed(), so holding the
-    /// neural lock across an arms.write() would invert that order and deadlock.
     #[cfg(feature = "neural")]
     fn retrain_campaign_locked(
+        campaign_id: &str,
+        campaign: &Campaign,
+        neural_dir: &str,
+        origin: &str,
+    ) {
+        let _training = campaign.retrain_lock.lock();
+        Self::retrain_holding_lock(campaign_id, campaign, neural_dir, origin);
+    }
+
+    /// `retrain_campaign_locked` for a caller that already holds `retrain_lock`.
+    ///
+    /// The neural lock is held only to set training up and to install its result,
+    /// never across the gradient steps: the reward path appends to the replay
+    /// buffer under that lock, so holding it for a multi-second retrain stalled
+    /// every reward for the campaign.
+    ///
+    /// Lock order is `neural` → `arms`. Nothing takes them the other way round:
+    /// `predict` reads the published weight snapshot, not the neural lock.
+    #[cfg(feature = "neural")]
+    fn retrain_holding_lock(
         campaign_id: &str,
         campaign: &Campaign,
         neural_dir: &str,
@@ -3726,10 +4179,8 @@ impl BanditDB {
         let Some(neural_mutex) = &campaign.neural else {
             return;
         };
-        let mut neural = neural_mutex.lock();
-
-        let arms_snapshot: HashMap<String, ArmState> = {
-            let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+        let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+        let snapshot_arms = || -> HashMap<String, ArmState> {
             target_arms
                 .read()
                 .iter()
@@ -3737,20 +4188,40 @@ impl BanditDB {
                 .collect()
         };
 
-        let new_arm_states = match neural.retrain(&arms_snapshot) {
+        // Phase 1 — under the lock: draw the minibatch.
+        let job = {
+            let neural = neural_mutex.lock();
+            neural.prepare_training(&snapshot_arms())
+        };
+        let job = match job {
+            Ok(Some(job)) => job,
+            Ok(None) => {
+                neural_mutex.lock().defer_retrain();
+                return;
+            }
             Err(e) => {
                 tracing::error!(campaign = %campaign_id, origin, error = %e, "neural retrain failed");
-                None
+                neural_mutex.lock().defer_retrain();
+                return;
             }
-            Ok(_) => Some(neural.reaccumulate(&arms_snapshot)),
         };
 
-        let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
-        if let Err(e) = neural.save(&weights_path) {
-            tracing::warn!(campaign = %campaign_id, error = %e, "neural: failed to save weights");
-        }
+        // Phase 2 — no lock: the gradient steps.
+        let consumed = job.consumed;
+        let losses = match job.run() {
+            Ok(losses) => losses,
+            Err(e) => {
+                tracing::error!(campaign = %campaign_id, origin, error = %e, "neural retrain failed");
+                neural_mutex.lock().defer_retrain();
+                return;
+            }
+        };
+
+        // Phase 3 — under the lock again: rebuild the arms in the new embedding
+        // space from the buffer as it is now, including rewards that arrived
+        // while training ran, and swap them in.
         {
-            let losses = &neural.last_retrain_losses;
+            let mut neural = neural_mutex.lock();
             let initial = losses.first().copied().unwrap_or(0.0);
             let final_l = losses.last().copied().unwrap_or(0.0);
             let improv = if initial > 0.0 {
@@ -3767,15 +4238,32 @@ impl BanditDB {
                 improvement_pct = format!("{improv:.1}"),
                 "neural retrain complete"
             );
-        }
+            neural.finish_training(losses, consumed);
 
-        // Drop neural lock before arms.write() to preserve lock order.
-        drop(neural);
+            let weights_path = format!("{neural_dir}/{campaign_id}.safetensors");
+            if let Err(e) = neural.save(&weights_path) {
+                tracing::warn!(campaign = %campaign_id, error = %e, "neural: failed to save weights");
+            }
 
-        if let Some(new_arm_states) = new_arm_states {
-            let target_arms = campaign.challenger_arms.as_ref().unwrap_or(&campaign.arms);
+            let new_arm_states = neural.reaccumulate(&snapshot_arms());
             let mut arms_write = target_arms.write();
             for (arm_id, new_state) in new_arm_states {
+                // Counters and status are taken from the live arm under the write
+                // lock. Predictions and rewards keep landing on the old arm while
+                // the new one is being built; copying from the earlier snapshot
+                // dropped whatever arrived in between.
+                if let Some(live) = arms_write.get(&arm_id) {
+                    for (to, from) in [
+                        (&new_state.prediction_count, &live.prediction_count),
+                        (&new_state.reward_count, &live.reward_count),
+                        (&new_state.total_reward, &live.total_reward),
+                    ] {
+                        to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
+                    new_state
+                        .status
+                        .store(live.status.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
                 arms_write.insert(arm_id, new_state);
             }
         }
@@ -3783,40 +4271,43 @@ impl BanditDB {
         // Publish the retrained weights to the prediction path. Both callers — the
         // background worker and checkpoint() — depend on this: without it the network
         // would train while predictions kept serving the previous snapshot forever.
-        // Placed after the arms guard above has dropped, per the lock order documented
-        // on refresh_neural_weights.
+        // Called with no arms or neural lock held, per refresh_neural_weights.
         campaign.refresh_neural_weights(campaign_id);
     }
 
     /// Campaign IDs whose replay buffer has accumulated `retrain_every` rewards.
-    /// Deliberately a short read lock: the background worker uses this so it never
-    /// holds the campaign map across a multi-second retrain.
+    /// Deliberately a short read lock: a network whose lock is busy is skipped
+    /// rather than waited for, so this never holds the campaign map for long.
     #[cfg(feature = "neural")]
     pub fn campaigns_due_for_retrain(&self) -> Vec<String> {
         self.campaigns
             .read()
             .iter()
-            .filter(|(_, c)| c.neural.as_ref().is_some_and(|n| n.lock().should_retrain()))
+            .filter(|(_, c)| {
+                c.neural
+                    .as_ref()
+                    .and_then(|n| n.try_lock())
+                    .is_some_and(|n| n.should_retrain())
+            })
             .map(|(id, _)| id.clone())
             .collect()
     }
 
     /// Retrain a single campaign by id. Returns false if it no longer exists or has
-    /// no MLP. Holds the campaign read lock only for the duration of this call.
+    /// no MLP. The campaign map is not locked while the network trains.
     #[cfg(feature = "neural")]
     pub fn retrain_campaign(&self, campaign_id: &str) -> bool {
         let neural_dir = self.neural_dir();
         if fs::create_dir_all(&neural_dir).is_err() {
             return false;
         }
-        let campaigns = self.campaigns.read();
-        let Some(campaign) = campaigns.get(campaign_id) else {
+        let Some(campaign) = self.campaigns.read().get(campaign_id).cloned() else {
             return false;
         };
         if campaign.neural.is_none() {
             return false;
         }
-        Self::retrain_campaign_locked(campaign_id, campaign, &neural_dir, "worker");
+        Self::retrain_campaign_locked(campaign_id, &campaign, &neural_dir, "worker");
         true
     }
 
@@ -3884,6 +4375,11 @@ fn snips_score(
 
     for (context, logged_arm, reward, propensity) in buffer {
         let features = feature_fn(&Array1::from_vec(context.clone()));
+        // An arm in another space than the features cannot be scored; `dot` would
+        // panic. Skip the entry rather than take the checkpoint down with it.
+        if arms.values().any(|a| a.theta.len() != features.len()) {
+            continue;
+        }
 
         let best_arm = arms
             .iter()
@@ -3982,15 +4478,20 @@ fn evaluate_tournament(
     let base_arms = campaign.arms.read();
     let chal_arm_guard = campaign.challenger_arms.as_ref().map(|c| c.read());
 
-    let (base_snips, base_cov) =
-        snips_score(&neural.buffer, &base_arms, |ctx| match cfg.base.as_ref() {
-            Algorithm::NeuralLinUCB(_) => neural.embed(ctx),
-            _ => ctx.clone(),
-        });
+    let (base_snips, base_cov) = snips_score(&neural.buffer, &base_arms, |ctx| {
+        if cfg.base.neural_config().is_some() {
+            neural.embed(ctx)
+        } else {
+            ctx.clone()
+        }
+    });
     let (chal_snips, chal_cov) = match &chal_arm_guard {
-        Some(c) => snips_score(&neural.buffer, c, |ctx| match cfg.challenger.as_ref() {
-            Algorithm::NeuralLinUCB(_) => neural.embed(ctx),
-            _ => ctx.clone(),
+        Some(c) => snips_score(&neural.buffer, c, |ctx| {
+            if cfg.challenger.neural_config().is_some() {
+                neural.embed(ctx)
+            } else {
+                ctx.clone()
+            }
         }),
         None => (0.0, 0),
     };
@@ -4068,7 +4569,7 @@ pub fn write_campaign_parquet(
         return Ok(());
     }
 
-    let timestamp_us = SystemTime::now()
+    let mut timestamp_us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
@@ -4079,6 +4580,11 @@ pub fn write_campaign_parquet(
     // that bypassed HTTP validation cannot write outside its directory.
     let (dir, stem) = export_location(export_dir, campaign_id)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Two shards for one campaign can be written within the same microsecond
+    // (one per context length); never overwrite an existing shard.
+    while dir.join(format!("{stem}_{timestamp_us}.parquet")).exists() {
+        timestamp_us += 1;
+    }
     let path = dir.join(format!("{stem}_{timestamp_us}.parquet"));
     let tmp = dir.join(format!("{stem}_{timestamp_us}.parquet.tmp"));
 
@@ -4106,6 +4612,15 @@ fn interactions_to_df(
     let rewarded_ats: Vec<i64> = interactions.iter().map(|r| r.rewarded_at as i64).collect();
     let propensities: Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
 
+    // Indexing below assumes every row has `feature_dim` features.
+    if let Some(bad) = interactions.iter().find(|r| r.context.len() != feature_dim) {
+        return Err(format!(
+            "interaction '{}' has {} features, expected {feature_dim}",
+            bad.interaction_id,
+            bad.context.len()
+        ));
+    }
+
     let mut series: Vec<Series> = vec![
         Series::new("interaction_id", interaction_ids),
         Series::new("arm_id", arm_ids),
@@ -4122,6 +4637,62 @@ fn interactions_to_df(
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
+}
+
+/// The serialised checkpoint with its `wal_offset` set to 0.
+///
+/// `wal_offset` is `CheckpointData`'s first field, so its value sits in a known
+/// prefix and can be replaced without touching the rest. Falls back to a full
+/// parse if the prefix is not what is expected.
+fn checkpoint_json_with_zero_offset(json: String, wal_offset: u64) -> Result<String, String> {
+    let prefix = format!("{{\"wal_offset\":{wal_offset},");
+    if let Some(rest) = json.strip_prefix(&prefix) {
+        return Ok(format!("{{\"wal_offset\":0,{rest}"));
+    }
+    let mut data: CheckpointData = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    data.wal_offset = 0;
+    serde_json::to_string(&data).map_err(|e| e.to_string())
+}
+
+/// First place in a checkpoint snapshot that holds NaN or infinity, if any.
+fn non_finite_state(campaigns: &HashMap<String, CampaignCheckpoint>) -> Option<String> {
+    let finite = |v: &f64| v.is_finite();
+    for (campaign_id, camp) in campaigns {
+        if !camp.alpha.is_finite() {
+            return Some(format!("campaign '{campaign_id}' alpha"));
+        }
+        let arm_maps = [
+            ("arm", Some(&camp.arms)),
+            ("challenger arm", camp.challenger_arms.as_ref()),
+        ];
+        for (kind, arms) in arm_maps {
+            for (arm_id, arm) in arms.into_iter().flatten() {
+                let total_reward = f64::from_bits(arm.total_reward.load(Ordering::Relaxed));
+                if !arm.a_inv.iter().all(finite)
+                    || !arm.b.iter().all(finite)
+                    || !arm.theta.iter().all(finite)
+                    || !total_reward.is_finite()
+                {
+                    return Some(format!("campaign '{campaign_id}' {kind} '{arm_id}'"));
+                }
+            }
+        }
+        if let Some(pacing) = &camp.pacing {
+            for r in &pacing.resources {
+                let ok = [r.budget, r.step_size, r.lambda_max, r.consumed, r.lambda]
+                    .iter()
+                    .all(finite)
+                    && r.arm_costs.values().all(finite);
+                if !ok {
+                    return Some(format!(
+                        "campaign '{campaign_id}' pacing resource '{}'",
+                        r.name
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Approximate heap footprint of one pending interaction.
@@ -4168,8 +4739,7 @@ fn detect_memory_limit() -> Option<u64> {
 /// control on size possible at all.
 ///
 /// Terms:
-/// * per arm, `A⁻¹` (d×d) plus `b` and `θ` (d each), doubled for Thompson sampling
-///   because the Cholesky factor is cached, and doubled again for Progressive
+/// * per arm, `A⁻¹` (d×d) plus `b` and `θ` (d each), doubled for Progressive
 ///   because base and challenger each keep a full arm map;
 /// * the MLP for neural algorithms, counted three times over for the live VarMap,
 ///   the published snapshot, and gradients;
@@ -4182,26 +4752,12 @@ pub fn campaign_memory_estimate(arms: usize, arm_dim: usize, algorithm: &Algorit
     let d = arm_dim as u64;
     let per_arm = 8 * d * d + 16 * d + 64;
 
-    let (is_ts, neural_cfg, is_progressive) = match algorithm {
-        Algorithm::ThompsonSampling => (true, None, false),
-        Algorithm::NeuralThompsonSampling(cfg) => (true, Some(cfg), false),
-        Algorithm::NeuralLinUCB(cfg) => (false, Some(cfg), false),
-        Algorithm::Progressive(cfg) => {
-            let challenger_neural = match cfg.challenger.as_ref() {
-                Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => Some(c),
-                _ => None,
-            };
-            let ts = matches!(cfg.base.as_ref(), Algorithm::ThompsonSampling)
-                || matches!(cfg.challenger.as_ref(), Algorithm::ThompsonSampling);
-            (ts, challenger_neural, true)
-        }
-        Algorithm::Linucb => (false, None, false),
+    let (neural_cfg, is_progressive) = match algorithm {
+        Algorithm::Progressive(cfg) => (cfg.challenger.neural_config(), true),
+        other => (other.neural_config(), false),
     };
 
     let mut total = arms as u64 * per_arm;
-    if is_ts {
-        total *= 2;
-    }
     if is_progressive {
         total *= 2;
     }
@@ -4410,40 +4966,47 @@ fn classify_entropy_status(
     }
 }
 
-/// Adaptive Monte Carlo sample count for Thompson Sampling propensity estimation.
+/// Thompson Sampling propensities: the fraction of `samples` independent
+/// posterior draws in which each arm has the highest score.
 ///
-/// Uses the maximum A_inv diagonal across all arms as a proxy for posterior spread.
-/// A_inv starts as the identity matrix (diagonal = 1.0) and shrinks as rewards accumulate.
+/// `posteriors[i]` is the (mean, standard deviation) of arm `i`'s sampled score,
+/// so one draw costs one scalar normal per arm — independent of the feature
+/// dimension. The standard error of an estimate `p` is `sqrt(p(1−p)/samples)`:
+/// at most 1.6 percentage points with the default 1,024.
 ///
-/// | max_diag  | Stage               | N  |
-/// |-----------|---------------------|----|
-/// | > 0.7     | Cold start          | 64 |
-/// | 0.3–0.7   | Active learning     | 32 |
-/// | 0.1–0.3   | Converging          | 16 |
-/// | ≤ 0.1     | Concentrated        |  8 |
-///
-/// This gives the ideal cost profile for production: high N when traffic is low (cold start),
-/// low N when traffic is high (converged) — the sample budget scales inversely with load.
-fn ts_propensity_samples(arms: &[(&String, &ArmState)]) -> usize {
-    let max_diag = arms
-        .iter()
-        .map(|(_, s)| {
-            s.a_inv
-                .diag()
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max)
-        })
-        .fold(0.0f64, f64::max);
-    if max_diag > 0.7 {
-        64
-    } else if max_diag > 0.3 {
-        32
-    } else if max_diag > 0.1 {
-        16
-    } else {
-        8
+/// The count used to adapt between 8 and 64. That left arms with a true
+/// probability of a few percent at exactly zero most of the time, and it dropped
+/// to 8 precisely when the posterior had concentrated and the probabilities
+/// were smallest.
+fn ts_propensities(
+    eligible: &[(&String, &ArmState)],
+    posteriors: &[(f64, f64)],
+    samples: usize,
+) -> HashMap<String, f64> {
+    use rand_distr::{Distribution, StandardNormal};
+    let samples = samples.max(1);
+    let mut wins = vec![0u32; posteriors.len()];
+    let mut rng = rand::thread_rng();
+    for _ in 0..samples {
+        let mut best = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+        for (i, (mean, sd)) in posteriors.iter().enumerate() {
+            let z: f64 = StandardNormal.sample(&mut rng);
+            let score = mean + sd * z;
+            if score > best_score {
+                best_score = score;
+                best = i;
+            }
+        }
+        if let Some(w) = wins.get_mut(best) {
+            *w += 1;
+        }
     }
+    eligible
+        .iter()
+        .zip(wins)
+        .map(|((id, _), w)| ((*id).clone(), w as f64 / samples as f64))
+        .collect()
 }
 
 /// Compute softmax-normalised propensities over arm UCB scores.
@@ -4455,6 +5018,25 @@ fn softmax_propensities(scores: &[(String, f64)]) -> HashMap<String, f64> {
         .fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = scores.iter().map(|(_, s)| (s - max_score).exp()).collect();
     let sum: f64 = exps.iter().sum();
+    // Non-finite scores (inf - inf, or a NaN arm) would yield NaN propensities,
+    // which cannot be written to the WAL or the checkpoint. Fall back to a split
+    // among the arms tied at the maximum, or uniform when there is no maximum.
+    if !sum.is_finite() || sum <= 0.0 {
+        let tied = scores.iter().filter(|(_, s)| *s == max_score).count();
+        return scores
+            .iter()
+            .map(|(arm_id, s)| {
+                let p = if tied == 0 {
+                    1.0 / scores.len() as f64
+                } else if *s == max_score {
+                    1.0 / tied as f64
+                } else {
+                    0.0
+                };
+                (arm_id.clone(), p)
+            })
+            .collect();
+    }
     scores
         .iter()
         .zip(exps.iter())

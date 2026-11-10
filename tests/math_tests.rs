@@ -151,3 +151,34 @@ fn test_1_6_infinite_reward_no_nan() {
         "Theta was mutated by a non-finite reward. update() must reject it before touching state."
     );
 }
+
+/// The scalar Thompson draw must have the distribution of projecting a full
+/// posterior sample: mean θ·x and standard deviation v·sqrt(xᵀA⁻¹x).
+#[test]
+fn thompson_score_matches_the_posterior_it_samples() {
+    let mut arm = ArmState::new(3);
+    for (x, r) in [
+        ([1.0, 0.2, -0.5], 1.0),
+        ([0.3, 0.9, 0.1], 0.0),
+        ([-0.4, 0.5, 0.8], 1.0),
+    ] {
+        arm.update(&Array1::from_vec(x.to_vec()), r);
+    }
+    let x = Array1::from_vec(vec![0.6, -0.3, 0.9]);
+    let v = 1.7;
+    let (mean, sd) = arm.posterior(&x);
+    assert!((mean - arm.theta.dot(&x)).abs() < 1e-12);
+    assert!((sd * sd - x.dot(&arm.a_inv.dot(&x))).abs() < 1e-12);
+
+    let n = 200_000;
+    let draws: Vec<f64> = (0..n).map(|_| arm.score_ts(&x, v)).collect();
+    let m = draws.iter().sum::<f64>() / n as f64;
+    let var = draws.iter().map(|d| (d - m).powi(2)).sum::<f64>() / n as f64;
+    assert!((m - mean).abs() < 0.02, "mean {m} vs {mean}");
+    assert!(
+        (var.sqrt() - v * sd).abs() < 0.02,
+        "sd {} vs {}",
+        var.sqrt(),
+        v * sd
+    );
+}

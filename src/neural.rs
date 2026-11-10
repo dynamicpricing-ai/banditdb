@@ -1,7 +1,9 @@
 use crate::state::{ArmState, NeuralLinUCBConfig};
+use candle_core::Var;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Linear, Module, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use ndarray::Array1;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 
@@ -145,7 +147,11 @@ fn embed_with(
 pub struct NeuralLinUCBState {
     varmap: VarMap,
     layers: Vec<Linear>,
-    w0: Vec<Tensor>, // frozen copy of initial weights for Algorithm 2 regularization
+    /// Frozen copy of the initial weights for Algorithm 2 regularisation, keyed by
+    /// variable name. Keyed rather than positional because `VarMap` iterates a
+    /// hash map: its order is not stable across processes, so a positional copy
+    /// could not be saved and restored.
+    w0: HashMap<String, Tensor>,
     device: Device,
     pub context_dim: usize,
     pub embed_dim: usize,
@@ -183,11 +189,7 @@ impl NeuralLinUCBState {
         layers.push(candle_nn::linear(in_dim, cfg.embed_dim, vb.pp("embed"))?);
 
         // Save W₀: independent copies of initial weights (frozen throughout training)
-        let w0 = varmap
-            .all_vars()
-            .iter()
-            .map(|v| copy_tensor(v.as_tensor(), &device))
-            .collect::<candle_core::Result<Vec<_>>>()?;
+        let w0 = snapshot_vars(&varmap, &device)?;
 
         Ok(Self {
             varmap,
@@ -258,106 +260,131 @@ impl NeuralLinUCBState {
     }
 
     /// Algorithm 2: J gradient descent steps minimising
-    ///   L(W) = ½ · mean(θᵀh(x;W) − r)²  +  (m·λ/2)‖W − W₀‖²_F
+    ///   L(W) = ½ · mean(θᵀh(x;W) − r)²  +  (λ/2)‖W − W₀‖²_F
     ///
-    /// All buffer interactions are stacked into batch tensors before the loop so each
-    /// step is a single GPU kernel launch rather than N sequential host→device transfers.
+    /// Convenience wrapper that trains while the caller holds `&mut self`. The
+    /// engine uses the three phases separately so the lock around this state is
+    /// not held for the duration of training — see [`TrainingJob`].
     pub fn retrain(&mut self, arm_states: &HashMap<String, ArmState>) -> candle_core::Result<()> {
-        if self.buffer.is_empty() {
+        let Some(job) = self.prepare_training(arm_states)? else {
             return Ok(());
+        };
+        let consumed = job.consumed;
+        let losses = job.run()?;
+        self.finish_training(losses, consumed);
+        Ok(())
+    }
+
+    /// Phase 1 (under the state lock): draw the minibatch and build its tensors.
+    /// Returns `None` when there is nothing to train on.
+    pub fn prepare_training(
+        &self,
+        arm_states: &HashMap<String, ArmState>,
+    ) -> candle_core::Result<Option<TrainingJob>> {
+        // Entries whose context no longer matches the network cannot be stacked
+        // into a batch. They only arise from a campaign whose shape was wrong to
+        // begin with; skipping them keeps one bad row from failing every retrain.
+        let usable: Vec<&(Vec<f64>, String, f64, f64)> = self
+            .buffer
+            .iter()
+            .filter(|(ctx, _, _, _)| ctx.len() == self.context_dim)
+            .collect();
+        if usable.is_empty() {
+            return Ok(None);
         }
 
         // Draw a minibatch when the buffer is larger than batch_size. A fresh draw
         // per call gives stochasticity across retrains while keeping the "build
         // tensors once, reuse for every gradient step" property below.
-        let buffer: Vec<_> = if self.buffer.len() > self.batch_size {
+        let batch: Vec<&(Vec<f64>, String, f64, f64)> = if usable.len() > self.batch_size {
             use rand::seq::SliceRandom;
             let mut rng = rand::thread_rng();
-            self.buffer
-                .iter()
-                .collect::<Vec<_>>()
+            usable
                 .choose_multiple(&mut rng, self.batch_size)
-                .map(|e| (*e).clone())
+                .copied()
                 .collect()
         } else {
-            self.buffer.iter().cloned().collect()
+            usable
         };
-        let n = buffer.len();
-        let n_params: f64 = self
-            .varmap
-            .all_vars()
-            .iter()
-            .map(|v| v.as_tensor().elem_count())
-            .sum::<usize>() as f64;
+        let n = batch.len();
 
         // Build batch tensors once — one host→device transfer before the training loop.
         //   batch_x:     (n, context_dim)
         //   batch_theta: (n, embed_dim)   — θ of the selected arm per interaction
         //   batch_r:     (n, 1)           — observed rewards
-        let flat_x: Vec<f32> = buffer
+        let flat_x: Vec<f32> = batch
             .iter()
             .flat_map(|(ctx, _, _, _)| ctx.iter().map(|&v| v as f32))
             .collect();
         let batch_x = Tensor::from_slice(&flat_x, (n, self.context_dim), &self.device)?;
 
-        let flat_theta: Vec<f32> = buffer
+        // θ of an arm that is missing, or not yet in embedding space, counts as
+        // zero. Stacking a θ of another length would not fit the (n, embed_dim)
+        // tensor at all.
+        let flat_theta: Vec<f32> = batch
             .iter()
             .flat_map(|(_, arm_id, _, _)| {
                 arm_states
                     .get(arm_id)
+                    .filter(|a| a.theta.len() == self.embed_dim)
                     .map(|a| a.theta.iter().map(|&v| v as f32).collect::<Vec<_>>())
                     .unwrap_or_else(|| vec![0.0f32; self.embed_dim])
             })
             .collect();
         let batch_theta = Tensor::from_slice(&flat_theta, (n, self.embed_dim), &self.device)?;
 
-        let rewards: Vec<f32> = buffer.iter().map(|(_, _, r, _)| *r as f32).collect();
+        let rewards: Vec<f32> = batch.iter().map(|(_, _, r, _)| *r as f32).collect();
         let batch_r = Tensor::from_slice(&rewards, (n, 1), &self.device)?;
 
-        let mut opt = AdamW::new(
-            self.varmap.all_vars(),
-            ParamsAdamW {
-                lr: self.learning_rate,
-                ..Default::default()
-            },
-        )?;
+        // Pair every trainable variable with its frozen initial value by name.
+        let anchors: Vec<(Var, Tensor)> = {
+            let data = self.varmap.data().lock().unwrap();
+            data.iter()
+                .filter_map(|(name, var)| self.w0.get(name).map(|w0| (var.clone(), w0.clone())))
+                .collect()
+        };
 
-        let mut losses: Vec<f32> = Vec::with_capacity(self.retrain_steps);
-
-        for _ in 0..self.retrain_steps {
-            // One forward pass on the whole batch → (n, embed_dim)
-            let batch_h = self.forward_normalized(&batch_x)?;
-
-            // Per-sample predicted reward: row-wise θᵀh → (n, 1)
-            let preds = batch_h.mul(&batch_theta)?.sum_keepdim(1)?;
-
-            // ½ · MSE  +  (m·λ/2)·‖W − W₀‖²
-            let loss = preds
-                .sub(&batch_r)?
-                .sqr()?
-                .mean_all()?
-                .affine(0.5, 0.0)?
-                .add(&self.w0_reg(n_params)?)?;
-
-            losses.push(loss.to_scalar::<f32>()?);
-            opt.backward_step(&loss)?;
-        }
-
-        self.last_retrain_losses = losses;
-        self.reward_count = 0;
-        Ok(())
+        Ok(Some(TrainingJob {
+            layers: self.layers.clone(),
+            vars: self.varmap.all_vars(),
+            anchors,
+            device: self.device.clone(),
+            learning_rate: self.learning_rate,
+            lambda: self.lambda,
+            retrain_steps: self.retrain_steps,
+            batch_x,
+            batch_theta,
+            batch_r,
+            consumed: self.reward_count,
+        }))
     }
 
-    fn w0_reg(&self, _n_params: f64) -> candle_core::Result<Tensor> {
-        let scale = self.lambda / 2.0;
-        let all_vars = self.varmap.all_vars();
-        let mut reg = Tensor::zeros((), DType::F32, &self.device)?;
+    /// Phase 3 (under the state lock again): record the outcome. Rewards that
+    /// arrived while the job ran stay counted toward the next retrain.
+    pub fn finish_training(&mut self, losses: Vec<f32>, consumed: usize) {
+        self.last_retrain_losses = losses;
+        self.reward_count = self.reward_count.saturating_sub(consumed);
+    }
 
-        for (var, w0) in all_vars.iter().zip(self.w0.iter()) {
-            let diff = var.as_tensor().sub(w0)?;
-            reg = reg.add(&diff.sqr()?.sum_all()?)?;
-        }
-        reg.affine(scale, 0.0)
+    /// Give up on the rewards counted so far, so a retrain that cannot succeed is
+    /// attempted again after `retrain_every` more rewards rather than on every
+    /// poll of the background worker.
+    pub fn defer_retrain(&mut self) {
+        self.reward_count = 0;
+    }
+
+    /// Embeddings for many contexts in one forward pass.
+    fn embed_batch(&self, contexts: &[&[f64]]) -> candle_core::Result<Vec<Array1<f64>>> {
+        let n = contexts.len();
+        let flat: Vec<f32> = contexts
+            .iter()
+            .flat_map(|c| c.iter().map(|&v| v as f32))
+            .collect();
+        let x = Tensor::from_slice(&flat, (n, self.context_dim), &self.device)?;
+        let h: Vec<Vec<f32>> = self.forward_normalized(&x)?.to_vec2()?;
+        Ok(h.into_iter()
+            .map(|row| Array1::from_vec(row.into_iter().map(|v| v as f64).collect()))
+            .collect())
     }
 
     /// Re-accumulate per-arm LinUCB statistics in the new embedding space using
@@ -368,9 +395,37 @@ impl NeuralLinUCBState {
             .map(|k| (k.clone(), ArmState::new(self.embed_dim)))
             .collect();
 
-        // Preserve counters from old states (they are stats, not algorithm state),
-        // plus lifecycle metadata: rebuilding the matrices must not quietly
-        // reactivate a paused arm or drop its group.
+        // One forward pass per chunk rather than per entry: at a full 50k buffer
+        // the per-entry version made 50k separate tensor round trips on every
+        // retrain.
+        const CHUNK: usize = 2_048;
+        let entries: Vec<&(Vec<f64>, String, f64, f64)> = self
+            .buffer
+            .iter()
+            .filter(|(ctx, arm_id, _, _)| {
+                ctx.len() == self.context_dim && new_arms.contains_key(arm_id)
+            })
+            .collect();
+        for chunk in entries.chunks(CHUNK) {
+            let contexts: Vec<&[f64]> = chunk.iter().map(|(ctx, _, _, _)| ctx.as_slice()).collect();
+            let embeddings = self.embed_batch(&contexts).unwrap_or_else(|_| {
+                contexts
+                    .iter()
+                    .map(|c| self.embed(&Array1::from_vec(c.to_vec())))
+                    .collect()
+            });
+            for ((_, arm_id, reward, _), h) in chunk.iter().zip(embeddings.iter()) {
+                if let Some(state) = new_arms.get_mut(arm_id) {
+                    state.update(h, *reward);
+                }
+            }
+        }
+
+        // Carry over counters (they are stats, not algorithm state) and lifecycle
+        // metadata: rebuilding the matrices must not quietly reactivate a paused
+        // arm or drop its group. Done after the replay above, because `update`
+        // bumps reward_count and total_reward itself — restoring them first
+        // counted every buffered reward again on each retrain.
         for (arm_id, new_state) in new_arms.iter_mut() {
             if let Some(old) = old_arms.get(arm_id) {
                 new_state.prediction_count.store(
@@ -390,23 +445,166 @@ impl NeuralLinUCBState {
             }
         }
 
-        for (ctx, arm_id, reward, _) in &self.buffer {
-            if let Some(state) = new_arms.get_mut(arm_id) {
-                let h = self.embed(&Array1::from_vec(ctx.clone()));
-                state.update(&h, *reward);
-            }
-        }
-
         new_arms
     }
 
+    /// Save the live weights, and the frozen initial weights beside them.
     pub fn save(&self, path: &str) -> candle_core::Result<()> {
-        self.varmap.save(path)
+        self.varmap.save(path)?;
+        candle_core::safetensors::save(&self.w0, w0_path(path))
     }
 
+    /// Load weights saved by [`save`](Self::save).
+    ///
+    /// The regularisation anchor W₀ is restored with them. Without that, every
+    /// restart re-anchored training to a fresh random initialisation. Weights
+    /// saved before W₀ was persisted are anchored to themselves instead — the
+    /// closest thing to their original starting point that still exists.
     pub fn load(&mut self, path: &str) -> candle_core::Result<()> {
-        self.varmap.load(path)
+        self.varmap.load(path)?;
+        let anchor = w0_path(path);
+        let restored = if std::path::Path::new(&anchor).exists() {
+            candle_core::safetensors::load(&anchor, &self.device).ok()
+        } else {
+            None
+        };
+        let current = snapshot_vars(&self.varmap, &self.device)?;
+        self.w0 = match restored {
+            // Usable only if it describes this network.
+            Some(w0)
+                if current
+                    .iter()
+                    .all(|(name, t)| w0.get(name).is_some_and(|w| w.shape() == t.shape())) =>
+            {
+                w0
+            }
+            _ => current,
+        };
+        Ok(())
     }
+
+    /// Copy of the replay buffer for persistence. See [`BufferSnapshot`].
+    pub fn buffer_snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            reward_count: self.reward_count,
+            entries: self.buffer.iter().cloned().collect(),
+        }
+    }
+
+    /// Replace the replay buffer with a persisted one.
+    pub fn restore_buffer(&mut self, snapshot: BufferSnapshot) {
+        let skip = snapshot.entries.len().saturating_sub(self.buffer_cap);
+        self.buffer = snapshot.entries.into_iter().skip(skip).collect();
+        self.reward_count = snapshot.reward_count;
+    }
+}
+
+/// The replay buffer as it is written next to a checkpoint.
+///
+/// Arm matrices of a neural campaign are rebuilt from this buffer on every
+/// retrain. A buffer that started empty after a restart therefore made the first
+/// retrain discard everything the arms had learned before it.
+#[derive(Serialize, Deserialize)]
+pub struct BufferSnapshot {
+    /// Rewards since the last retrain.
+    pub reward_count: usize,
+    /// context, arm_id, reward, propensity — oldest first.
+    pub entries: Vec<(Vec<f64>, String, f64, f64)>,
+}
+
+impl BufferSnapshot {
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let bytes = rmp_serde::to_vec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = format!("{path}.tmp");
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(tmp, path)
+    }
+
+    pub fn load(path: &str) -> std::io::Result<Self> {
+        rmp_serde::from_slice(&std::fs::read(path)?)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// One retrain, detached from [`NeuralLinUCBState`] so it can run without the
+/// lock around that state.
+///
+/// Training takes seconds. Held under the state lock, it blocked every reward for
+/// the campaign — the reward path appends to the replay buffer — and each blocked
+/// reward was parked on an async worker thread while also holding the engine's
+/// write gate. The job shares the network's variables (they are reference
+/// counted and internally synchronised), so stepping the optimiser here updates
+/// the live network in place.
+pub struct TrainingJob {
+    layers: Vec<Linear>,
+    vars: Vec<Var>,
+    anchors: Vec<(Var, Tensor)>,
+    device: Device,
+    learning_rate: f64,
+    lambda: f64,
+    retrain_steps: usize,
+    batch_x: Tensor,
+    batch_theta: Tensor,
+    batch_r: Tensor,
+    /// `reward_count` when the job was prepared; passed to `finish_training`.
+    pub consumed: usize,
+}
+
+impl TrainingJob {
+    /// Phase 2: the gradient steps. Returns the loss at each step.
+    pub fn run(self) -> candle_core::Result<Vec<f32>> {
+        let mut opt = AdamW::new(
+            self.vars.clone(),
+            ParamsAdamW {
+                lr: self.learning_rate,
+                ..Default::default()
+            },
+        )?;
+        let mut losses: Vec<f32> = Vec::with_capacity(self.retrain_steps);
+        for _ in 0..self.retrain_steps {
+            // One forward pass on the whole batch → (n, embed_dim)
+            let batch_h = forward_normalized_layers(&self.layers, &self.batch_x)?;
+            // Per-sample predicted reward: row-wise θᵀh → (n, 1)
+            let preds = batch_h.mul(&self.batch_theta)?.sum_keepdim(1)?;
+            // ½ · MSE  +  (λ/2)·‖W − W₀‖²
+            let loss = preds
+                .sub(&self.batch_r)?
+                .sqr()?
+                .mean_all()?
+                .affine(0.5, 0.0)?
+                .add(&self.w0_reg()?)?;
+            losses.push(loss.to_scalar::<f32>()?);
+            opt.backward_step(&loss)?;
+        }
+        Ok(losses)
+    }
+
+    fn w0_reg(&self) -> candle_core::Result<Tensor> {
+        let mut reg = Tensor::zeros((), DType::F32, &self.device)?;
+        for (var, w0) in &self.anchors {
+            let diff = var.as_tensor().sub(w0)?;
+            reg = reg.add(&diff.sqr()?.sum_all()?)?;
+        }
+        reg.affine(self.lambda / 2.0, 0.0)
+    }
+}
+
+fn w0_path(weights_path: &str) -> String {
+    format!("{weights_path}.w0")
+}
+
+/// Independent copies of every variable in `varmap`, keyed by name.
+fn snapshot_vars(varmap: &VarMap, device: &Device) -> candle_core::Result<HashMap<String, Tensor>> {
+    let data = varmap.data().lock().unwrap();
+    data.iter()
+        .map(|(name, var)| Ok((name.clone(), copy_tensor(var.as_tensor(), device)?)))
+        .collect()
 }
 
 /// Creates an independent tensor copy with the same shape and data.

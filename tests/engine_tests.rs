@@ -843,8 +843,8 @@ async fn test_campaign_metadata_wal_only_recovery() {
 //   2. A valid probability distribution (sum = 1, all values in [0, 1])
 //   3. Concentrated toward the winning arm after training
 //
-// The adaptive sample count (N = 8–64 driven by A_inv diagonal) is an internal
-// detail exercised indirectly through the distribution properties above.
+// The sample count (1,024 by default) is an internal detail exercised
+// indirectly through the distribution properties above.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// TS Propensity 1 — every TS prediction must produce Some arm_propensities.
@@ -1132,4 +1132,92 @@ async fn test_neural_thompson_sampling_basic() {
     );
 
     let _ = std::fs::remove_dir_all(data_dir);
+}
+
+/// Standard normal CDF (Abramowitz–Stegun 7.1.26, |error| < 1.5e-7).
+fn normal_cdf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs() / std::f64::consts::SQRT_2);
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let erf = 1.0 - poly * (-(x * x) / 2.0).exp();
+    if x >= 0.0 {
+        0.5 * (1.0 + erf)
+    } else {
+        0.5 * (1.0 - erf)
+    }
+}
+
+/// TS Propensity — the logged value must estimate the true selection probability.
+///
+/// With two arms that probability has a closed form: P(a) = Φ((μa − μb) / (α·√(σa² + σb²))).
+/// Checked for a contested pair and for a pair where one arm is rarely chosen.
+/// The old estimator (8–64 draws, with the decision counted as one of them)
+/// reported such a rare arm as 0 on most predictions and as at least 1/N on the
+/// predictions that chose it.
+#[tokio::test]
+async fn test_ts_propensity_matches_the_exact_selection_probability() {
+    for (label, rewards_for_b, lo, hi) in
+        [("contested", 1usize, 0.15, 0.85), ("rare", 4, 0.03, 0.15)]
+    {
+        let wal = format!("/tmp/banditdb_test_ts_prop_exact_{label}.jsonl");
+        let _ = std::fs::remove_file(&wal);
+        let _ = std::fs::remove_dir_all(data_dir_for(&wal));
+        let db = BanditDB::new(&wal, &data_dir_for(&wal));
+        db.add_campaign(
+            "c",
+            vec!["a".to_string(), "b".to_string()],
+            2,
+            1.0,
+            Algorithm::ThompsonSampling,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let x = vec![1.0, 0.5];
+        for _ in 0..rewards_for_b {
+            db.interact("c", "a", x.clone(), 0.0).await.unwrap();
+            db.interact("c", "b", x.clone(), 1.0).await.unwrap();
+        }
+
+        let exact_a = {
+            let campaigns = db.campaigns.read();
+            let arms = campaigns["c"].arms.read();
+            let ctx = ndarray::Array1::from_vec(x.clone());
+            let (ma, sa) = arms["a"].posterior(&ctx);
+            let (mb, sb) = arms["b"].posterior(&ctx);
+            normal_cdf((ma - mb) / (sa * sa + sb * sb).sqrt())
+        };
+        assert!(
+            (lo..hi).contains(&exact_a),
+            "{label}: test setup drifted, exact P(a) = {exact_a}"
+        );
+
+        let n = 200;
+        let mut sum = 0.0;
+        for _ in 0..n {
+            let (_, iid) = db.predict("c", x.clone()).unwrap();
+            let p = db
+                .interactions
+                .get(iid.as_str())
+                .unwrap()
+                .arm_propensities
+                .unwrap();
+            assert!((p["a"] + p["b"] - 1.0).abs() < 1e-9);
+            // A single estimate: within 5 standard errors at 1,024 draws.
+            assert!(
+                (p["a"] - exact_a).abs() < 0.08,
+                "{label}: {} vs {exact_a}",
+                p["a"]
+            );
+            sum += p["a"];
+        }
+        // The average over many predictions exposes bias a single estimate hides.
+        let mean = sum / n as f64;
+        assert!(
+            (mean - exact_a).abs() < 0.006,
+            "{label}: mean propensity {mean} vs exact {exact_a}"
+        );
+    }
 }

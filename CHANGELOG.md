@@ -1,5 +1,73 @@
 # Changelog
 
+## v2.3.3 — Corner-case hardening
+
+- **Decay is now D-LinUCB forgetting** (`A' = γA + (1−γ)I`, `b' = γb`). Each
+  direction widens toward the cold prior and stops there. Previously `A⁻¹` was
+  scaled by `1/γ` without limit, so an arm receiving no rewards passed the prior
+  after one checkpoint and overflowed to infinity after enough of them. θ now
+  shrinks slightly toward zero as data is forgotten instead of staying fixed.
+  `decay_half_life_hours` is unchanged. Cost is O(d³) per arm per checkpoint.
+- A checkpoint that fails after applying decay no longer re-applies the same
+  interval on retry.
+- `alpha` must be in `[0, 1e6]` at campaign creation. Larger values made scores
+  infinite and propensities NaN.
+- Checkpoints refuse to write NaN or infinity (which serialise as `null` and
+  cannot be read back); the error names the campaign and arm, and the previous
+  checkpoint and WAL are left intact. Rank-one updates that would produce a
+  non-finite arm are skipped.
+- Parquet export writes one shard per context length, so a campaign id recreated
+  with a different `feature_dim` no longer panics the export. An export failure
+  no longer fails the checkpoint.
+- WAL replay no longer stops at a line that is not valid UTF-8; the damaged line
+  is skipped like any other unparseable record. A WAL ending in a partial record
+  is repaired at startup before new records are appended: JSON gets its missing
+  newline, a binary WAL is cut back to its last complete frame (removed bytes are
+  kept in `<wal>.damaged-tail`).
+- Parquet export includes rewards that arrive after the checkpoint that rotated
+  their prediction out of the WAL. Such rewards now carry the prediction in their
+  WAL record, so they are larger than before.
+- Archived campaigns are frozen for rewards too: `POST /reward` and
+  `/campaign/:id/interact` return 404 while the campaign is archived. The pending
+  interaction is kept and can be rewarded after a restore.
+- Progressive campaigns with a `neural_thompson_sampling` challenger now size the
+  challenger's arms for the embedding space. They were sized for the raw context,
+  so challenger predictions, retrains and checkpoints panicked. Existing campaigns
+  return an error on challenger draws until their next retrain rebuilds the arms.
+- Progressive rejects a neural `base` and nested Progressive at creation.
+- The neural replay buffer is written with each checkpoint
+  (`neural/<campaign>.buffer.<generation>`) and restored at startup. Arms are
+  rebuilt from this buffer at every retrain, so an empty buffer after a restart
+  made the first retrain discard what they had learned. The regularisation
+  anchor W₀ is saved beside the weights (`<campaign>.safetensors.w0`) instead of
+  being re-randomised on restart.
+- Retrains no longer add the whole replay buffer to each arm's `reward_count`
+  and `total_reward` again. Counts already inflated by earlier versions stay as
+  they are. Predictions and rewards that arrive while arms are being rebuilt
+  are no longer dropped from the counters.
+- Training no longer holds the neural lock or the campaign map: rewards and
+  diagnostics for a campaign are not blocked while its network trains, and a
+  campaign create or delete no longer stalls every request behind a retrain.
+  Re-accumulation embeds the buffer in batches instead of one entry at a time.
+- Creating a Progressive campaign without a neural challenger logs a warning:
+  its tournament always ties (both sides learn identical models), so traffic
+  stays at 90/10. Documented in the README and the OpenAPI spec.
+- Thompson Sampling propensities are estimated from 1,024 independent posterior
+  draws per prediction (`BANDITDB_TS_PROPENSITY_SAMPLES`), up from an adaptive
+  8–64 that counted the decision itself as a draw. The old estimate reported
+  arms with a few percent probability as 0 and inflated the propensity of rarely
+  chosen arms. Each draw is now one scalar normal per arm instead of a
+  d-dimensional sample, so the larger count costs no more than before and less
+  from d≈64 up; the per-arm Cholesky factor and its O(d³) recompute after every
+  reward are gone, and the memory estimate for Thompson campaigns halves.
+- The WAL size trigger is on by default: a checkpoint is taken when the WAL
+  exceeds 128 MB (`BANDITDB_MAX_WAL_SIZE_MB`, `0` disables). With neither
+  trigger set the WAL previously grew without bound.
+- Recovery, the Parquet export and WAL rotation stream the WAL instead of
+  loading it into memory.
+- Checkpoint serialisation and its fsyncs run on a blocking thread instead of an
+  async worker, and the checkpoint is serialised once instead of twice.
+
 ## v2.3.2 — Decision input references
 
 **`input_ref` on every decision.** `/predict`, `/batch_predict` and

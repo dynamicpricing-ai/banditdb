@@ -88,6 +88,13 @@ impl Default for NeuralLinUCBConfig {
 /// traffic step (`step_bps`) shifts toward the challenger — and vice-versa for
 /// the base. Traffic ramps gradually; it never jumps more than `step_bps` per
 /// checkpoint, and it never drops below 10% (exploration) or above 90%.
+///
+/// The tournament can only separate the two when the challenger is neural. SNIPS
+/// compares the greedy policy each side's θ implies, and a linear base and a
+/// linear challenger are updated with the same features and rewards, so their
+/// θ are identical and every round ties: such a campaign is a fixed 90/10 split
+/// between two exploration strategies. The base must not be neural — the
+/// campaign's one network belongs to the challenger.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProgressiveConfig {
     pub base: Box<Algorithm>,
@@ -129,6 +136,20 @@ pub enum Algorithm {
     #[serde(rename = "neural_thompson_sampling")]
     NeuralThompsonSampling(NeuralLinUCBConfig),
     Progressive(ProgressiveConfig),
+}
+
+impl Algorithm {
+    /// The MLP configuration, for the algorithms that score in embedding space.
+    ///
+    /// Every place that asks "is this neural?" goes through here. Matching on
+    /// `NeuralLinUCB` alone left `NeuralThompsonSampling` with arms sized for the
+    /// raw context while predictions scored them against embeddings.
+    pub fn neural_config(&self) -> Option<&NeuralLinUCBConfig> {
+        match self {
+            Algorithm::NeuralLinUCB(cfg) | Algorithm::NeuralThompsonSampling(cfg) => Some(cfg),
+            _ => None,
+        }
+    }
 }
 
 /// Outcome of a single tournament SNIPS evaluation round, returned by the extracted
@@ -245,10 +266,6 @@ pub struct ArmState {
     /// Optional hierarchy label. Arms in a group lend their θ to new arms in the
     /// same group via `WarmStart::Group`.
     pub group: Option<String>,
-    /// Cached Cholesky factor L (A_inv = L·Lᵀ) for Thompson Sampling.
-    /// Computed lazily on the first `score_ts` call after each `update`, then
-    /// reused until the next update invalidates it. LinUCB never touches this.
-    pub chol_cache: parking_lot::Mutex<Option<Array2<f64>>>,
     pub prediction_count: AtomicU64,
     pub reward_count: AtomicU64,
     pub total_reward: AtomicU64,
@@ -262,7 +279,6 @@ impl Clone for ArmState {
             theta: self.theta.clone(),
             status: AtomicU8::new(self.status.load(Ordering::Relaxed)),
             group: self.group.clone(),
-            chol_cache: parking_lot::Mutex::new(None), // don't copy stale cache
             prediction_count: AtomicU64::new(self.prediction_count.load(Ordering::Relaxed)),
             reward_count: AtomicU64::new(self.reward_count.load(Ordering::Relaxed)),
             total_reward: AtomicU64::new(self.total_reward.load(Ordering::Relaxed)),
@@ -334,7 +350,6 @@ impl<'de> Deserialize<'de> for ArmState {
             theta,
             status: AtomicU8::new(shadow.status.as_u8()),
             group: shadow.group,
-            chol_cache: parking_lot::Mutex::new(None), // recomputed lazily on first score_ts
             prediction_count: AtomicU64::new(shadow.prediction_count),
             reward_count: AtomicU64::new(shadow.reward_count),
             total_reward: AtomicU64::new(shadow.total_reward.to_bits()),
@@ -350,7 +365,6 @@ impl ArmState {
             theta: Array1::zeros(dim),
             status: AtomicU8::new(ArmStatus::Active.as_u8()),
             group: None,
-            chol_cache: parking_lot::Mutex::new(None),
             prediction_count: AtomicU64::new(0),
             reward_count: AtomicU64::new(0),
             total_reward: AtomicU64::new(0.0f64.to_bits()),
@@ -556,10 +570,20 @@ pub struct InteractionRecord {
     /// record restored from a checkpoint is recoverable from that checkpoint.
     #[serde(skip, default = "logged_default")]
     pub logged: bool,
+    /// Checkpoint-barrier count when this prediction's WAL record was written; see
+    /// `BanditDB::wal_epoch`. Not persisted: a record restored from a checkpoint or
+    /// carried inside a reward is by definition not in the current WAL, which is
+    /// what the default says.
+    #[serde(skip, default = "wal_epoch_default")]
+    pub wal_epoch: u64,
 }
 
 fn logged_default() -> bool {
     true
+}
+
+fn wal_epoch_default() -> u64 {
+    u64::MAX
 }
 
 /// One completed prediction→reward pair, ready to write as a flat Parquet row.
@@ -573,7 +597,8 @@ pub struct CompletedInteraction {
     pub rewarded_at: u64,
     /// Propensity of the chosen arm under the logging policy.
     /// LinUCB: softmax-normalised UCB score.
-    /// Thompson Sampling: adaptive Monte Carlo frequency (N=8–64, driven by A_inv diagonal).
+    /// Thompson Sampling: Monte Carlo win frequency over independent posterior draws
+    /// (1,024 by default; `BANDITDB_TS_PROPENSITY_SAMPLES`).
     pub propensity: Option<f64>,
 }
 
@@ -1265,7 +1290,7 @@ pub enum DbEvent {
         timestamp_secs: u64,
         /// Per-arm propensity under the logging policy.
         /// LinUCB/NeuralLinUCB: softmax-normalised UCB scores.
-        /// Thompson Sampling: adaptive Monte Carlo frequency estimate (N=8–64).
+        /// Thompson Sampling: Monte Carlo win frequency (1,024 draws by default).
         /// Absent in WAL records written before propensity logging — deserialises to None.
         #[serde(default = "default_none_map")]
         arm_propensities: Option<HashMap<String, f64>>,

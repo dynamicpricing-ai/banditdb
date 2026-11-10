@@ -101,6 +101,8 @@ db.create_campaign(
 
 Runs two algorithms side-by-side in shadow mode. Every reward updates both models. At each checkpoint, both are evaluated with SNIPS: if the challenger wins `required_wins` consecutive rounds by > 10%, one `step_bps` of traffic (default 10%) shifts to the challenger — and vice-versa. Traffic is bounded: 10% floor to 90% ceiling.
 
+The tournament only moves traffic when the challenger is neural, and the base must be `linucb` or `thompson_sampling`. Two linear algorithms learn identical models from the same rewards, so SNIPS always ties and the split stays at 90/10.
+
 ```python
 from banditdb import Client, NeuralLinUCBConfig, ProgressiveConfig
 
@@ -172,7 +174,7 @@ services:
       - BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
       - BANDITDB_REWARD_TTL_SECS=86400
       # - BANDITDB_CHECKPOINT_INTERVAL=10000   # auto-checkpoint after N rewarded events
-      # - BANDITDB_MAX_WAL_SIZE_MB=50          # auto-checkpoint when WAL exceeds N MB
+      # - BANDITDB_MAX_WAL_SIZE_MB=128         # auto-checkpoint when WAL exceeds N MB (default 128, 0 disables)
       # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
       # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
       - BANDITDB_REQUIRE_AUTH=true             # refuse to start without API keys

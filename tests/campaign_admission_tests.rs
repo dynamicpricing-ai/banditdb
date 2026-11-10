@@ -311,11 +311,11 @@ fn test_memory_estimate_matches_hand_computation() {
         expected
     );
 
-    // Thompson sampling doubles it: the Cholesky factor is cached per arm.
+    // Thompson sampling keeps nothing extra per arm: it samples each arm's
+    // score directly, with no cached Cholesky factor.
     assert_eq!(
         campaign_memory_estimate(10, 64, &Algorithm::ThompsonSampling),
-        2 * expected,
-        "TS must account for the cached Cholesky factor"
+        expected
     );
 }
 
