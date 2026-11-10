@@ -556,10 +556,20 @@ pub struct InteractionRecord {
     /// record restored from a checkpoint is recoverable from that checkpoint.
     #[serde(skip, default = "logged_default")]
     pub logged: bool,
+    /// Checkpoint-barrier count when this prediction's WAL record was written; see
+    /// `BanditDB::wal_epoch`. Not persisted: a record restored from a checkpoint or
+    /// carried inside a reward is by definition not in the current WAL, which is
+    /// what the default says.
+    #[serde(skip, default = "wal_epoch_default")]
+    pub wal_epoch: u64,
 }
 
 fn logged_default() -> bool {
     true
+}
+
+fn wal_epoch_default() -> u64 {
+    u64::MAX
 }
 
 /// One completed prediction→reward pair, ready to write as a flat Parquet row.

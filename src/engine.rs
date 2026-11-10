@@ -125,8 +125,29 @@ fn read_wal_slice(
     end_offset: u64,
     format: WalFormat,
 ) -> Vec<DbEvent> {
+    read_wal_slice_checked(path, start_offset, end_offset, format).0
+}
+
+/// `read_wal_slice`, also returning the byte offset up to which the slice is
+/// well framed. For JSON that is always the end of the slice: records are
+/// newline-delimited, so a damaged line is skipped and reading resumes at the
+/// next one. A binary WAL has no such resync point — a damaged length prefix
+/// makes everything after it unreadable — so there the offset is where the last
+/// complete record ends.
+fn read_wal_slice_checked(
+    path: &str,
+    start_offset: u64,
+    end_offset: u64,
+    format: WalFormat,
+) -> (Vec<DbEvent>, u64) {
     let Ok(mut file) = File::open(path) else {
-        return vec![];
+        return (vec![], start_offset);
+    };
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let slice_end = if end_offset > 0 {
+        end_offset.min(file_len)
+    } else {
+        file_len
     };
 
     // For binary files the first 4 bytes are the magic header.
@@ -137,10 +158,11 @@ fn read_wal_slice(
     };
 
     if file.seek(SeekFrom::Start(data_start)).is_err() {
-        return vec![];
+        return (vec![], data_start);
     }
 
     let mut events = Vec::new();
+    let mut good_end = slice_end.max(data_start);
 
     match format {
         WalFormat::Json => {
@@ -149,32 +171,61 @@ fn read_wal_slice(
             } else {
                 Box::new(file)
             };
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                match serde_json::from_str::<DbEvent>(&line) {
+            // Read raw bytes per line. `BufRead::lines()` fails on a line that is
+            // not valid UTF-8, and stopping there silently dropped every record
+            // after one damaged line — which the next checkpoint then rotated away.
+            let mut reader = BufReader::new(reader);
+            let mut line: Vec<u8> = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(error = %err, path,
+                            "wal replay: read error — records after this point were not replayed");
+                        break;
+                    }
+                }
+                let record = line.trim_ascii();
+                if record.is_empty() {
+                    continue;
+                }
+                match serde_json::from_slice::<DbEvent>(record) {
                     Ok(DbEvent::Unknown) => {
                         tracing::warn!("wal replay: unknown event variant encountered; skipping");
                     }
                     Ok(e) => events.push(e),
                     Err(err) => {
-                        tracing::warn!(line = %line, error = %err, "wal replay: skipping unparseable record");
+                        tracing::warn!(line = %String::from_utf8_lossy(record), error = %err,
+                            "wal replay: skipping unparseable record");
                     }
                 }
             }
         }
         WalFormat::Msgpack => {
-            let limit = if end_offset > 0 {
-                end_offset.saturating_sub(data_start)
-            } else {
-                u64::MAX
-            };
-            let mut reader = file.take(limit);
+            let mut reader = file.take(slice_end.saturating_sub(data_start));
             let mut len_buf = [0u8; 4];
-            while reader.read_exact(&mut len_buf).is_ok() {
-                let len = u32::from_le_bytes(len_buf) as usize;
-                let mut bytes = vec![0u8; len];
+            let mut pos = data_start;
+            good_end = pos;
+            while pos < slice_end {
+                // A frame that does not fit in what is left is a torn final write or
+                // a damaged length prefix. Checked before allocating: a corrupt
+                // prefix can claim up to 4 GB.
+                let remaining = slice_end - pos;
+                if remaining < 4 || reader.read_exact(&mut len_buf).is_err() {
+                    break;
+                }
+                let len = u32::from_le_bytes(len_buf) as u64;
+                if len > remaining - 4 {
+                    break;
+                }
+                let mut bytes = vec![0u8; len as usize];
                 if reader.read_exact(&mut bytes).is_err() {
                     break;
                 }
+                pos += 4 + len;
+                good_end = pos;
                 match rmp_serde::from_slice::<DbEvent>(&bytes) {
                     Ok(DbEvent::Unknown) => {
                         tracing::warn!(
@@ -187,9 +238,75 @@ fn read_wal_slice(
                     }
                 }
             }
+            if good_end < slice_end {
+                tracing::error!(
+                    path,
+                    offset = good_end,
+                    unreadable_bytes = slice_end - good_end,
+                    "wal replay: binary WAL is not well framed past this offset — \
+                     the remaining bytes cannot be replayed"
+                );
+            }
         }
     }
-    events
+    (events, good_end)
+}
+
+/// Make a WAL that ends in a torn or damaged record safe to append to.
+///
+/// The writer appends. After a crash mid-write the file can end in a partial
+/// record, and the first record written after restart would be glued onto it:
+/// one unparseable JSON line, or a binary frame whose stale length prefix
+/// swallows the records that follow. Either way an acknowledged write would be
+/// lost at the next replay.
+///
+/// JSON only needs the missing newline. A binary WAL is cut back to
+/// `good_end`, the end of its last complete frame; the removed bytes are kept in
+/// `<wal>.damaged-tail` for inspection.
+fn repair_wal_tail(path: &str, format: WalFormat, good_end: u64) {
+    let Ok(file_len) = fs::metadata(path).map(|m| m.len()) else {
+        return;
+    };
+    let result = (|| -> std::io::Result<()> {
+        match format {
+            WalFormat::Json => {
+                if file_len == 0 {
+                    return Ok(());
+                }
+                let mut f = OpenOptions::new().read(true).append(true).open(path)?;
+                f.seek(SeekFrom::End(-1))?;
+                let mut last = [0u8; 1];
+                f.read_exact(&mut last)?;
+                if last[0] != b'\n' {
+                    tracing::warn!(
+                        path,
+                        "recovery: WAL ends in a partial record — terminating it"
+                    );
+                    f.write_all(b"\n")?;
+                    f.sync_all()?;
+                }
+            }
+            WalFormat::Msgpack => {
+                if good_end >= file_len || good_end < WAL_MAGIC.len() as u64 {
+                    return Ok(());
+                }
+                let mut f = OpenOptions::new().read(true).write(true).open(path)?;
+                f.seek(SeekFrom::Start(good_end))?;
+                let mut tail = Vec::new();
+                f.read_to_end(&mut tail)?;
+                let keep = format!("{path}.damaged-tail");
+                fs::write(&keep, &tail)?;
+                f.set_len(good_end)?;
+                f.sync_all()?;
+                tracing::error!(path, offset = good_end, bytes = tail.len(), kept = %keep,
+                    "recovery: removed an unreadable tail from the binary WAL");
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        tracing::error!(path, error = %e, "recovery: could not repair the WAL tail");
+    }
 }
 
 /// Where rotation by checkpoint `generation` keeps the WAL segment it discarded.
@@ -902,6 +1019,11 @@ pub struct BanditDB {
     /// Held from a growth check to the write that commits it, so concurrent
     /// creations and arm additions cannot all pass a check that only one fits.
     admission: parking_lot::Mutex<()>,
+    /// Counts checkpoint barriers. A pending interaction stamped with an older
+    /// value had its `Predicted` record written before a barrier, so rotation has
+    /// discarded it (or is about to) and its reward must carry the prediction.
+    /// Bumped and read only under `write_gate`.
+    wal_epoch: AtomicU64,
 }
 
 impl BanditDB {
@@ -1462,6 +1584,7 @@ impl BanditDB {
             current_checkpoint_unreadable: AtomicBool::new(false),
             checkpoint_lock: tokio::sync::Mutex::new(()),
             admission: parking_lot::Mutex::new(()),
+            wal_epoch: AtomicU64::new(0),
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
@@ -1729,7 +1852,11 @@ impl BanditDB {
                 tracing::warn!(segment = %seg, "recovery: replaying the retained WAL segment");
                 events = read_wal_slice(seg, 0, 0, detect_wal_format(seg));
             }
-            events.extend(read_wal_slice(wal_path, start, 0, fmt));
+            let (tail_events, good_end) = read_wal_slice_checked(wal_path, start, 0, fmt);
+            events.extend(tail_events);
+            // Before the writer appends anything: it opens the file only once the
+            // runtime first polls its task, which is after this returns.
+            repair_wal_tail(wal_path, fmt, good_end);
             let count = events.len();
             for event in events {
                 self.apply_event_to_memory(&event);
@@ -1850,6 +1977,7 @@ impl BanditDB {
         let (campaigns_snapshot, pending_interactions) = {
             let _gate = self.write_gate.write();
             permit.send(WalMessage::Checkpoint { reply: reply_tx });
+            self.wal_epoch.fetch_add(1, Ordering::SeqCst);
             let campaigns_snapshot: HashMap<String, CampaignCheckpoint> = {
                 let campaigns = self.campaigns.read();
                 campaigns
@@ -2186,6 +2314,7 @@ impl BanditDB {
                         timestamp_secs: *timestamp_secs,
                         input_ref: input_ref.clone(),
                         logged: true,
+                        wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
                     },
                 );
                 // Restore the prediction counter on replay so it survives restart
@@ -2447,6 +2576,12 @@ impl BanditDB {
 
     fn campaign_not_found(id: &str) -> EngineError {
         EngineError::NotFound(format!("Campaign '{id}' not found"))
+    }
+
+    fn campaign_archived(id: &str) -> EngineError {
+        EngineError::Archived(format!(
+            "Campaign '{id}' is archived — restore it before recording rewards"
+        ))
     }
 
     /// Namespaced campaign an interaction belongs to, if it is still pending.
@@ -3271,6 +3406,9 @@ impl BanditDB {
                 timestamp_secs: now,
                 input_ref,
                 logged,
+                // Read under the gate taken at the top, so it names the side of
+                // the barrier the Predicted record above landed on.
+                wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
             },
         );
 
@@ -3306,11 +3444,16 @@ impl BanditDB {
         Self::validate_reward(reward)?;
         // Checked before anything is logged: a record that cannot be applied would
         // otherwise reach the WAL, and recovery would replay it.
-        self.campaigns
-            .read()
-            .get(campaign_id)
-            .ok_or_else(|| Self::campaign_not_found(campaign_id))?
-            .check_interaction(arm_id, context.len())?;
+        {
+            let campaigns = self.campaigns.read();
+            let campaign = campaigns
+                .get(campaign_id)
+                .ok_or_else(|| Self::campaign_not_found(campaign_id))?;
+            if campaign.archived.load(Ordering::Relaxed) {
+                return Err(Self::campaign_archived(campaign_id));
+            }
+            campaign.check_interaction(arm_id, context.len())?;
+        }
 
         let interaction_id = Uuid::new_v4().to_string();
         let now = now_secs();
@@ -3326,18 +3469,27 @@ impl BanditDB {
             is_reemit: false,
             input_ref,
         });
-        self.log_and_apply(pred_event, Durability::Required)?;
+        // Both records go in under one hold of the gate, so a checkpoint barrier
+        // cannot fall between them. Split, the prediction would be rotated away
+        // while its reward stayed, and the pair would never be exported.
+        let ack = {
+            let _gate = self.write_gate.read();
+            self.wal_enqueue(Arc::clone(&pred_event), Durability::Required)?;
+            self.apply_event_to_memory(&pred_event);
 
-        // 2. Emit Rewarded event
-        let reward_event = Arc::new(DbEvent::Rewarded {
-            interaction_id: interaction_id.clone(),
-            reward,
-            timestamp_secs: now,
-            unlogged_prediction: None,
-        });
-        // One ack covers both records: the prediction was enqueued first, so any
-        // fsync that reaches the reward has necessarily already covered it.
-        let ack = self.log_and_apply(reward_event, Durability::Acked)?;
+            // 2. Emit Rewarded event
+            let reward_event = Arc::new(DbEvent::Rewarded {
+                interaction_id: interaction_id.clone(),
+                reward,
+                timestamp_secs: now,
+                unlogged_prediction: None,
+            });
+            // One ack covers both records: the prediction was enqueued first, so any
+            // fsync that reaches the reward has necessarily already covered it.
+            let ack = self.wal_enqueue(Arc::clone(&reward_event), Durability::Acked)?;
+            self.apply_event_to_memory(&reward_event);
+            ack
+        };
 
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await?;
@@ -3374,20 +3526,39 @@ impl BanditDB {
                 "Interaction '{interaction_id}' not found or already rewarded"
             )));
         };
-        // A prediction whose WAL record was dropped leaves replay nothing to match
-        // this reward against, so the reward carries it. Without that, an
-        // acknowledged reward would vanish on restart.
-        let unlogged_prediction = (!record.logged).then_some(record);
-        let event = Arc::new(DbEvent::Rewarded {
-            interaction_id: interaction_id.to_string(),
-            reward,
-            timestamp_secs: now_secs(),
-            unlogged_prediction,
-        });
+        // Archived means frozen. The interaction stays pending, so the reward can
+        // still be recorded once the campaign is restored.
+        if self
+            .campaigns
+            .read()
+            .get(&record.campaign_id)
+            .is_some_and(|c| c.archived.load(Ordering::Relaxed))
+        {
+            return Err(Self::campaign_archived(&record.campaign_id));
+        }
         // WAL before memory. See BanditDB consistency-model doc comment.
         // Applied before awaiting: the update is visible to concurrent readers
         // immediately, while the caller's ack still means "durable".
-        let ack = self.log_and_apply(event, Durability::Acked)?;
+        let ack = {
+            let _gate = self.write_gate.read();
+            // The reward carries its prediction whenever the current WAL does not
+            // hold the `Predicted` record: it was dropped under load, or it was
+            // written before a checkpoint barrier and rotated away. Replay needs
+            // it in the first case, and the Parquet export — which joins
+            // predictions to rewards within one WAL — in both. Decided under the
+            // gate so a barrier cannot slip in between the check and the enqueue.
+            let in_current_wal =
+                record.logged && record.wal_epoch == self.wal_epoch.load(Ordering::SeqCst);
+            let event = Arc::new(DbEvent::Rewarded {
+                interaction_id: interaction_id.to_string(),
+                reward,
+                timestamp_secs: now_secs(),
+                unlogged_prediction: (!in_current_wal).then_some(record),
+            });
+            let ack = self.wal_enqueue(Arc::clone(&event), Durability::Acked)?;
+            self.apply_event_to_memory(&event);
+            ack
+        };
         self.rewarded_count.fetch_add(1, Ordering::Relaxed);
         Self::await_ack(ack).await
     }
@@ -4196,7 +4367,10 @@ fn non_finite_state(campaigns: &HashMap<String, CampaignCheckpoint>) -> Option<S
         if !camp.alpha.is_finite() {
             return Some(format!("campaign '{campaign_id}' alpha"));
         }
-        let arm_maps = [("arm", Some(&camp.arms)), ("challenger arm", camp.challenger_arms.as_ref())];
+        let arm_maps = [
+            ("arm", Some(&camp.arms)),
+            ("challenger arm", camp.challenger_arms.as_ref()),
+        ];
         for (kind, arms) in arm_maps {
             for (arm_id, arm) in arms.into_iter().flatten() {
                 let total_reward = f64::from_bits(arm.total_reward.load(Ordering::Relaxed));

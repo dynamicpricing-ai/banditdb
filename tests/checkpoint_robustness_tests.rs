@@ -82,7 +82,9 @@ async fn checkpoint_survives_mixed_context_lengths_in_one_segment() {
     assert!(msg.contains("33 interactions exported"), "{msg}");
     assert_eq!(shards(&dir, "x"), 2, "one shard per context length");
     assert!(std::path::Path::new(&format!("{dir}/checkpoint.json")).exists());
-    db.checkpoint().await.expect("the next checkpoint must succeed too");
+    db.checkpoint()
+        .await
+        .expect("the next checkpoint must succeed too");
 }
 
 /// An arm that gets no rewards is widened by decay at every checkpoint. Uncapped,
@@ -164,7 +166,11 @@ fn decay_pulls_an_over_inflated_arm_back_to_the_prior() {
         arm.decay(0.5);
     }
     for i in 0..3 {
-        assert!((arm.a_inv[[i, i]] - 1.0).abs() < 1e-6, "{}", arm.a_inv[[i, i]]);
+        assert!(
+            (arm.a_inv[[i, i]] - 1.0).abs() < 1e-6,
+            "{}",
+            arm.a_inv[[i, i]]
+        );
     }
 }
 
@@ -288,7 +294,15 @@ async fn checkpoint_refuses_to_write_non_finite_arm_state() {
     create(&db, "bad", 2, None).await;
     db.checkpoint().await.unwrap();
 
-    db.campaigns.read().get("bad").unwrap().arms.write().get_mut("a").unwrap().theta[0] = f64::NAN;
+    db.campaigns
+        .read()
+        .get("bad")
+        .unwrap()
+        .arms
+        .write()
+        .get_mut("a")
+        .unwrap()
+        .theta[0] = f64::NAN;
     let err = db.checkpoint().await.unwrap_err();
     assert!(err.contains("'bad'") && err.contains("'a'"), "{err}");
 

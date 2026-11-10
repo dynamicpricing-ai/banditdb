@@ -19,6 +19,17 @@
 - Parquet export writes one shard per context length, so a campaign id recreated
   with a different `feature_dim` no longer panics the export. An export failure
   no longer fails the checkpoint.
+- WAL replay no longer stops at a line that is not valid UTF-8; the damaged line
+  is skipped like any other unparseable record. A WAL ending in a partial record
+  is repaired at startup before new records are appended: JSON gets its missing
+  newline, a binary WAL is cut back to its last complete frame (removed bytes are
+  kept in `<wal>.damaged-tail`).
+- Parquet export includes rewards that arrive after the checkpoint that rotated
+  their prediction out of the WAL. Such rewards now carry the prediction in their
+  WAL record, so they are larger than before.
+- Archived campaigns are frozen for rewards too: `POST /reward` and
+  `/campaign/:id/interact` return 404 while the campaign is archived. The pending
+  interaction is kept and can be rewarded after a restore.
 
 ## v2.3.2 — Decision input references
 
