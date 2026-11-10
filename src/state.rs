@@ -266,10 +266,6 @@ pub struct ArmState {
     /// Optional hierarchy label. Arms in a group lend their θ to new arms in the
     /// same group via `WarmStart::Group`.
     pub group: Option<String>,
-    /// Cached Cholesky factor L (A_inv = L·Lᵀ) for Thompson Sampling.
-    /// Computed lazily on the first `score_ts` call after each `update`, then
-    /// reused until the next update invalidates it. LinUCB never touches this.
-    pub chol_cache: parking_lot::Mutex<Option<Array2<f64>>>,
     pub prediction_count: AtomicU64,
     pub reward_count: AtomicU64,
     pub total_reward: AtomicU64,
@@ -283,7 +279,6 @@ impl Clone for ArmState {
             theta: self.theta.clone(),
             status: AtomicU8::new(self.status.load(Ordering::Relaxed)),
             group: self.group.clone(),
-            chol_cache: parking_lot::Mutex::new(None), // don't copy stale cache
             prediction_count: AtomicU64::new(self.prediction_count.load(Ordering::Relaxed)),
             reward_count: AtomicU64::new(self.reward_count.load(Ordering::Relaxed)),
             total_reward: AtomicU64::new(self.total_reward.load(Ordering::Relaxed)),
@@ -355,7 +350,6 @@ impl<'de> Deserialize<'de> for ArmState {
             theta,
             status: AtomicU8::new(shadow.status.as_u8()),
             group: shadow.group,
-            chol_cache: parking_lot::Mutex::new(None), // recomputed lazily on first score_ts
             prediction_count: AtomicU64::new(shadow.prediction_count),
             reward_count: AtomicU64::new(shadow.reward_count),
             total_reward: AtomicU64::new(shadow.total_reward.to_bits()),
@@ -371,7 +365,6 @@ impl ArmState {
             theta: Array1::zeros(dim),
             status: AtomicU8::new(ArmStatus::Active.as_u8()),
             group: None,
-            chol_cache: parking_lot::Mutex::new(None),
             prediction_count: AtomicU64::new(0),
             reward_count: AtomicU64::new(0),
             total_reward: AtomicU64::new(0.0f64.to_bits()),
@@ -604,7 +597,8 @@ pub struct CompletedInteraction {
     pub rewarded_at: u64,
     /// Propensity of the chosen arm under the logging policy.
     /// LinUCB: softmax-normalised UCB score.
-    /// Thompson Sampling: adaptive Monte Carlo frequency (N=8–64, driven by A_inv diagonal).
+    /// Thompson Sampling: Monte Carlo win frequency over independent posterior draws
+    /// (1,024 by default; `BANDITDB_TS_PROPENSITY_SAMPLES`).
     pub propensity: Option<f64>,
 }
 
@@ -1296,7 +1290,7 @@ pub enum DbEvent {
         timestamp_secs: u64,
         /// Per-arm propensity under the logging policy.
         /// LinUCB/NeuralLinUCB: softmax-normalised UCB scores.
-        /// Thompson Sampling: adaptive Monte Carlo frequency estimate (N=8–64).
+        /// Thompson Sampling: Monte Carlo win frequency (1,024 draws by default).
         /// Absent in WAL records written before propensity logging — deserialises to None.
         #[serde(default = "default_none_map")]
         arm_propensities: Option<HashMap<String, f64>>,

@@ -50,6 +50,21 @@
 - Creating a Progressive campaign without a neural challenger logs a warning:
   its tournament always ties (both sides learn identical models), so traffic
   stays at 90/10. Documented in the README and the OpenAPI spec.
+- Thompson Sampling propensities are estimated from 1,024 independent posterior
+  draws per prediction (`BANDITDB_TS_PROPENSITY_SAMPLES`), up from an adaptive
+  8–64 that counted the decision itself as a draw. The old estimate reported
+  arms with a few percent probability as 0 and inflated the propensity of rarely
+  chosen arms. Each draw is now one scalar normal per arm instead of a
+  d-dimensional sample, so the larger count costs no more than before and less
+  from d≈64 up; the per-arm Cholesky factor and its O(d³) recompute after every
+  reward are gone, and the memory estimate for Thompson campaigns halves.
+- The WAL size trigger is on by default: a checkpoint is taken when the WAL
+  exceeds 128 MB (`BANDITDB_MAX_WAL_SIZE_MB`, `0` disables). With neither
+  trigger set the WAL previously grew without bound.
+- Recovery, the Parquet export and WAL rotation stream the WAL instead of
+  loading it into memory.
+- Checkpoint serialisation and its fsyncs run on a blocking thread instead of an
+  async worker, and the checkpoint is serialised once instead of twice.
 
 ## v2.3.2 — Decision input references
 

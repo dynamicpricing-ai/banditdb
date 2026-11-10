@@ -174,7 +174,7 @@ services:
       - BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
       - BANDITDB_REWARD_TTL_SECS=86400
       # - BANDITDB_CHECKPOINT_INTERVAL=10000   # auto-checkpoint after N rewarded events
-      # - BANDITDB_MAX_WAL_SIZE_MB=50          # auto-checkpoint when WAL exceeds N MB
+      # - BANDITDB_MAX_WAL_SIZE_MB=128         # auto-checkpoint when WAL exceeds N MB (default 128, 0 disables)
       # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
       # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
       - BANDITDB_REQUIRE_AUTH=true             # refuse to start without API keys

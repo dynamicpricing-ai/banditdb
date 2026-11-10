@@ -2300,6 +2300,9 @@ async fn handle_openapi() -> (HeaderMap, &'static str) {
 // Main
 // ---------------------------------------------------------------------------
 
+/// WAL size at which a checkpoint is taken when `BANDITDB_MAX_WAL_SIZE_MB` is unset.
+const DEFAULT_MAX_WAL_SIZE_MB: u64 = 128;
+
 #[tokio::main]
 async fn main() {
     // Print version and exit before booting the runtime, so `banditdb --version`
@@ -2420,11 +2423,16 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| n > 0);
-    let max_wal_bytes: Option<u64> = std::env::var("BANDITDB_MAX_WAL_SIZE_MB")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&n| n > 0)
-        .map(|mb| mb * 1024 * 1024);
+    // On by default. With neither trigger set the WAL grew without bound, and
+    // recovery time and checkpoint cost grew with it. 0 disables the size trigger.
+    let max_wal_bytes: Option<u64> = Some(
+        std::env::var("BANDITDB_MAX_WAL_SIZE_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MAX_WAL_SIZE_MB),
+    )
+    .filter(|&n| n > 0)
+    .map(|mb| mb * 1024 * 1024);
 
     if checkpoint_interval.is_some() || max_wal_bytes.is_some() {
         let db_bg = Arc::clone(&db);

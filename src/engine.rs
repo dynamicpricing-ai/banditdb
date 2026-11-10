@@ -116,32 +116,28 @@ fn detect_wal_format(path: &str) -> WalFormat {
     WalFormat::Json
 }
 
-/// Read `DbEvent`s from a WAL file slice, auto-detecting the format.
+/// Stream the events of a WAL file slice to `on_event`, without collecting them.
 /// `start_offset` is the byte to start reading from (0 for the full file).
 /// `end_offset`   is the exclusive byte limit (0 means read to end-of-file).
-fn read_wal_slice(
+///
+/// Returns the byte offset up to which the slice is well framed. For JSON that
+/// is always the end of the slice: records are newline-delimited, so a damaged
+/// line is skipped and reading resumes at the next one. A binary WAL has no such
+/// resync point — a damaged length prefix makes everything after it unreadable —
+/// so there the offset is where the last complete record ends.
+///
+/// Recovery and the Parquet export go through this: a WAL that has grown to
+/// gigabytes must not have to fit in memory as a `Vec<DbEvent>` before the first
+/// event is applied.
+fn for_each_wal_event(
     path: &str,
     start_offset: u64,
     end_offset: u64,
     format: WalFormat,
-) -> Vec<DbEvent> {
-    read_wal_slice_checked(path, start_offset, end_offset, format).0
-}
-
-/// `read_wal_slice`, also returning the byte offset up to which the slice is
-/// well framed. For JSON that is always the end of the slice: records are
-/// newline-delimited, so a damaged line is skipped and reading resumes at the
-/// next one. A binary WAL has no such resync point — a damaged length prefix
-/// makes everything after it unreadable — so there the offset is where the last
-/// complete record ends.
-fn read_wal_slice_checked(
-    path: &str,
-    start_offset: u64,
-    end_offset: u64,
-    format: WalFormat,
-) -> (Vec<DbEvent>, u64) {
+    mut on_event: impl FnMut(DbEvent),
+) -> u64 {
     let Ok(mut file) = File::open(path) else {
-        return (vec![], start_offset);
+        return start_offset;
     };
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let slice_end = if end_offset > 0 {
@@ -158,10 +154,9 @@ fn read_wal_slice_checked(
     };
 
     if file.seek(SeekFrom::Start(data_start)).is_err() {
-        return (vec![], data_start);
+        return data_start;
     }
 
-    let mut events = Vec::new();
     let mut good_end = slice_end.max(data_start);
 
     match format {
@@ -195,7 +190,7 @@ fn read_wal_slice_checked(
                     Ok(DbEvent::Unknown) => {
                         tracing::warn!("wal replay: unknown event variant encountered; skipping");
                     }
-                    Ok(e) => events.push(e),
+                    Ok(e) => on_event(e),
                     Err(err) => {
                         tracing::warn!(line = %String::from_utf8_lossy(record), error = %err,
                             "wal replay: skipping unparseable record");
@@ -232,7 +227,7 @@ fn read_wal_slice_checked(
                             "wal replay: unknown binary event variant encountered; skipping"
                         );
                     }
-                    Ok(e) => events.push(e),
+                    Ok(e) => on_event(e),
                     Err(err) => {
                         tracing::warn!(error = %err, "wal replay: skipping unparseable binary record");
                     }
@@ -249,7 +244,7 @@ fn read_wal_slice_checked(
             }
         }
     }
-    (events, good_end)
+    good_end
 }
 
 /// Make a WAL that ends in a torn or damaged record safe to append to.
@@ -896,9 +891,21 @@ pub fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
 /// lose everything. Three barriers close it: fsync the data, rename, then fsync
 /// the directory so the rename itself is durable.
 fn write_file_durable(dir: &str, tmp: &str, dest: &str, bytes: &[u8]) -> std::io::Result<()> {
+    write_file_durable_with(dir, tmp, dest, |out| out.write_all(bytes))
+}
+
+/// `write_file_durable` for content produced by `fill`, so a large file can be
+/// streamed to disk rather than assembled in memory first.
+fn write_file_durable_with(
+    dir: &str,
+    tmp: &str,
+    dest: &str,
+    fill: impl FnOnce(&mut std::io::BufWriter<File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     {
-        let mut f = File::create(tmp)?;
-        f.write_all(bytes)?;
+        let mut out = std::io::BufWriter::new(File::create(tmp)?);
+        fill(&mut out)?;
+        let f = out.into_inner().map_err(|e| e.into_error())?;
         f.sync_all()?;
     }
     fs::rename(tmp, dest)?;
@@ -979,6 +986,9 @@ pub struct BanditDB {
     /// from any writer-role caller is enough.
     /// Env: BANDITDB_MAX_CONTEXT_MAGNITUDE (default 1e6).
     pub max_context_magnitude: f64,
+    /// Posterior draws used to estimate Thompson Sampling propensities for each
+    /// prediction. Env: BANDITDB_TS_PROPENSITY_SAMPLES (default 1024).
+    pub ts_propensity_samples: usize,
     /// False when the WAL writer task has encountered an unrecoverable I/O error.
     /// Exposed to the /health endpoint and checked by all write paths.
     pub wal_healthy: Arc<AtomicBool>,
@@ -1345,38 +1355,30 @@ impl BanditDB {
                                 let header = header_for(write_format);
                                 let seg_from = segment_start.max(header.len() as u64);
 
-                                let mut old = File::open(&path)?;
-                                old.seek(SeekFrom::Start(seg_from))?;
-                                let mut segment = header.to_vec();
-                                (&mut old)
-                                    .take(checkpoint_offset.saturating_sub(seg_from))
-                                    .read_to_end(&mut segment)?;
-                                old.seek(SeekFrom::Start(checkpoint_offset))?;
-                                let mut tail = Vec::new();
-                                old.read_to_end(&mut tail)?;
-                                drop(old);
-
-                                // The rewrite is where a configured format change takes
-                                // effect: the tail is re-encoded, not copied.
-                                if write_format != configured_format {
-                                    tail.clear();
-                                    for e in
-                                        read_wal_slice(&path, checkpoint_offset, 0, write_format)
-                                    {
-                                        tail.extend(encode_wal_record(configured_format, &e)?);
-                                    }
-                                }
-
                                 // Keep the discarded segment before discarding it. The
                                 // previous checkpoint plus this segment plus the new WAL
                                 // is the full history, which is what makes
                                 // checkpoint.prev a lossless fallback.
+                                //
+                                // Both files are streamed from the old WAL. Reading the
+                                // segment and the tail into memory first meant a WAL of
+                                // several gigabytes needed that much RAM to rotate.
                                 let seg_path = wal_segment_path(&writer_data_dir, generation);
-                                write_file_durable(
+                                write_file_durable_with(
                                     &writer_data_dir,
                                     &format!("{seg_path}.tmp"),
                                     &seg_path,
-                                    &segment,
+                                    |out| {
+                                        out.write_all(header)?;
+                                        let mut old = File::open(&path)?;
+                                        old.seek(SeekFrom::Start(seg_from))?;
+                                        std::io::copy(
+                                            &mut old
+                                                .take(checkpoint_offset.saturating_sub(seg_from)),
+                                            out,
+                                        )?;
+                                        Ok(())
+                                    },
                                 )?;
                                 // Only the newest segment is ever needed: it pairs with
                                 // checkpoint.prev, which this checkpoint just replaced.
@@ -1397,20 +1399,49 @@ impl BanditDB {
                                 }
 
                                 // The new WAL opens with a marker naming this checkpoint,
-                                // so recovery knows which history the file continues.
-                                let mut new_content = header_for(configured_format).to_vec();
-                                new_content.extend(encode_wal_record(
-                                    configured_format,
-                                    &DbEvent::WalStart { generation },
-                                )?);
-                                new_content.extend(tail);
-
+                                // so recovery knows which history the file continues,
+                                // followed by everything after the barrier.
+                                //
                                 // Durable: the pre-rotation WAL is discarded here, so a
                                 // half-written replacement is unrecoverable.
                                 let tmp = format!("{writer_data_dir}/wal_rotation.tmp");
-                                write_file_durable(&writer_data_dir, &tmp, &path, &new_content)?;
+                                write_file_durable_with(&writer_data_dir, &tmp, &path, |out| {
+                                    out.write_all(header_for(configured_format))?;
+                                    out.write_all(&encode_wal_record(
+                                        configured_format,
+                                        &DbEvent::WalStart { generation },
+                                    )?)?;
+                                    if write_format == configured_format {
+                                        let mut old = File::open(&path)?;
+                                        old.seek(SeekFrom::Start(checkpoint_offset))?;
+                                        std::io::copy(&mut old, out)?;
+                                    } else {
+                                        // The rewrite is where a configured format change
+                                        // takes effect: the tail is re-encoded, not copied.
+                                        let mut failed: Option<std::io::Error> = None;
+                                        for_each_wal_event(
+                                            &path,
+                                            checkpoint_offset,
+                                            0,
+                                            write_format,
+                                            |e| {
+                                                if failed.is_none() {
+                                                    failed =
+                                                        encode_wal_record(configured_format, &e)
+                                                            .and_then(|bytes| out.write_all(&bytes))
+                                                            .err();
+                                                }
+                                            },
+                                        );
+                                        if let Some(e) = failed {
+                                            return Err(e);
+                                        }
+                                    }
+                                    Ok(())
+                                })?;
                                 let new_file = OpenOptions::new().append(true).open(&path)?;
-                                Ok((new_content.len(), new_file))
+                                let total_len = new_file.metadata()?.len() as usize;
+                                Ok((total_len, new_file))
                             })();
                             match rotate {
                                 Ok((total_len, new_file)) => {
@@ -1461,6 +1492,11 @@ impl BanditDB {
             .and_then(|v| v.parse().ok())
             .filter(|v: &f64| v.is_finite() && *v > 0.0)
             .unwrap_or(1e6);
+        let ts_propensity_samples: usize = std::env::var("BANDITDB_TS_PROPENSITY_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1024);
         let max_campaigns: usize = std::env::var("BANDITDB_MAX_CAMPAIGNS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1587,6 +1623,7 @@ impl BanditDB {
             max_campaign_bytes,
             max_total_campaign_bytes,
             max_context_magnitude,
+            ts_propensity_samples,
             wal_healthy,
             wal_dropped: AtomicU64::new(0),
             wal_fsyncs,
@@ -1883,20 +1920,22 @@ impl BanditDB {
             );
             self.wal_base.store(start, Ordering::SeqCst);
 
-            let mut events = Vec::new();
+            // Applied as they are read: the WAL is never held in memory whole.
+            let mut count = 0usize;
             if let Some(seg) = &segment {
                 tracing::warn!(segment = %seg, "recovery: replaying the retained WAL segment");
-                events = read_wal_slice(seg, 0, 0, detect_wal_format(seg));
+                for_each_wal_event(seg, 0, 0, detect_wal_format(seg), |event| {
+                    self.apply_event_to_memory(&event);
+                    count += 1;
+                });
             }
-            let (tail_events, good_end) = read_wal_slice_checked(wal_path, start, 0, fmt);
-            events.extend(tail_events);
+            let good_end = for_each_wal_event(wal_path, start, 0, fmt, |event| {
+                self.apply_event_to_memory(&event);
+                count += 1;
+            });
             // Before the writer appends anything: it opens the file only once the
             // runtime first polls its task, which is after this returns.
             repair_wal_tail(wal_path, fmt, good_end);
-            let count = events.len();
-            for event in events {
-                self.apply_event_to_memory(&event);
-            }
             tracing::info!(events = count, ?fmt, "recovery: WAL tail replayed");
         }
 
@@ -2148,7 +2187,7 @@ impl BanditDB {
             let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
             let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
 
-            for event in read_wal_slice(&wal_path_clone, 0, wal_offset, wal_fmt) {
+            for_each_wal_event(&wal_path_clone, 0, wal_offset, wal_fmt, |event| {
                 match event {
                     DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
                         predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
@@ -2163,7 +2202,7 @@ impl BanditDB {
                     }
                     _ => {}
                 }
-            }
+            });
 
             let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
 
@@ -2214,14 +2253,22 @@ impl BanditDB {
 
         let timestamp_secs = now_secs();
         let generation = self.checkpoint_generation.load(Ordering::SeqCst) + 1;
-        let mut data = CheckpointData {
+        let data = CheckpointData {
             wal_offset,
             timestamp_secs,
             campaigns: campaigns_snapshot,
             pending_interactions,
             generation,
         };
-        let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+        let campaign_count = data.campaigns.len();
+        // Off the async threads: serialising every arm matrix and pending context
+        // takes seconds on a large instance, and run inline it stalled every
+        // request sharing the worker.
+        let json = tokio::task::spawn_blocking(move || {
+            serde_json::to_string(&data).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("checkpoint serialisation task failed: {e}"))??;
 
         // Written before checkpoint.json, so a checkpoint on disk always has the
         // buffer of its own generation beside it. Failure is not fatal: the
@@ -2273,18 +2320,34 @@ impl BanditDB {
         // unreadable, that file must not become the fallback. It is set aside for
         // inspection, and the new checkpoint is written to both slots.
         let current_unreadable = self.current_checkpoint_unreadable.load(Ordering::SeqCst);
+        // The renames and fsyncs block; they run on a blocking thread and hand the
+        // serialised checkpoint back for the post-rotation rewrite.
+        let json = {
+            let (data_dir, tmp_path, dest_path, prev_path) = (
+                self.data_dir.clone(),
+                tmp_path.clone(),
+                dest_path.clone(),
+                prev_path.clone(),
+            );
+            tokio::task::spawn_blocking(move || -> Result<String, String> {
+                if current_unreadable {
+                    fs::rename(&dest_path, format!("{data_dir}/checkpoint.corrupt"))
+                        .map_err(|e| e.to_string())?;
+                } else if Path::new(&dest_path).exists() {
+                    fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
+                }
+                write_file_durable(&data_dir, &tmp_path, &dest_path, json.as_bytes())
+                    .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
+                if current_unreadable {
+                    write_file_durable(&data_dir, &tmp_path, &prev_path, json.as_bytes())
+                        .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
+                }
+                Ok(json)
+            })
+            .await
+            .map_err(|e| format!("checkpoint write task failed: {e}"))??
+        };
         if current_unreadable {
-            fs::rename(&dest_path, format!("{}/checkpoint.corrupt", self.data_dir))
-                .map_err(|e| e.to_string())?;
-        } else if Path::new(&dest_path).exists() {
-            fs::rename(&dest_path, &prev_path).map_err(|e| e.to_string())?;
-        }
-
-        write_file_durable(&self.data_dir, &tmp_path, &dest_path, json.as_bytes())
-            .map_err(|e| format!("durable checkpoint write failed: {e}"))?;
-        if current_unreadable {
-            write_file_durable(&self.data_dir, &tmp_path, &prev_path, json.as_bytes())
-                .map_err(|e| format!("durable checkpoint.prev write failed: {e}"))?;
             self.current_checkpoint_unreadable
                 .store(false, Ordering::SeqCst);
         }
@@ -2324,22 +2387,27 @@ impl BanditDB {
         //
         // checkpoint.prev is deliberately left alone here — this is a correction
         // to the current generation, not a new one.
-        data.wal_offset = 0;
-        let rotated_json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-        write_file_durable(
-            &self.data_dir,
-            &tmp_path,
-            &dest_path,
-            rotated_json.as_bytes(),
-        )
-        .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))?;
+        //
+        // `wal_offset` is the first field of the serialised checkpoint, so the
+        // rewrite patches that prefix instead of serialising the whole snapshot
+        // a second time.
+        {
+            let data_dir = self.data_dir.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let rotated_json = checkpoint_json_with_zero_offset(json, wal_offset)?;
+                write_file_durable(&data_dir, &tmp_path, &dest_path, rotated_json.as_bytes())
+                    .map_err(|e| format!("post-rotation checkpoint rewrite failed: {e}"))
+            })
+            .await
+            .map_err(|e| format!("checkpoint rewrite task failed: {e}"))??;
+        }
 
         let msg = format!(
             "Checkpoint written and WAL rotated: {} campaigns, offset {} bytes, {} interactions exported, {} in-flight re-emitted",
-            data.campaigns.len(), wal_offset, parquet_rows, reemit_count
+            campaign_count, wal_offset, parquet_rows, reemit_count
         );
         tracing::info!(
-            campaigns = data.campaigns.len(),
+            campaigns = campaign_count,
             wal_offset,
             parquet_rows,
             reemit_count,
@@ -3391,19 +3459,45 @@ impl BanditDB {
                 )));
             }
 
-            let scores: Vec<(String, f64)> = eligible
-                .iter()
-                .map(|(arm_id, state)| {
-                    let score = match active_algo {
-                        Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
-                            state.score_ts(&features, campaign.alpha)
-                        }
-                        _ => state.score(&features, campaign.alpha),
-                    };
-                    let price = campaign.arm_price(arm_id);
-                    ((*arm_id).clone(), score - price)
-                })
-                .collect();
+            let is_ts = matches!(
+                active_algo,
+                Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_)
+            );
+            // Thompson sampling: each arm's sampled score is Gaussian with this
+            // (mean − price, alpha·sd). Computed once per arm — the O(d²) part —
+            // and reused for the decision draw and every propensity draw below.
+            let ts_posteriors: Vec<(f64, f64)> = if is_ts {
+                eligible
+                    .iter()
+                    .map(|(arm_id, state)| {
+                        let (mean, sd) = state.posterior(&features);
+                        (mean - campaign.arm_price(arm_id), campaign.alpha * sd)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            let scores: Vec<(String, f64)> = if is_ts {
+                use rand_distr::{Distribution, StandardNormal};
+                let mut rng = rand::thread_rng();
+                eligible
+                    .iter()
+                    .zip(&ts_posteriors)
+                    .map(|((arm_id, _), (mean, sd))| {
+                        let z: f64 = StandardNormal.sample(&mut rng);
+                        ((*arm_id).clone(), mean + sd * z)
+                    })
+                    .collect()
+            } else {
+                eligible
+                    .iter()
+                    .map(|(arm_id, state)| {
+                        let score = state.score(&features, campaign.alpha);
+                        ((*arm_id).clone(), score - campaign.arm_price(arm_id))
+                    })
+                    .collect()
+            };
 
             // Rank candidate arms descending by penalized score.
             let mut ranked_arms = scores.clone();
@@ -3435,44 +3529,19 @@ impl BanditDB {
                 arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            let arm_propensities = match active_algo {
-                Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_) => {
-                    // Adaptive Monte Carlo: draw N trials and count wins per arm.
-                    // N scales with posterior spread (A_inv diagonal) — large near cold-start
-                    // where many samples are needed; small once the posterior concentrates.
-                    // The first trial's winner is already known (best_arm from initial scores draw).
-                    let n = ts_propensity_samples(&eligible);
-                    let mut counts: HashMap<String, u32> = eligible
-                        .iter()
-                        .map(|(id, _)| ((*id).clone(), 0u32))
-                        .collect();
-                    *counts.entry(best_arm.clone()).or_insert(0) += 1;
-                    for _ in 1..n {
-                        if let Some((winner, _)) = eligible
-                            .iter()
-                            .map(|(id, state)| {
-                                (
-                                    (*id).clone(),
-                                    state.score_ts(&features, campaign.alpha)
-                                        - campaign.arm_price(id),
-                                )
-                            })
-                            .max_by(|a, b| {
-                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                            })
-                        {
-                            *counts.entry(winner).or_insert(0) += 1;
-                        }
-                    }
-                    let n_f = n as f64;
-                    Some(
-                        counts
-                            .into_iter()
-                            .map(|(id, c)| (id, c as f64 / n_f))
-                            .collect(),
-                    )
-                }
-                _ => Some(softmax_propensities(&scores)),
+            let arm_propensities = if is_ts {
+                // Monte Carlo estimate of each arm's probability of being the
+                // sampled maximum. The draws are independent of the decision draw
+                // above: counting that draw as a sample floors the chosen arm at
+                // 1/N, which inflates the propensity of rarely chosen arms and
+                // shrinks their importance weights.
+                Some(ts_propensities(
+                    &eligible,
+                    &ts_posteriors,
+                    self.ts_propensity_samples,
+                ))
+            } else {
+                Some(softmax_propensities(&scores))
             };
 
             let has_pacing = campaign.pacing.is_some();
@@ -4557,6 +4626,21 @@ fn interactions_to_df(
     DataFrame::new(series).map_err(|e| e.to_string())
 }
 
+/// The serialised checkpoint with its `wal_offset` set to 0.
+///
+/// `wal_offset` is `CheckpointData`'s first field, so its value sits in a known
+/// prefix and can be replaced without touching the rest. Falls back to a full
+/// parse if the prefix is not what is expected.
+fn checkpoint_json_with_zero_offset(json: String, wal_offset: u64) -> Result<String, String> {
+    let prefix = format!("{{\"wal_offset\":{wal_offset},");
+    if let Some(rest) = json.strip_prefix(&prefix) {
+        return Ok(format!("{{\"wal_offset\":0,{rest}"));
+    }
+    let mut data: CheckpointData = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    data.wal_offset = 0;
+    serde_json::to_string(&data).map_err(|e| e.to_string())
+}
+
 /// First place in a checkpoint snapshot that holds NaN or infinity, if any.
 fn non_finite_state(campaigns: &HashMap<String, CampaignCheckpoint>) -> Option<String> {
     let finite = |v: &f64| v.is_finite();
@@ -4642,8 +4726,7 @@ fn detect_memory_limit() -> Option<u64> {
 /// control on size possible at all.
 ///
 /// Terms:
-/// * per arm, `A⁻¹` (d×d) plus `b` and `θ` (d each), doubled for Thompson sampling
-///   because the Cholesky factor is cached, and doubled again for Progressive
+/// * per arm, `A⁻¹` (d×d) plus `b` and `θ` (d each), doubled for Progressive
 ///   because base and challenger each keep a full arm map;
 /// * the MLP for neural algorithms, counted three times over for the live VarMap,
 ///   the published snapshot, and gradients;
@@ -4656,26 +4739,12 @@ pub fn campaign_memory_estimate(arms: usize, arm_dim: usize, algorithm: &Algorit
     let d = arm_dim as u64;
     let per_arm = 8 * d * d + 16 * d + 64;
 
-    let (is_ts, neural_cfg, is_progressive) = match algorithm {
-        Algorithm::ThompsonSampling => (true, None, false),
-        Algorithm::NeuralThompsonSampling(cfg) => (true, Some(cfg), false),
-        Algorithm::NeuralLinUCB(cfg) => (false, Some(cfg), false),
-        Algorithm::Progressive(cfg) => {
-            let challenger_neural = match cfg.challenger.as_ref() {
-                Algorithm::NeuralLinUCB(c) | Algorithm::NeuralThompsonSampling(c) => Some(c),
-                _ => None,
-            };
-            let ts = matches!(cfg.base.as_ref(), Algorithm::ThompsonSampling)
-                || matches!(cfg.challenger.as_ref(), Algorithm::ThompsonSampling);
-            (ts, challenger_neural, true)
-        }
-        Algorithm::Linucb => (false, None, false),
+    let (neural_cfg, is_progressive) = match algorithm {
+        Algorithm::Progressive(cfg) => (cfg.challenger.neural_config(), true),
+        other => (other.neural_config(), false),
     };
 
     let mut total = arms as u64 * per_arm;
-    if is_ts {
-        total *= 2;
-    }
     if is_progressive {
         total *= 2;
     }
@@ -4884,40 +4953,47 @@ fn classify_entropy_status(
     }
 }
 
-/// Adaptive Monte Carlo sample count for Thompson Sampling propensity estimation.
+/// Thompson Sampling propensities: the fraction of `samples` independent
+/// posterior draws in which each arm has the highest score.
 ///
-/// Uses the maximum A_inv diagonal across all arms as a proxy for posterior spread.
-/// A_inv starts as the identity matrix (diagonal = 1.0) and shrinks as rewards accumulate.
+/// `posteriors[i]` is the (mean, standard deviation) of arm `i`'s sampled score,
+/// so one draw costs one scalar normal per arm — independent of the feature
+/// dimension. The standard error of an estimate `p` is `sqrt(p(1−p)/samples)`:
+/// at most 1.6 percentage points with the default 1,024.
 ///
-/// | max_diag  | Stage               | N  |
-/// |-----------|---------------------|----|
-/// | > 0.7     | Cold start          | 64 |
-/// | 0.3–0.7   | Active learning     | 32 |
-/// | 0.1–0.3   | Converging          | 16 |
-/// | ≤ 0.1     | Concentrated        |  8 |
-///
-/// This gives the ideal cost profile for production: high N when traffic is low (cold start),
-/// low N when traffic is high (converged) — the sample budget scales inversely with load.
-fn ts_propensity_samples(arms: &[(&String, &ArmState)]) -> usize {
-    let max_diag = arms
-        .iter()
-        .map(|(_, s)| {
-            s.a_inv
-                .diag()
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max)
-        })
-        .fold(0.0f64, f64::max);
-    if max_diag > 0.7 {
-        64
-    } else if max_diag > 0.3 {
-        32
-    } else if max_diag > 0.1 {
-        16
-    } else {
-        8
+/// The count used to adapt between 8 and 64. That left arms with a true
+/// probability of a few percent at exactly zero most of the time, and it dropped
+/// to 8 precisely when the posterior had concentrated and the probabilities
+/// were smallest.
+fn ts_propensities(
+    eligible: &[(&String, &ArmState)],
+    posteriors: &[(f64, f64)],
+    samples: usize,
+) -> HashMap<String, f64> {
+    use rand_distr::{Distribution, StandardNormal};
+    let samples = samples.max(1);
+    let mut wins = vec![0u32; posteriors.len()];
+    let mut rng = rand::thread_rng();
+    for _ in 0..samples {
+        let mut best = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+        for (i, (mean, sd)) in posteriors.iter().enumerate() {
+            let z: f64 = StandardNormal.sample(&mut rng);
+            let score = mean + sd * z;
+            if score > best_score {
+                best_score = score;
+                best = i;
+            }
+        }
+        if let Some(w) = wins.get_mut(best) {
+            *w += 1;
+        }
     }
+    eligible
+        .iter()
+        .zip(wins)
+        .map(|((id, _), w)| ((*id).clone(), w as f64 / samples as f64))
+        .collect()
 }
 
 /// Compute softmax-normalised propensities over arm UCB scores.

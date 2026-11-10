@@ -1,9 +1,7 @@
 use crate::state::ArmState;
 use ndarray::{Array1, Array2, Axis};
 
-/// Cholesky decomposition.
-/// Currently a manual O(d^3) implementation.
-/// TODO: Integrate ndarray-linalg with a BLAS backend for d > 100.
+/// Cholesky decomposition. Manual O(d³); used only by checkpoint decay.
 pub(crate) fn cholesky(m: &Array2<f64>) -> Array2<f64> {
     let n = m.shape()[0];
     let mut l = Array2::<f64>::zeros((n, n));
@@ -62,26 +60,27 @@ impl ArmState {
         expected_reward + alpha * variance.sqrt()
     }
 
+    /// Mean and standard deviation of this arm's reward estimate at `context`:
+    /// `θ·x` and `sqrt(xᵀA⁻¹x)`.
+    pub fn posterior(&self, context: &Array1<f64>) -> (f64, f64) {
+        let mean = self.theta.dot(context);
+        // Clamp to 0.0: collinear updates push f64 variance slightly negative → NaN in sqrt.
+        let variance = context.dot(&self.a_inv.dot(context)).max(0.0);
+        (mean, variance.sqrt())
+    }
+
     /// Thompson Sampling score: sample θ̃ ~ N(θ, v²·A⁻¹) and return θ̃·x.
-    /// The Cholesky factor L is computed once after each `update()` and cached;
-    /// subsequent calls in the same scoring pass reuse it (O(d²) instead of O(d³)).
+    ///
+    /// θ̃·x is a linear function of a Gaussian vector, so it is itself Gaussian:
+    /// `N(θ·x, v²·xᵀA⁻¹x)`. One scalar normal draw therefore has exactly the
+    /// distribution of drawing the whole d-dimensional θ̃ and projecting it, with
+    /// no Cholesky factor of A⁻¹ — which cost O(d³) after every reward and O(d²)
+    /// per draw.
     pub fn score_ts(&self, context: &Array1<f64>, v: f64) -> f64 {
-        use rand::thread_rng;
         use rand_distr::{Distribution, StandardNormal};
-        let d = self.theta.len();
-
-        // Acquire the per-arm cache lock; compute L only if invalidated by a prior update.
-        let l = {
-            let mut guard = self.chol_cache.lock();
-            if guard.is_none() {
-                *guard = Some(cholesky(&self.a_inv));
-            }
-            guard.as_ref().unwrap().clone()
-        };
-
-        let mut rng = thread_rng();
-        let z = Array1::from_iter((0..d).map(|_| StandardNormal.sample(&mut rng)));
-        (&self.theta + &(v * l.dot(&z))).dot(context)
+        let (mean, sd) = self.posterior(context);
+        let z: f64 = StandardNormal.sample(&mut rand::thread_rng());
+        mean + v * sd * z
     }
 
     /// Exponential forgetting with discount `gamma` ∈ (0, 1), as in D-LinUCB
@@ -127,7 +126,6 @@ impl ArmState {
         self.a_inv = a_inv;
         self.b = b;
         self.theta = theta;
-        *self.chol_cache.lock() = None;
     }
 
     pub fn update(&mut self, context: &Array1<f64>, reward: f64) {
@@ -166,9 +164,6 @@ impl ArmState {
         self.a_inv = a_inv;
         self.b = b;
         self.theta = theta;
-
-        // Invalidate Cholesky cache — recomputed lazily on next score_ts call.
-        *self.chol_cache.lock() = None;
 
         use std::sync::atomic::Ordering;
         self.reward_count.fetch_add(1, Ordering::Relaxed);
