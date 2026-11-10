@@ -93,6 +93,12 @@ components:
     ProgressiveConfig:
       type: object
       required: [base, challenger]
+      description: >
+        `base` must be linucb or thompson_sampling; a neural base and nested
+        progressive configs are rejected. The tournament only moves traffic when
+        `challenger` is neural: two linear algorithms learn identical models from
+        the same rewards, so the evaluation always ties and the split stays at
+        90/10.
       properties:
         base:          { $ref: "#/components/schemas/Algorithm" }
         challenger:    { $ref: "#/components/schemas/Algorithm" }

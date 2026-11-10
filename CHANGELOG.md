@@ -47,6 +47,9 @@
   diagnostics for a campaign are not blocked while its network trains, and a
   campaign create or delete no longer stalls every request behind a retrain.
   Re-accumulation embeds the buffer in batches instead of one entry at a time.
+- Creating a Progressive campaign without a neural challenger logs a warning:
+  its tournament always ties (both sides learn identical models), so traffic
+  stays at 90/10. Documented in the README and the OpenAPI spec.
 
 ## v2.3.2 — Decision input references
 

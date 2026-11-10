@@ -101,6 +101,8 @@ db.create_campaign(
 
 Runs two algorithms side-by-side in shadow mode. Every reward updates both models. At each checkpoint, both are evaluated with SNIPS: if the challenger wins `required_wins` consecutive rounds by > 10%, one `step_bps` of traffic (default 10%) shifts to the challenger — and vice-versa. Traffic is bounded: 10% floor to 90% ceiling.
 
+The tournament only moves traffic when the challenger is neural, and the base must be `linucb` or `thompson_sampling`. Two linear algorithms learn identical models from the same rewards, so SNIPS always ties and the split stays at 90/10.
+
 ```python
 from banditdb import Client, NeuralLinUCBConfig, ProgressiveConfig
 

@@ -3010,6 +3010,12 @@ impl BanditDB {
                     "Progressive cannot be nested inside Progressive".into(),
                 ));
             }
+            if cfg.challenger.neural_config().is_none() {
+                tracing::warn!(campaign = %campaign_id,
+                    "Progressive campaign has no neural challenger: base and challenger learn \
+                     identical models, so the tournament will always tie and challenger \
+                     traffic stays at 10%");
+            }
             let base_ctx_dim = expected_context_dim(&cfg.base, feature_dim);
             let chal_ctx_dim = expected_context_dim(&cfg.challenger, feature_dim);
             if base_ctx_dim != chal_ctx_dim {

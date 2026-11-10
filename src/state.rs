@@ -88,6 +88,13 @@ impl Default for NeuralLinUCBConfig {
 /// traffic step (`step_bps`) shifts toward the challenger — and vice-versa for
 /// the base. Traffic ramps gradually; it never jumps more than `step_bps` per
 /// checkpoint, and it never drops below 10% (exploration) or above 90%.
+///
+/// The tournament can only separate the two when the challenger is neural. SNIPS
+/// compares the greedy policy each side's θ implies, and a linear base and a
+/// linear challenger are updated with the same features and rewards, so their
+/// θ are identical and every round ties: such a campaign is a fixed 90/10 split
+/// between two exploration strategies. The base must not be neural — the
+/// campaign's one network belongs to the challenger.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProgressiveConfig {
     pub base: Box<Algorithm>,
