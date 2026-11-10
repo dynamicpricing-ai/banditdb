@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.3.3 — Corner-case hardening
 
 - **Decay is now D-LinUCB forgetting** (`A' = γA + (1−γ)I`, `b' = γb`). Each
   direction widens toward the cold prior and stops there. Previously `A⁻¹` was
@@ -42,7 +42,9 @@
   anchor W₀ is saved beside the weights (`<campaign>.safetensors.w0`) instead of
   being re-randomised on restart.
 - Retrains no longer add the whole replay buffer to each arm's `reward_count`
-  and `total_reward` again.
+  and `total_reward` again. Counts already inflated by earlier versions stay as
+  they are. Predictions and rewards that arrive while arms are being rebuilt
+  are no longer dropped from the counters.
 - Training no longer holds the neural lock or the campaign map: rewards and
   diagnostics for a campaign are not blocked while its network trains, and a
   campaign create or delete no longer stalls every request behind a retrain.
