@@ -278,6 +278,7 @@ fn unlogged_prediction_carries_ref_in_both_wal_formats() {
         timestamp_secs: 1,
         input_ref: Some(full()),
         logged: false,
+        wal_epoch: 0,
     };
     let event = DbEvent::Rewarded {
         interaction_id: "i".into(),

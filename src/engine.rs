@@ -4557,14 +4557,6 @@ pub fn write_campaign_parquet(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
-    // Two shards for one campaign can be written within the same microsecond
-    // (one per context length); never overwrite an existing shard.
-    while Path::new(export_dir)
-        .join(format!("{campaign_id}_{timestamp_us}.parquet"))
-        .exists()
-    {
-        timestamp_us += 1;
-    }
 
     let mut df = interactions_to_df(interactions, feature_dim)?;
 
@@ -4572,6 +4564,11 @@ pub fn write_campaign_parquet(
     // that bypassed HTTP validation cannot write outside its directory.
     let (dir, stem) = export_location(export_dir, campaign_id)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Two shards for one campaign can be written within the same microsecond
+    // (one per context length); never overwrite an existing shard.
+    while dir.join(format!("{stem}_{timestamp_us}.parquet")).exists() {
+        timestamp_us += 1;
+    }
     let path = dir.join(format!("{stem}_{timestamp_us}.parquet"));
     let tmp = dir.join(format!("{stem}_{timestamp_us}.parquet.tmp"));
 
