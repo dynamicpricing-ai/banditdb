@@ -4248,6 +4248,22 @@ impl BanditDB {
             let new_arm_states = neural.reaccumulate(&snapshot_arms());
             let mut arms_write = target_arms.write();
             for (arm_id, new_state) in new_arm_states {
+                // Counters and status are taken from the live arm under the write
+                // lock. Predictions and rewards keep landing on the old arm while
+                // the new one is being built; copying from the earlier snapshot
+                // dropped whatever arrived in between.
+                if let Some(live) = arms_write.get(&arm_id) {
+                    for (to, from) in [
+                        (&new_state.prediction_count, &live.prediction_count),
+                        (&new_state.reward_count, &live.reward_count),
+                        (&new_state.total_reward, &live.total_reward),
+                    ] {
+                        to.store(from.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
+                    new_state
+                        .status
+                        .store(live.status.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
                 arms_write.insert(arm_id, new_state);
             }
         }
