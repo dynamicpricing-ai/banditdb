@@ -30,6 +30,9 @@ const BPS_FLOOR: u32 = 1_000; // 10% — minimum challenger exploration
 const BPS_CEIL: u32 = 9_000; // 90% — maximum before full promotion
 const BPS_SCALE: u32 = 10_000; // denominator for the U[0, BPS_SCALE) draw
 
+/// Largest exploration coefficient accepted at campaign creation.
+pub const MAX_ALPHA: f64 = 1e6;
+
 pub enum WalMessage {
     Event {
         event: Arc<DbEvent>,
@@ -1803,23 +1806,25 @@ impl BanditDB {
                     continue;
                 }
 
-                let lambda = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
-                let inv_lambda = 1.0 / lambda;
+                // Discount factor γ (D-LinUCB). Not to be confused with the pacing
+                // shadow price λ.
+                let gamma = 0.5_f64.powf(elapsed_hours / half_life).max(0.01);
 
                 let apply_decay = |arms: &RwLock<HashMap<String, ArmState>>| {
                     for arm in arms.write().values_mut() {
-                        arm.a_inv *= inv_lambda;
-                        arm.b *= lambda;
-                        arm.theta = arm.a_inv.dot(&arm.b);
-                        *arm.chol_cache.lock() = None;
+                        arm.decay(gamma);
                     }
                 };
                 apply_decay(&campaign.arms);
                 if let Some(c_arms) = &campaign.challenger_arms {
                     apply_decay(c_arms);
                 }
-                tracing::debug!(campaign = %campaign_id, lambda, elapsed_hours, "checkpoint: decay applied");
+                tracing::debug!(campaign = %campaign_id, gamma, elapsed_hours, "checkpoint: decay applied");
             }
+            // The interval up to `now` has been applied to memory, whether or not the
+            // rest of this checkpoint succeeds. Recording it only on success made a
+            // failing checkpoint re-apply the whole interval on every retry.
+            self.last_checkpoint_secs.store(now, Ordering::Relaxed);
         }
 
         // 3. Barrier and snapshot, as one step with respect to writers. Done AFTER
@@ -1907,6 +1912,31 @@ impl BanditDB {
         };
         let reemit_count = pending_interactions.len();
 
+        // serde_json writes NaN and infinity as `null`, which does not parse back as
+        // a number. A snapshot holding one would produce a checkpoint.json that this
+        // call reports as written and the next start cannot read. Refuse here, before
+        // anything on disk changes: the previous checkpoint and the WAL stay intact.
+        let mut pending_interactions = pending_interactions;
+        for record in pending_interactions.values_mut() {
+            // Propensities are evaluation metadata; dropping a bad set loses nothing
+            // the model needs.
+            if record
+                .arm_propensities
+                .as_ref()
+                .is_some_and(|m| m.values().any(|p| !p.is_finite()))
+            {
+                record.arm_propensities = None;
+            }
+        }
+        if let Some(what) = non_finite_state(&campaigns_snapshot) {
+            tracing::error!(%what, "checkpoint: refusing to write non-finite state");
+            return Err(format!(
+                "checkpoint aborted: {what} holds NaN or infinity, which would make \
+                 checkpoint.json unreadable. The previous checkpoint and the WAL are \
+                 untouched. Delete or recreate the affected campaign, then checkpoint again."
+            ));
+        }
+
         // The writer replies once everything enqueued before the barrier is on disk.
         let wal_offset = reply_rx
             .await
@@ -1973,21 +2003,36 @@ impl BanditDB {
             }
 
             let mut rows = 0usize;
-            for (campaign_id, interactions) in &by_campaign {
-                let feature_dim = interactions[0].context.len();
-                prune_export_shards(&export_dir_clone, campaign_id, export_retain);
-                match write_campaign_parquet(&export_dir_clone, campaign_id, interactions, feature_dim) {
-                    Err(e) => tracing::error!(campaign = %campaign_id, error = %e, "checkpoint: Parquet write failed"),
-                    Ok(())  => rows += interactions.len(),
+            for (campaign_id, interactions) in by_campaign {
+                prune_export_shards(&export_dir_clone, &campaign_id, export_retain);
+                // One shard per context length. A campaign id that was deleted and
+                // recreated with another feature_dim leaves both lengths in the same
+                // WAL segment, and a Parquet shard has one fixed set of feature columns.
+                let mut by_dim: std::collections::BTreeMap<usize, Vec<CompletedInteraction>> =
+                    std::collections::BTreeMap::new();
+                for interaction in interactions {
+                    by_dim.entry(interaction.context.len()).or_default().push(interaction);
+                }
+                for (feature_dim, group) in &by_dim {
+                    match write_campaign_parquet(&export_dir_clone, &campaign_id, group, *feature_dim) {
+                        Err(e) => tracing::error!(campaign = %campaign_id, feature_dim, error = %e, "checkpoint: Parquet write failed"),
+                        Ok(())  => rows += group.len(),
+                    }
                 }
             }
 
             rows
-        }).await.map_err(|e| format!("checkpoint export task panicked: {e}"))?;
+        }).await;
+        // The export is an analytics side-product; recovery never reads it. A failure
+        // here must not stop the checkpoint, or the WAL would never rotate again and
+        // every later checkpoint would re-read the same records and fail the same way.
+        let parquet_rows = parquet_rows.unwrap_or_else(|e| {
+            tracing::error!(error = %e,
+                "checkpoint: Parquet export task failed — continuing without an export for this segment");
+            0
+        });
 
         let timestamp_secs = now_secs();
-        self.last_checkpoint_secs
-            .store(timestamp_secs, Ordering::Relaxed);
         let generation = self.checkpoint_generation.load(Ordering::SeqCst) + 1;
         let mut data = CheckpointData {
             wal_offset,
@@ -2695,9 +2740,12 @@ impl BanditDB {
         }
         // A non-finite alpha makes every score NaN from the first prediction; a
         // negative one inverts exploration into a penalty on uncertainty.
-        if !alpha.is_finite() || alpha < 0.0 {
+        // The upper bound keeps `alpha * sqrt(variance)` finite. An infinite score
+        // makes the softmax propensities NaN, and those are logged with every
+        // prediction and carried in the checkpoint.
+        if !alpha.is_finite() || !(0.0..=MAX_ALPHA).contains(&alpha) {
             return Err(EngineError::BadRequest(format!(
-                "alpha must be finite and non-negative, got {alpha}"
+                "alpha must be finite and in [0, {MAX_ALPHA}], got {alpha}"
             )));
         }
         if let Some(hl) = decay_half_life_hours {
@@ -4068,10 +4116,18 @@ pub fn write_campaign_parquet(
         return Ok(());
     }
 
-    let timestamp_us = SystemTime::now()
+    let mut timestamp_us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
+    // Two shards for one campaign can be written within the same microsecond
+    // (one per context length); never overwrite an existing shard.
+    while Path::new(export_dir)
+        .join(format!("{campaign_id}_{timestamp_us}.parquet"))
+        .exists()
+    {
+        timestamp_us += 1;
+    }
 
     let mut df = interactions_to_df(interactions, feature_dim)?;
 
@@ -4106,6 +4162,15 @@ fn interactions_to_df(
     let rewarded_ats: Vec<i64> = interactions.iter().map(|r| r.rewarded_at as i64).collect();
     let propensities: Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
 
+    // Indexing below assumes every row has `feature_dim` features.
+    if let Some(bad) = interactions.iter().find(|r| r.context.len() != feature_dim) {
+        return Err(format!(
+            "interaction '{}' has {} features, expected {feature_dim}",
+            bad.interaction_id,
+            bad.context.len()
+        ));
+    }
+
     let mut series: Vec<Series> = vec![
         Series::new("interaction_id", interaction_ids),
         Series::new("arm_id", arm_ids),
@@ -4122,6 +4187,44 @@ fn interactions_to_df(
     }
 
     DataFrame::new(series).map_err(|e| e.to_string())
+}
+
+/// First place in a checkpoint snapshot that holds NaN or infinity, if any.
+fn non_finite_state(campaigns: &HashMap<String, CampaignCheckpoint>) -> Option<String> {
+    let finite = |v: &f64| v.is_finite();
+    for (campaign_id, camp) in campaigns {
+        if !camp.alpha.is_finite() {
+            return Some(format!("campaign '{campaign_id}' alpha"));
+        }
+        let arm_maps = [("arm", Some(&camp.arms)), ("challenger arm", camp.challenger_arms.as_ref())];
+        for (kind, arms) in arm_maps {
+            for (arm_id, arm) in arms.into_iter().flatten() {
+                let total_reward = f64::from_bits(arm.total_reward.load(Ordering::Relaxed));
+                if !arm.a_inv.iter().all(finite)
+                    || !arm.b.iter().all(finite)
+                    || !arm.theta.iter().all(finite)
+                    || !total_reward.is_finite()
+                {
+                    return Some(format!("campaign '{campaign_id}' {kind} '{arm_id}'"));
+                }
+            }
+        }
+        if let Some(pacing) = &camp.pacing {
+            for r in &pacing.resources {
+                let ok = [r.budget, r.step_size, r.lambda_max, r.consumed, r.lambda]
+                    .iter()
+                    .all(finite)
+                    && r.arm_costs.values().all(finite);
+                if !ok {
+                    return Some(format!(
+                        "campaign '{campaign_id}' pacing resource '{}'",
+                        r.name
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Approximate heap footprint of one pending interaction.
@@ -4455,6 +4558,25 @@ fn softmax_propensities(scores: &[(String, f64)]) -> HashMap<String, f64> {
         .fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = scores.iter().map(|(_, s)| (s - max_score).exp()).collect();
     let sum: f64 = exps.iter().sum();
+    // Non-finite scores (inf - inf, or a NaN arm) would yield NaN propensities,
+    // which cannot be written to the WAL or the checkpoint. Fall back to a split
+    // among the arms tied at the maximum, or uniform when there is no maximum.
+    if !sum.is_finite() || sum <= 0.0 {
+        let tied = scores.iter().filter(|(_, s)| *s == max_score).count();
+        return scores
+            .iter()
+            .map(|(arm_id, s)| {
+                let p = if tied == 0 {
+                    1.0 / scores.len() as f64
+                } else if *s == max_score {
+                    1.0 / tied as f64
+                } else {
+                    0.0
+                };
+                (arm_id.clone(), p)
+            })
+            .collect();
+    }
     scores
         .iter()
         .zip(exps.iter())

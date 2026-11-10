@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Decay is now D-LinUCB forgetting** (`A' = γA + (1−γ)I`, `b' = γb`). Each
+  direction widens toward the cold prior and stops there. Previously `A⁻¹` was
+  scaled by `1/γ` without limit, so an arm receiving no rewards passed the prior
+  after one checkpoint and overflowed to infinity after enough of them. θ now
+  shrinks slightly toward zero as data is forgotten instead of staying fixed.
+  `decay_half_life_hours` is unchanged. Cost is O(d³) per arm per checkpoint.
+- A checkpoint that fails after applying decay no longer re-applies the same
+  interval on retry.
+- `alpha` must be in `[0, 1e6]` at campaign creation. Larger values made scores
+  infinite and propensities NaN.
+- Checkpoints refuse to write NaN or infinity (which serialise as `null` and
+  cannot be read back); the error names the campaign and arm, and the previous
+  checkpoint and WAL are left intact. Rank-one updates that would produce a
+  non-finite arm are skipped.
+- Parquet export writes one shard per context length, so a campaign id recreated
+  with a different `feature_dim` no longer panics the export. An export failure
+  no longer fails the checkpoint.
+
 ## v2.3.2 — Decision input references
 
 **`input_ref` on every decision.** `/predict`, `/batch_predict` and
