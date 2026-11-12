@@ -12,7 +12,7 @@
 //! WAL-sourced id from writing outside `exports/`.
 
 use banditdb::engine::{export_location, prune_export_shards, shard_stem, write_campaign_parquet};
-use banditdb::state::{Algorithm, CompletedInteraction};
+use banditdb::state::{Algorithm, CompletedInteraction, RewardStatus};
 use banditdb::BanditDB;
 use polars::prelude::*;
 use std::fs;
@@ -49,10 +49,13 @@ fn rows(prefix: &str, n: usize) -> Vec<CompletedInteraction> {
             interaction_id: format!("{prefix}-{i}"),
             arm_id: "a".into(),
             context: vec![i as f64, 1.0],
-            reward: 1.0,
+            reward: Some(1.0),
+            reward_status: RewardStatus::Rewarded,
             predicted_at: 1_700_000_000,
-            rewarded_at: 1_700_000_001,
-            propensity: Some(0.5),
+            rewarded_at: Some(1_700_000_001),
+            arm_propensities: Some([("a".to_string(), 0.5)].into()),
+            input_ref: None,
+            budget: Vec::new(),
         })
         .collect()
 }

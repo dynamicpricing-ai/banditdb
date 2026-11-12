@@ -277,6 +277,7 @@ fn unlogged_prediction_carries_ref_in_both_wal_formats() {
         arm_propensities: None,
         timestamp_secs: 1,
         input_ref: Some(full()),
+        budget: Vec::new(),
         logged: false,
         wal_epoch: 0,
     };
@@ -312,6 +313,7 @@ fn predicted_round_trips_in_msgpack_with_and_without_ref() {
             timestamp_secs: 1,
             arm_propensities: None,
             is_reemit: false,
+            budget: Vec::new(),
             input_ref: input_ref.clone(),
         };
         let back: DbEvent =

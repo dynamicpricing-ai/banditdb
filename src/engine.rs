@@ -1,28 +1,31 @@
 #[cfg(feature = "neural")]
 use crate::neural::{NeuralLinUCBState, NeuralWeights};
 use crate::state::{
-    Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint,
-    CampaignDiagnosticsData, CampaignReport, CheckpointData, CompletedInteraction, DbEvent,
-    EngineError, EntropyStatus, EntropyTrend, InputRef, InteractionRecord, PacingCheckpoint,
-    PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
+    Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, BudgetSnapshot,
+    CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, DbEvent,
+    EngineError, EntropyStatus, EntropyTrend, ExpiryCause, InputRef, InteractionRecord,
+    PacingCheckpoint, PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
 };
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
 use moka::sync::Cache;
 use ndarray::Array1;
 use parking_lot::RwLock;
-use polars::prelude::*;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, error::TrySendError, Sender};
 use tokio::sync::oneshot;
 use uuid::Uuid;
+
+// The Parquet export lives in `crate::export`. Re-exported here because callers
+// and tests have always reached it as `banditdb::engine::...`.
+pub use crate::export::{export_location, prune_export_shards, shard_stem, write_campaign_parquet};
 
 /// Basis-point bounds for the Progressive tournament traffic ramp.
 const BPS_FLOOR: u32 = 1_000; // 10% — minimum challenger exploration
@@ -129,7 +132,7 @@ fn detect_wal_format(path: &str) -> WalFormat {
 /// Recovery and the Parquet export go through this: a WAL that has grown to
 /// gigabytes must not have to fit in memory as a `Vec<DbEvent>` before the first
 /// event is applied.
-fn for_each_wal_event(
+pub(crate) fn for_each_wal_event(
     path: &str,
     start_offset: u64,
     end_offset: u64,
@@ -791,97 +794,6 @@ extern "C" {
     fn libc_flock(fd: i32, operation: i32) -> i32;
 }
 
-/// Where a campaign's Parquet shards live: a directory and the file-name stem.
-///
-/// Tenant campaigns are stored as `{tenant}/{campaign}`, and their shards go in a
-/// directory per tenant: `exports/{tenant}/{campaign}_{micros}.parquet`. Before
-/// this, the writer kept only the last path component, so every tenant's shards
-/// landed flat as `{campaign}_{micros}.parquet`: two tenants' `checkout` shards
-/// could not be told apart, and pruning (which looked for `{tenant}/{campaign}_`)
-/// never matched them, so they were never deleted. Campaigns without a tenant
-/// keep the flat layout.
-///
-/// Each part must be a plain id (`[A-Za-z0-9_-]{1,128}`, the HTTP and tenant
-/// rule). WAL-sourced ids bypass HTTP validation, so anything else — `..`, an
-/// empty part, a nested path — is refused rather than written somewhere else.
-pub fn export_location(export_dir: &str, campaign_id: &str) -> Result<(PathBuf, String), String> {
-    let part = |s: &str| -> Result<String, String> {
-        let ok = !s.is_empty()
-            && s.len() <= 128
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if ok {
-            Ok(s.to_string())
-        } else {
-            Err(format!(
-                "campaign id '{campaign_id}' cannot name an export path"
-            ))
-        }
-    };
-    match campaign_id.split_once('/') {
-        Some((tenant, name)) => Ok((Path::new(export_dir).join(part(tenant)?), part(name)?)),
-        None => Ok((PathBuf::from(export_dir), part(campaign_id)?)),
-    }
-}
-
-/// The campaign a shard file belongs to: `checkout` for `checkout_1700….parquet`.
-///
-/// The timestamp is always the last `_` part, so `checkout_v2_1700….parquet` is
-/// `checkout_v2`, never `checkout`. Matching by prefix alone would confuse them.
-pub fn shard_stem(file_name: &str) -> Option<&str> {
-    let stem = file_name.strip_suffix(".parquet")?;
-    let (name, ts) = stem.rsplit_once('_')?;
-    let ok = !name.is_empty() && !ts.is_empty() && ts.bytes().all(|b| b.is_ascii_digit());
-    ok.then_some(name)
-}
-
-/// Delete the oldest Parquet shards once a campaign exceeds the retention limit.
-///
-/// Every checkpoint writes a new shard and nothing ever removed them, so `exports/`
-/// grew without bound until the volume filled — at which point checkpointing starts
-/// failing and the WAL stops rotating. Recovery never reads these files (it uses
-/// checkpoint.json plus the WAL), so pruning is safe: the cost is only that
-/// offline analysis loses the oldest history.
-///
-/// Retention is per campaign, newest first, matched exactly by `shard_stem` in
-/// the campaign's own directory (`export_location`): pruning `checkout` never
-/// touches `checkout_v2`, nor another tenant's `checkout`.
-/// `BANDITDB_EXPORT_RETAIN_SHARDS=0` disables pruning entirely.
-pub fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
-    if retain == 0 {
-        return;
-    }
-
-    let Ok((dir, stem)) = export_location(export_dir, campaign_id) else {
-        return;
-    };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-
-    // Shard names embed a microsecond timestamp, so lexical order is chronological.
-    let mut shards: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| shard_stem(n) == Some(stem.as_str()))
-        .collect();
-    if shards.len() <= retain {
-        return;
-    }
-    shards.sort();
-
-    let doomed = shards.len() - retain;
-    for name in shards.into_iter().take(doomed) {
-        match fs::remove_file(dir.join(&name)) {
-            Ok(()) => tracing::debug!(shard = %name, "export: pruned old shard"),
-            Err(e) => tracing::warn!(shard = %name, error = %e, "export: could not prune shard"),
-        }
-    }
-    tracing::info!(campaign = %campaign_id, pruned = doomed, retained = retain,
-        "export: pruned old Parquet shards");
-}
-
 /// Write `bytes` to `dest` so the result survives power loss.
 ///
 /// `fs::write` + `fs::rename` is atomic with respect to *naming* but not to
@@ -1051,6 +963,8 @@ pub struct BanditDB {
     /// discarded it (or is about to) and its reward must carry the prediction.
     /// Bumped and read only under `write_gate`.
     wal_epoch: AtomicU64,
+    /// True while `recover` replays the WAL. See the cache's eviction listener.
+    replaying: Arc<AtomicBool>,
 }
 
 impl BanditDB {
@@ -1556,6 +1470,15 @@ impl BanditDB {
             .unwrap_or(100_000);
         let interactions_evicted = Arc::new(AtomicU64::new(0));
         let evicted = Arc::clone(&interactions_evicted);
+        // Off by default: these rows have `reward` null, which changes the result
+        // for anyone already averaging `reward` over the export.
+        let export_unrewarded = std::env::var("BANDITDB_EXPORT_UNREWARDED").as_deref() == Ok("1");
+        let expiry_tx = tx.clone();
+        // Suppresses expiry records while recovery replays the WAL: evictions
+        // then are an artefact of replay, and writing them would duplicate or
+        // invent export rows.
+        let replaying = Arc::new(AtomicBool::new(true));
+        let listener_replaying = Arc::clone(&replaying);
 
         if wal_format == WalFormat::Msgpack {
             tracing::info!("WAL format: MessagePack (binary, length-framed)");
@@ -1604,13 +1527,38 @@ impl BanditDB {
                     let floor = max_pending_bytes / max_pending as u64;
                     pending_entry_bytes(k, v).max(floor).min(u32::MAX as u64) as u32
                 })
-                .eviction_listener(move |_k, _v, cause| {
+                .eviction_listener(move |k, v, cause| {
+                    use moka::notification::RemovalCause;
                     // Only capacity pressure is a problem. Expiry is
                     // the TTL doing its job, and explicit invalidation
                     // happens on every matched reward.
-                    if cause == moka::notification::RemovalCause::Size {
+                    if cause == RemovalCause::Size {
                         evicted.fetch_add(1, Ordering::Relaxed);
                     }
+                    let cause = match cause {
+                        RemovalCause::Expired => ExpiryCause::Expired,
+                        RemovalCause::Size => ExpiryCause::Evicted,
+                        // Matched by a reward, or replaced: not unrewarded.
+                        _ => return,
+                    };
+                    if !export_unrewarded || listener_replaying.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Enqueue only. This runs inside whatever cache call
+                    // triggered housekeeping — a prediction, a reward, or a
+                    // checkpoint holding the write gate — so it must not take
+                    // the gate or block. A full channel loses the record, which
+                    // costs one export row, never model state.
+                    let _ = expiry_tx.try_send(WalMessage::Event {
+                        event: Arc::new(DbEvent::PredictionExpired {
+                            interaction_id: (*k).clone(),
+                            cause,
+                            timestamp_secs: now_secs(),
+                            prediction: v,
+                        }),
+                        durable: false,
+                        ack: None,
+                    });
                 })
                 .build(),
             event_tx: tx,
@@ -1639,10 +1587,12 @@ impl BanditDB {
             checkpoint_lock: tokio::sync::Mutex::new(()),
             admission: parking_lot::Mutex::new(()),
             wal_epoch: AtomicU64::new(0),
+            replaying,
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
         db.recover(wal_path, data_dir);
+        db.replaying.store(false, Ordering::Relaxed);
         db
     }
 
@@ -2050,6 +2000,10 @@ impl BanditDB {
         //
         //    The channel slot is reserved first so the gate is never held across an
         //    await; writers wait only for the clone, not for the WAL writer.
+        // The cache notices TTL expiry lazily, during housekeeping. Run it now so
+        // predictions that have already expired are recorded before the barrier,
+        // and leave the checkpoint's pending set instead of being carried in it.
+        self.interactions.run_pending_tasks();
         let permit = self
             .event_tx
             .reserve()
@@ -2182,66 +2136,15 @@ impl BanditDB {
             .unwrap_or(50);
 
         let parquet_rows = tokio::task::spawn_blocking(move || {
-            // Scan the WAL for matched Predicted+Rewarded pairs.
-            #[allow(clippy::type_complexity)] // matched-pair accumulator; a named type alias would not aid clarity here
-            let mut predicted: HashMap<String, (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64)> = HashMap::new();
-            let mut rewarded:  HashMap<String, (f64, u64)> = HashMap::new();
-
-            for_each_wal_event(&wal_path_clone, 0, wal_offset, wal_fmt, |event| {
-                match event {
-                    DbEvent::Predicted { interaction_id, campaign_id, arm_id, context, timestamp_secs, arm_propensities, .. } => {
-                        predicted.insert(interaction_id, (campaign_id, arm_id, context, arm_propensities, timestamp_secs));
-                    }
-                    DbEvent::Rewarded { interaction_id, reward, timestamp_secs, unlogged_prediction } => {
-                        if let Some(p) = unlogged_prediction {
-                            predicted.entry(interaction_id.clone()).or_insert((
-                                p.campaign_id, p.arm_id, p.context.to_vec(), p.arm_propensities, p.timestamp_secs,
-                            ));
-                        }
-                        rewarded.insert(interaction_id, (reward, timestamp_secs));
-                    }
-                    _ => {}
-                }
-            });
-
-            let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
-
-            for (iid, (reward, rewarded_at)) in &rewarded {
-                if let Some((campaign_id, arm_id, context, arm_propensities, predicted_at)) = predicted.get(iid) {
-                    let propensity = arm_propensities.as_ref().and_then(|m| m.get(arm_id.as_str())).copied();
-                    by_campaign.entry(campaign_id.clone()).or_default().push(CompletedInteraction {
-                        interaction_id: iid.clone(),
-                        arm_id:         arm_id.clone(),
-                        context:        context.clone(),
-                        reward:         *reward,
-                        predicted_at:   *predicted_at,
-                        rewarded_at:    *rewarded_at,
-                        propensity,
-                    });
-                }
-            }
-
-            let mut rows = 0usize;
-            for (campaign_id, interactions) in by_campaign {
-                prune_export_shards(&export_dir_clone, &campaign_id, export_retain);
-                // One shard per context length. A campaign id that was deleted and
-                // recreated with another feature_dim leaves both lengths in the same
-                // WAL segment, and a Parquet shard has one fixed set of feature columns.
-                let mut by_dim: std::collections::BTreeMap<usize, Vec<CompletedInteraction>> =
-                    std::collections::BTreeMap::new();
-                for interaction in interactions {
-                    by_dim.entry(interaction.context.len()).or_default().push(interaction);
-                }
-                for (feature_dim, group) in &by_dim {
-                    match write_campaign_parquet(&export_dir_clone, &campaign_id, group, *feature_dim) {
-                        Err(e) => tracing::error!(campaign = %campaign_id, feature_dim, error = %e, "checkpoint: Parquet write failed"),
-                        Ok(())  => rows += group.len(),
-                    }
-                }
-            }
-
-            rows
-        }).await;
+            crate::export::export_wal_segment(
+                &wal_path_clone,
+                wal_fmt,
+                wal_offset,
+                &export_dir_clone,
+                export_retain,
+            )
+        })
+        .await;
         // The export is an analytics side-product; recovery never reads it. A failure
         // here must not stop the checkpoint, or the WAL would never rotate again and
         // every later checkpoint would re-read the same records and fail the same way.
@@ -2456,6 +2359,7 @@ impl BanditDB {
                 timestamp_secs,
                 arm_propensities,
                 is_reemit,
+                budget,
                 input_ref,
             } => {
                 // WAL replay path: insert into the interactions cache so delayed rewards
@@ -2469,6 +2373,7 @@ impl BanditDB {
                         arm_propensities: arm_propensities.clone(),
                         timestamp_secs: *timestamp_secs,
                         input_ref: input_ref.clone(),
+                        budget: budget.clone(),
                         logged: true,
                         wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
                     },
@@ -2668,6 +2573,12 @@ impl BanditDB {
                 if let Some(campaign) = self.campaigns.read().get(campaign_id.as_str()) {
                     campaign.record_consumption(arm_id);
                 }
+            }
+            DbEvent::PredictionExpired { interaction_id, .. } => {
+                // A checkpoint taken just before the expiry can still hold the
+                // prediction as pending; restoring it would let it expire, and be
+                // exported, a second time.
+                self.interactions.invalidate(interaction_id.as_str());
             }
             DbEvent::Unknown => {
                 tracing::warn!("apply_event_to_memory: ignoring unknown event variant");
@@ -3376,7 +3287,7 @@ impl BanditDB {
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
-        let (best_arm, arm_propensities, has_pacing) = {
+        let (best_arm, arm_propensities, has_pacing, budget) = {
             let campaigns = self.campaigns.read();
             let campaign = campaigns
                 .get(campaign_id)
@@ -3459,6 +3370,20 @@ impl BanditDB {
                 )));
             }
 
+            // Budget state as the scoring below sees it: λ is read here, just before
+            // the prices are subtracted, so the log records the price that shaped
+            // the decision rather than the one after its own dual update.
+            let budget_before: Vec<(String, f64, f64)> = campaign
+                .pacing
+                .as_ref()
+                .map(|p| {
+                    p.resources
+                        .iter()
+                        .map(|r| (r.name.clone(), r.lambda(), r.remaining_budget()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let is_ts = matches!(
                 active_algo,
                 Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_)
@@ -3529,6 +3454,21 @@ impl BanditDB {
                 arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
             }
 
+            let budget: Vec<BudgetSnapshot> = match &campaign.pacing {
+                Some(p) => p
+                    .resources
+                    .iter()
+                    .zip(budget_before)
+                    .map(|(r, (resource, lambda, remaining))| BudgetSnapshot {
+                        cost: r.cost(&best_arm),
+                        resource,
+                        lambda,
+                        remaining,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+
             let arm_propensities = if is_ts {
                 // Monte Carlo estimate of each arm's probability of being the
                 // sampled maximum. The draws are independent of the decision draw
@@ -3545,7 +3485,7 @@ impl BanditDB {
             };
 
             let has_pacing = campaign.pacing.is_some();
-            (best_arm, arm_propensities, has_pacing)
+            (best_arm, arm_propensities, has_pacing, budget)
             // All guards (campaigns, arms_guard) are dropped here.
         };
 
@@ -3559,6 +3499,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: arm_propensities.clone(),
             is_reemit: false,
+            budget: budget.clone(),
             input_ref: input_ref.clone(),
         });
 
@@ -3618,6 +3559,7 @@ impl BanditDB {
                 arm_propensities,
                 timestamp_secs: now,
                 input_ref,
+                budget,
                 logged,
                 // Read under the gate taken at the top, so it names the side of
                 // the barrier the Predicted record above landed on.
@@ -3680,6 +3622,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: None, // Historical data doesn't usually have propensities
             is_reemit: false,
+            budget: Vec::new(),
             input_ref,
         });
         // Both records go in under one hold of the gate, so a checkpoint barrier
@@ -4550,95 +4493,6 @@ fn evaluate_tournament(
     TournamentOutcome::Hold
 }
 
-/// Append completed interactions to a per-campaign Parquet file shard.
-///
-/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 … feature_N
-///
-/// Each checkpoint writes a new shard: `{campaign}_{timestamp_us}.parquet`, in
-/// `exports/{tenant}/` for a tenant campaign (see `export_location`).
-/// The timestamp is in microseconds to prevent collisions when two checkpoints
-/// happen within the same second. This ensures O(1) write performance regardless
-/// of campaign history size.
-pub fn write_campaign_parquet(
-    export_dir: &str,
-    campaign_id: &str,
-    interactions: &[CompletedInteraction],
-    feature_dim: usize,
-) -> Result<(), String> {
-    if interactions.is_empty() {
-        return Ok(());
-    }
-
-    let mut timestamp_us = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64;
-
-    let mut df = interactions_to_df(interactions, feature_dim)?;
-
-    // `export_location` refuses ids that are not plain names, so a WAL-sourced id
-    // that bypassed HTTP validation cannot write outside its directory.
-    let (dir, stem) = export_location(export_dir, campaign_id)?;
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // Two shards for one campaign can be written within the same microsecond
-    // (one per context length); never overwrite an existing shard.
-    while dir.join(format!("{stem}_{timestamp_us}.parquet")).exists() {
-        timestamp_us += 1;
-    }
-    let path = dir.join(format!("{stem}_{timestamp_us}.parquet"));
-    let tmp = dir.join(format!("{stem}_{timestamp_us}.parquet.tmp"));
-
-    let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
-    ParquetWriter::new(&mut file)
-        .with_compression(ParquetCompression::Snappy)
-        .finish(&mut df)
-        .map_err(|e| e.to_string())?;
-    fs::rename(tmp, path).map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-fn interactions_to_df(
-    interactions: &[CompletedInteraction],
-    feature_dim: usize,
-) -> Result<DataFrame, String> {
-    let interaction_ids: Vec<&str> = interactions
-        .iter()
-        .map(|r| r.interaction_id.as_str())
-        .collect();
-    let arm_ids: Vec<&str> = interactions.iter().map(|r| r.arm_id.as_str()).collect();
-    let rewards: Vec<f64> = interactions.iter().map(|r| r.reward).collect();
-    let predicted_ats: Vec<i64> = interactions.iter().map(|r| r.predicted_at as i64).collect();
-    let rewarded_ats: Vec<i64> = interactions.iter().map(|r| r.rewarded_at as i64).collect();
-    let propensities: Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
-
-    // Indexing below assumes every row has `feature_dim` features.
-    if let Some(bad) = interactions.iter().find(|r| r.context.len() != feature_dim) {
-        return Err(format!(
-            "interaction '{}' has {} features, expected {feature_dim}",
-            bad.interaction_id,
-            bad.context.len()
-        ));
-    }
-
-    let mut series: Vec<Series> = vec![
-        Series::new("interaction_id", interaction_ids),
-        Series::new("arm_id", arm_ids),
-        Series::new("reward", rewards),
-        Series::new("predicted_at", predicted_ats),
-        Series::new("rewarded_at", rewarded_ats),
-        Series::new("propensity", propensities),
-    ];
-
-    for f in 0..feature_dim {
-        let col: Vec<f64> = interactions.iter().map(|r| r.context[f]).collect();
-        let name = format!("feature_{}", f);
-        series.push(Series::new(name.as_str(), col));
-    }
-
-    DataFrame::new(series).map_err(|e| e.to_string())
-}
-
 /// The serialised checkpoint with its `wal_offset` set to 0.
 ///
 /// `wal_offset` is `CheckpointData`'s first field, so its value sits in a known
@@ -4708,6 +4562,11 @@ fn pending_entry_bytes(key: &str, record: &InteractionRecord) -> u64 {
         + record.context.len() as u64 * 8
         + propensities
         + record.input_ref.as_ref().map_or(0, InputRef::heap_bytes)
+        + record
+            .budget
+            .iter()
+            .map(|b| b.resource.len() as u64 + 48)
+            .sum::<u64>()
 }
 
 /// Memory this process may use: its cgroup limit if it has one, else physical

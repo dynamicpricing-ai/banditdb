@@ -1,6 +1,6 @@
 [package]
 name = "banditdb"
-version = "2.3.3"
+version = "2.4.0"
 edition = "2021"
 description = "An ultra-fast Contextual Bandit Database"
 license = "Apache-2.0"

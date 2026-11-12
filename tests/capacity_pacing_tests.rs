@@ -850,6 +850,7 @@ async fn test_pacing_without_pacing_consumed_events_loads_safely() {
                 timestamp_secs: 1_700_000_000 + i as u64,
                 arm_propensities: None,
                 is_reemit: false,
+                budget: Vec::new(),
                 input_ref: None,
             };
             writeln!(file, "{}", serde_json::to_string(&predicted).unwrap()).unwrap();
