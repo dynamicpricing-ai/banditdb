@@ -6,15 +6,16 @@
 //! analytics and training record of what was decided and what came of it.
 
 use crate::engine::{for_each_wal_event, WalFormat};
-use crate::state::{CompletedInteraction, DbEvent};
+use crate::state::{CompletedInteraction, DbEvent, ExpiryCause, InteractionRecord, RewardStatus};
 use polars::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Export the completed interactions in WAL bytes `[0, wal_offset)` and prune old
-/// shards. Returns the number of rows written. Blocking: run it off the async
+/// Export the decisions in WAL bytes `[0, wal_offset)` and prune old shards: every
+/// rewarded decision, plus the unrewarded ones when `BANDITDB_EXPORT_UNREWARDED=1`
+/// recorded their expiry. Returns the number of rows written. Blocking: run it off the async
 /// runtime.
 pub(crate) fn export_wal_segment(
     wal_path: &str,
@@ -23,85 +24,99 @@ pub(crate) fn export_wal_segment(
     export_dir: &str,
     export_retain: usize,
 ) -> usize {
-    // Scan the WAL for matched Predicted+Rewarded pairs.
-    #[allow(clippy::type_complexity)]
-    // matched-pair accumulator; a named type alias would not aid clarity here
-    let mut predicted: HashMap<
-        String,
-        (String, String, Vec<f64>, Option<HashMap<String, f64>>, u64),
-    > = HashMap::new();
+    // One pass over the segment. A decision's prediction comes from its
+    // `Predicted` record, or from the copy carried by its reward or expiry record
+    // when the original was dropped or rotated away with an earlier segment.
+    let mut predicted: HashMap<String, InteractionRecord> = HashMap::new();
     let mut rewarded: HashMap<String, (f64, u64)> = HashMap::new();
+    let mut expired: HashMap<String, ExpiryCause> = HashMap::new();
 
-    for_each_wal_event(
-        wal_path,
-        0,
-        wal_offset,
-        wal_fmt,
-        |event| match event {
-            DbEvent::Predicted {
+    for_each_wal_event(wal_path, 0, wal_offset, wal_fmt, |event| match event {
+        DbEvent::Predicted {
+            interaction_id,
+            campaign_id,
+            arm_id,
+            context,
+            timestamp_secs,
+            arm_propensities,
+            budget,
+            input_ref,
+            ..
+        } => {
+            predicted.insert(
                 interaction_id,
-                campaign_id,
-                arm_id,
-                context,
-                timestamp_secs,
-                arm_propensities,
-                ..
-            } => {
-                predicted.insert(
-                    interaction_id,
-                    (
-                        campaign_id,
-                        arm_id,
-                        context,
-                        arm_propensities,
-                        timestamp_secs,
-                    ),
-                );
-            }
-            DbEvent::Rewarded {
-                interaction_id,
-                reward,
-                timestamp_secs,
-                unlogged_prediction,
-            } => {
-                if let Some(p) = unlogged_prediction {
-                    predicted.entry(interaction_id.clone()).or_insert((
-                        p.campaign_id,
-                        p.arm_id,
-                        p.context.to_vec(),
-                        p.arm_propensities,
-                        p.timestamp_secs,
-                    ));
-                }
-                rewarded.insert(interaction_id, (reward, timestamp_secs));
-            }
-            _ => {}
-        },
-    );
-
-    let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
-
-    for (iid, (reward, rewarded_at)) in &rewarded {
-        if let Some((campaign_id, arm_id, context, arm_propensities, predicted_at)) =
-            predicted.get(iid)
-        {
-            let propensity = arm_propensities
-                .as_ref()
-                .and_then(|m| m.get(arm_id.as_str()))
-                .copied();
-            by_campaign
-                .entry(campaign_id.clone())
-                .or_default()
-                .push(CompletedInteraction {
-                    interaction_id: iid.clone(),
-                    arm_id: arm_id.clone(),
-                    context: context.clone(),
-                    reward: *reward,
-                    predicted_at: *predicted_at,
-                    rewarded_at: *rewarded_at,
-                    propensity,
-                });
+                InteractionRecord {
+                    campaign_id,
+                    arm_id,
+                    context: context.into(),
+                    arm_propensities,
+                    timestamp_secs,
+                    input_ref,
+                    budget,
+                    logged: true,
+                    wal_epoch: 0,
+                },
+            );
         }
+        DbEvent::Rewarded {
+            interaction_id,
+            reward,
+            timestamp_secs,
+            unlogged_prediction,
+        } => {
+            if let Some(p) = unlogged_prediction {
+                predicted.entry(interaction_id.clone()).or_insert(p);
+            }
+            rewarded.insert(interaction_id, (reward, timestamp_secs));
+        }
+        DbEvent::PredictionExpired {
+            interaction_id,
+            cause,
+            prediction,
+            ..
+        } => {
+            predicted
+                .entry(interaction_id.clone())
+                .or_insert(prediction);
+            expired.insert(interaction_id, cause);
+        }
+        _ => {}
+    });
+
+    // A reward wins over an expiry for the same decision. They cannot both be
+    // genuine; the only way to see both is a reward replayed after a restart.
+    let outcomes = rewarded
+        .into_iter()
+        .map(|(iid, (reward, at))| (iid, Some(reward), Some(at), RewardStatus::Rewarded))
+        .chain(
+            expired
+                .into_iter()
+                .map(|(iid, cause)| (iid, None, None, cause.into())),
+        );
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut by_campaign: HashMap<String, Vec<CompletedInteraction>> = HashMap::new();
+    for (iid, reward, rewarded_at, reward_status) in outcomes {
+        if !seen.insert(iid.clone()) {
+            continue;
+        }
+        let Some(p) = predicted.remove(&iid) else {
+            continue;
+        };
+        by_campaign
+            .entry(p.campaign_id.clone())
+            .or_default()
+            .push(CompletedInteraction {
+                interaction_id: iid,
+                arm_id: p.arm_id,
+                context: p.context.to_vec(),
+                reward,
+                reward_status,
+                predicted_at: p.timestamp_secs,
+                rewarded_at,
+                arm_propensities: p.arm_propensities,
+                input_ref: p.input_ref,
+                budget: p.budget,
+            });
     }
 
     let mut rows = 0usize;
@@ -110,8 +125,7 @@ pub(crate) fn export_wal_segment(
         // One shard per context length. A campaign id that was deleted and
         // recreated with another feature_dim leaves both lengths in the same
         // WAL segment, and a Parquet shard has one fixed set of feature columns.
-        let mut by_dim: std::collections::BTreeMap<usize, Vec<CompletedInteraction>> =
-            std::collections::BTreeMap::new();
+        let mut by_dim: BTreeMap<usize, Vec<CompletedInteraction>> = BTreeMap::new();
         for interaction in interactions {
             by_dim
                 .entry(interaction.context.len())
@@ -224,7 +238,10 @@ pub fn prune_export_shards(export_dir: &str, campaign_id: &str, retain: usize) {
 
 /// Append completed interactions to a per-campaign Parquet file shard.
 ///
-/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | feature_0 … feature_N
+/// Schema: interaction_id | arm_id | reward | predicted_at | rewarded_at |
+/// propensity | reward_status | arm_propensities | input_uri | input_sha256 |
+/// input_media_type | cost__<r> | lambda__<r> | remaining__<r> (per pacing
+/// resource) | feature_0 … feature_N
 ///
 /// Each checkpoint writes a new shard: `{campaign}_{timestamp_us}.parquet`, in
 /// `exports/{tenant}/` for a tenant campaign (see `export_location`).
@@ -274,16 +291,6 @@ fn interactions_to_df(
     interactions: &[CompletedInteraction],
     feature_dim: usize,
 ) -> Result<DataFrame, String> {
-    let interaction_ids: Vec<&str> = interactions
-        .iter()
-        .map(|r| r.interaction_id.as_str())
-        .collect();
-    let arm_ids: Vec<&str> = interactions.iter().map(|r| r.arm_id.as_str()).collect();
-    let rewards: Vec<f64> = interactions.iter().map(|r| r.reward).collect();
-    let predicted_ats: Vec<i64> = interactions.iter().map(|r| r.predicted_at as i64).collect();
-    let rewarded_ats: Vec<i64> = interactions.iter().map(|r| r.rewarded_at as i64).collect();
-    let propensities: Vec<Option<f64>> = interactions.iter().map(|r| r.propensity).collect();
-
     // Indexing below assumes every row has `feature_dim` features.
     if let Some(bad) = interactions.iter().find(|r| r.context.len() != feature_dim) {
         return Err(format!(
@@ -292,15 +299,104 @@ fn interactions_to_df(
             bad.context.len()
         ));
     }
+    let col_str = |f: &dyn Fn(&CompletedInteraction) -> Option<String>| -> Vec<Option<String>> {
+        interactions.iter().map(f).collect()
+    };
 
     let mut series: Vec<Series> = vec![
-        Series::new("interaction_id", interaction_ids),
-        Series::new("arm_id", arm_ids),
-        Series::new("reward", rewards),
-        Series::new("predicted_at", predicted_ats),
-        Series::new("rewarded_at", rewarded_ats),
-        Series::new("propensity", propensities),
+        Series::new(
+            "interaction_id",
+            interactions
+                .iter()
+                .map(|r| r.interaction_id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "arm_id",
+            interactions
+                .iter()
+                .map(|r| r.arm_id.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "reward",
+            interactions.iter().map(|r| r.reward).collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "predicted_at",
+            interactions
+                .iter()
+                .map(|r| r.predicted_at as i64)
+                .collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "rewarded_at",
+            interactions
+                .iter()
+                .map(|r| r.rewarded_at.map(|t| t as i64))
+                .collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "propensity",
+            interactions
+                .iter()
+                .map(|r| r.propensity())
+                .collect::<Vec<_>>(),
+        ),
+        Series::new(
+            "reward_status",
+            interactions
+                .iter()
+                .map(|r| r.reward_status.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        // JSON with sorted keys, so identical maps produce identical strings.
+        // A column per arm would change shape whenever an arm is added.
+        Series::new(
+            "arm_propensities",
+            col_str(&|r| {
+                r.arm_propensities.as_ref().map(|m| {
+                    serde_json::to_string(&m.iter().collect::<BTreeMap<_, _>>()).unwrap_or_default()
+                })
+            }),
+        ),
+        Series::new(
+            "input_uri",
+            col_str(&|r| r.input_ref.as_ref().map(|i| i.uri.clone())),
+        ),
+        Series::new(
+            "input_sha256",
+            col_str(&|r| r.input_ref.as_ref().and_then(|i| i.sha256.clone())),
+        ),
+        Series::new(
+            "input_media_type",
+            col_str(&|r| r.input_ref.as_ref().and_then(|i| i.media_type.clone())),
+        ),
     ];
+
+    // Three columns per pacing resource. Resources are fixed when a campaign is
+    // created, so the set is stable across a campaign's shards.
+    let resources: BTreeSet<&str> = interactions
+        .iter()
+        .flat_map(|r| r.budget.iter().map(|b| b.resource.as_str()))
+        .collect();
+    for resource in resources {
+        let pick = |f: fn(&crate::state::BudgetSnapshot) -> f64| -> Vec<Option<f64>> {
+            interactions
+                .iter()
+                .map(|r| r.budget.iter().find(|b| b.resource == resource).map(f))
+                .collect()
+        };
+        series.push(Series::new(&format!("cost__{resource}"), pick(|b| b.cost)));
+        series.push(Series::new(
+            &format!("lambda__{resource}"),
+            pick(|b| b.lambda),
+        ));
+        series.push(Series::new(
+            &format!("remaining__{resource}"),
+            pick(|b| b.remaining),
+        ));
+    }
 
     for f in 0..feature_dim {
         let col: Vec<f64> = interactions.iter().map(|r| r.context[f]).collect();

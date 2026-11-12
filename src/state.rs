@@ -565,6 +565,10 @@ pub struct InteractionRecord {
     /// WAL via the reward's `unlogged_prediction`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_ref: Option<InputRef>,
+    /// Budget state behind the decision, one entry per pacing resource. Kept
+    /// here for the same reason as `input_ref`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budget: Vec<BudgetSnapshot>,
     /// False when this prediction's WAL record was dropped under load, so replay
     /// cannot find it and its reward must carry it instead. Not persisted: a
     /// record restored from a checkpoint is recoverable from that checkpoint.
@@ -587,19 +591,84 @@ fn wal_epoch_default() -> u64 {
 }
 
 /// One completed prediction→reward pair, ready to write as a flat Parquet row.
-#[derive(Debug)]
+/// Budget state behind one decision, for one pacing resource.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BudgetSnapshot {
+    pub resource: String,
+    /// Cost charged for the chosen arm.
+    pub cost: f64,
+    /// Shadow price (λ) the scoring subtracted, per unit of cost.
+    pub lambda: f64,
+    /// Budget left before this decision. Approximate when predictions run
+    /// concurrently: another request can be charged between the read and this one.
+    pub remaining: f64,
+}
+
+/// Why a pending prediction left the cache without a reward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryCause {
+    /// Older than `BANDITDB_REWARD_TTL_SECS`.
+    Expired,
+    /// Pushed out because the pending cache was full.
+    Evicted,
+}
+
+/// What became of an exported decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RewardStatus {
+    Rewarded,
+    Expired,
+    Evicted,
+}
+
+impl RewardStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RewardStatus::Rewarded => "rewarded",
+            RewardStatus::Expired => "expired",
+            RewardStatus::Evicted => "evicted",
+        }
+    }
+}
+
+impl From<ExpiryCause> for RewardStatus {
+    fn from(cause: ExpiryCause) -> Self {
+        match cause {
+            ExpiryCause::Expired => RewardStatus::Expired,
+            ExpiryCause::Evicted => RewardStatus::Evicted,
+        }
+    }
+}
+
+/// One decision, ready to write as a flat Parquet row.
+#[derive(Debug, Clone)]
 pub struct CompletedInteraction {
     pub interaction_id: String,
     pub arm_id: String,
     pub context: Vec<f64>,
-    pub reward: f64,
+    /// `None` when the decision left the pending cache unrewarded.
+    pub reward: Option<f64>,
+    pub reward_status: RewardStatus,
     pub predicted_at: u64,
-    pub rewarded_at: u64,
-    /// Propensity of the chosen arm under the logging policy.
+    pub rewarded_at: Option<u64>,
+    /// Probability of every candidate arm under the logging policy.
     /// LinUCB: softmax-normalised UCB score.
     /// Thompson Sampling: Monte Carlo win frequency over independent posterior draws
     /// (1,024 by default; `BANDITDB_TS_PROPENSITY_SAMPLES`).
-    pub propensity: Option<f64>,
+    pub arm_propensities: Option<HashMap<String, f64>>,
+    pub input_ref: Option<InputRef>,
+    pub budget: Vec<BudgetSnapshot>,
+}
+
+impl CompletedInteraction {
+    /// Propensity of the chosen arm under the logging policy.
+    pub fn propensity(&self) -> Option<f64> {
+        self.arm_propensities
+            .as_ref()
+            .and_then(|m| m.get(&self.arm_id))
+            .copied()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,6 +1370,10 @@ pub enum DbEvent {
         /// records (written before this field) deserialise to false.
         #[serde(default)]
         is_reemit: bool,
+        /// Budget state behind the decision. Absent for unbudgeted campaigns and
+        /// in WAL records written before it was logged.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        budget: Vec<BudgetSnapshot>,
         /// What the decision was made from. Absent in older WALs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_ref: Option<InputRef>,
@@ -1389,6 +1462,20 @@ pub enum DbEvent {
         arm_id: String,
         #[serde(default)]
         timestamp_secs: u64,
+    },
+    /// A pending prediction left the cache without a reward.
+    ///
+    /// Written only with `BANDITDB_EXPORT_UNREWARDED=1`. Carries the whole
+    /// prediction: its own `Predicted` record may already have been rotated away
+    /// with an earlier WAL segment, and the export needs it to emit the decision
+    /// with `reward` null. Replay drops the pending entry if a checkpoint still
+    /// had it. Best-effort: lost if the WAL channel is full.
+    PredictionExpired {
+        interaction_id: String,
+        cause: ExpiryCause,
+        #[serde(default)]
+        timestamp_secs: u64,
+        prediction: InteractionRecord,
     },
     /// Unknown / future variant for forward-compatibility during rollback
     #[serde(other)]

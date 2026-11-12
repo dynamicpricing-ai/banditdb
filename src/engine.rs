@@ -1,10 +1,10 @@
 #[cfg(feature = "neural")]
 use crate::neural::{NeuralLinUCBState, NeuralWeights};
 use crate::state::{
-    Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, CampaignCheckpoint,
-    CampaignDiagnosticsData, CampaignReport, CheckpointData, DbEvent, EngineError, EntropyStatus,
-    EntropyTrend, InputRef, InteractionRecord, PacingCheckpoint, PacingConfig, PacingReport,
-    PacingState, WarmStart, MAX_WARM_START_STRENGTH,
+    Algorithm, ArmDiagnostics, ArmPrior, ArmReportStats, ArmState, ArmStatus, BudgetSnapshot,
+    CampaignCheckpoint, CampaignDiagnosticsData, CampaignReport, CheckpointData, DbEvent,
+    EngineError, EntropyStatus, EntropyTrend, ExpiryCause, InputRef, InteractionRecord,
+    PacingCheckpoint, PacingConfig, PacingReport, PacingState, WarmStart, MAX_WARM_START_STRENGTH,
 };
 #[cfg(feature = "neural")]
 use crate::state::{ProgressiveConfig, TournamentOutcome};
@@ -963,6 +963,8 @@ pub struct BanditDB {
     /// discarded it (or is about to) and its reward must carry the prediction.
     /// Bumped and read only under `write_gate`.
     wal_epoch: AtomicU64,
+    /// True while `recover` replays the WAL. See the cache's eviction listener.
+    replaying: Arc<AtomicBool>,
 }
 
 impl BanditDB {
@@ -1468,6 +1470,15 @@ impl BanditDB {
             .unwrap_or(100_000);
         let interactions_evicted = Arc::new(AtomicU64::new(0));
         let evicted = Arc::clone(&interactions_evicted);
+        // Off by default: these rows have `reward` null, which changes the result
+        // for anyone already averaging `reward` over the export.
+        let export_unrewarded = std::env::var("BANDITDB_EXPORT_UNREWARDED").as_deref() == Ok("1");
+        let expiry_tx = tx.clone();
+        // Suppresses expiry records while recovery replays the WAL: evictions
+        // then are an artefact of replay, and writing them would duplicate or
+        // invent export rows.
+        let replaying = Arc::new(AtomicBool::new(true));
+        let listener_replaying = Arc::clone(&replaying);
 
         if wal_format == WalFormat::Msgpack {
             tracing::info!("WAL format: MessagePack (binary, length-framed)");
@@ -1516,13 +1527,38 @@ impl BanditDB {
                     let floor = max_pending_bytes / max_pending as u64;
                     pending_entry_bytes(k, v).max(floor).min(u32::MAX as u64) as u32
                 })
-                .eviction_listener(move |_k, _v, cause| {
+                .eviction_listener(move |k, v, cause| {
+                    use moka::notification::RemovalCause;
                     // Only capacity pressure is a problem. Expiry is
                     // the TTL doing its job, and explicit invalidation
                     // happens on every matched reward.
-                    if cause == moka::notification::RemovalCause::Size {
+                    if cause == RemovalCause::Size {
                         evicted.fetch_add(1, Ordering::Relaxed);
                     }
+                    let cause = match cause {
+                        RemovalCause::Expired => ExpiryCause::Expired,
+                        RemovalCause::Size => ExpiryCause::Evicted,
+                        // Matched by a reward, or replaced: not unrewarded.
+                        _ => return,
+                    };
+                    if !export_unrewarded || listener_replaying.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Enqueue only. This runs inside whatever cache call
+                    // triggered housekeeping — a prediction, a reward, or a
+                    // checkpoint holding the write gate — so it must not take
+                    // the gate or block. A full channel loses the record, which
+                    // costs one export row, never model state.
+                    let _ = expiry_tx.try_send(WalMessage::Event {
+                        event: Arc::new(DbEvent::PredictionExpired {
+                            interaction_id: (*k).clone(),
+                            cause,
+                            timestamp_secs: now_secs(),
+                            prediction: v,
+                        }),
+                        durable: false,
+                        ack: None,
+                    });
                 })
                 .build(),
             event_tx: tx,
@@ -1551,10 +1587,12 @@ impl BanditDB {
             checkpoint_lock: tokio::sync::Mutex::new(()),
             admission: parking_lot::Mutex::new(()),
             wal_epoch: AtomicU64::new(0),
+            replaying,
         };
 
         // 2. Crash Recovery: Load checkpoint then replay WAL tail
         db.recover(wal_path, data_dir);
+        db.replaying.store(false, Ordering::Relaxed);
         db
     }
 
@@ -1962,6 +2000,10 @@ impl BanditDB {
         //
         //    The channel slot is reserved first so the gate is never held across an
         //    await; writers wait only for the clone, not for the WAL writer.
+        // The cache notices TTL expiry lazily, during housekeeping. Run it now so
+        // predictions that have already expired are recorded before the barrier,
+        // and leave the checkpoint's pending set instead of being carried in it.
+        self.interactions.run_pending_tasks();
         let permit = self
             .event_tx
             .reserve()
@@ -2317,6 +2359,7 @@ impl BanditDB {
                 timestamp_secs,
                 arm_propensities,
                 is_reemit,
+                budget,
                 input_ref,
             } => {
                 // WAL replay path: insert into the interactions cache so delayed rewards
@@ -2330,6 +2373,7 @@ impl BanditDB {
                         arm_propensities: arm_propensities.clone(),
                         timestamp_secs: *timestamp_secs,
                         input_ref: input_ref.clone(),
+                        budget: budget.clone(),
                         logged: true,
                         wal_epoch: self.wal_epoch.load(Ordering::SeqCst),
                     },
@@ -2529,6 +2573,12 @@ impl BanditDB {
                 if let Some(campaign) = self.campaigns.read().get(campaign_id.as_str()) {
                     campaign.record_consumption(arm_id);
                 }
+            }
+            DbEvent::PredictionExpired { interaction_id, .. } => {
+                // A checkpoint taken just before the expiry can still hold the
+                // prediction as pending; restoring it would let it expire, and be
+                // exported, a second time.
+                self.interactions.invalidate(interaction_id.as_str());
             }
             DbEvent::Unknown => {
                 tracing::warn!("apply_event_to_memory: ignoring unknown event variant");
@@ -3237,7 +3287,7 @@ impl BanditDB {
         // All scoring happens under read locks. prediction_count is incremented here
         // (inside the lock, before guards drop) to avoid a second lock acquisition in
         // apply_event_to_memory. Guards are dropped before WAL + cache insert.
-        let (best_arm, arm_propensities, has_pacing) = {
+        let (best_arm, arm_propensities, has_pacing, budget) = {
             let campaigns = self.campaigns.read();
             let campaign = campaigns
                 .get(campaign_id)
@@ -3320,6 +3370,20 @@ impl BanditDB {
                 )));
             }
 
+            // Budget state as the scoring below sees it: λ is read here, just before
+            // the prices are subtracted, so the log records the price that shaped
+            // the decision rather than the one after its own dual update.
+            let budget_before: Vec<(String, f64, f64)> = campaign
+                .pacing
+                .as_ref()
+                .map(|p| {
+                    p.resources
+                        .iter()
+                        .map(|r| (r.name.clone(), r.lambda(), r.remaining_budget()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let is_ts = matches!(
                 active_algo,
                 Algorithm::ThompsonSampling | Algorithm::NeuralThompsonSampling(_)
@@ -3390,6 +3454,21 @@ impl BanditDB {
                 arm_state.prediction_count.fetch_add(1, Ordering::Relaxed);
             }
 
+            let budget: Vec<BudgetSnapshot> = match &campaign.pacing {
+                Some(p) => p
+                    .resources
+                    .iter()
+                    .zip(budget_before)
+                    .map(|(r, (resource, lambda, remaining))| BudgetSnapshot {
+                        cost: r.cost(&best_arm),
+                        resource,
+                        lambda,
+                        remaining,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+
             let arm_propensities = if is_ts {
                 // Monte Carlo estimate of each arm's probability of being the
                 // sampled maximum. The draws are independent of the decision draw
@@ -3406,7 +3485,7 @@ impl BanditDB {
             };
 
             let has_pacing = campaign.pacing.is_some();
-            (best_arm, arm_propensities, has_pacing)
+            (best_arm, arm_propensities, has_pacing, budget)
             // All guards (campaigns, arms_guard) are dropped here.
         };
 
@@ -3420,6 +3499,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: arm_propensities.clone(),
             is_reemit: false,
+            budget: budget.clone(),
             input_ref: input_ref.clone(),
         });
 
@@ -3479,6 +3559,7 @@ impl BanditDB {
                 arm_propensities,
                 timestamp_secs: now,
                 input_ref,
+                budget,
                 logged,
                 // Read under the gate taken at the top, so it names the side of
                 // the barrier the Predicted record above landed on.
@@ -3541,6 +3622,7 @@ impl BanditDB {
             timestamp_secs: now,
             arm_propensities: None, // Historical data doesn't usually have propensities
             is_reemit: false,
+            budget: Vec::new(),
             input_ref,
         });
         // Both records go in under one hold of the gate, so a checkpoint barrier
@@ -4480,6 +4562,11 @@ fn pending_entry_bytes(key: &str, record: &InteractionRecord) -> u64 {
         + record.context.len() as u64 * 8
         + propensities
         + record.input_ref.as_ref().map_or(0, InputRef::heap_bytes)
+        + record
+            .budget
+            .iter()
+            .map(|b| b.resource.len() as u64 + 48)
+            .sum::<u64>()
 }
 
 /// Memory this process may use: its cgroup limit if it has one, else physical

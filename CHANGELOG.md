@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+**Every exported decision carries its provenance.** Parquet shards gain:
+
+| Column | Content |
+|---|---|
+| `reward_status` | `rewarded`, `expired` or `evicted` |
+| `arm_propensities` | every candidate arm's probability under the logging policy, as JSON with sorted keys |
+| `input_uri`, `input_sha256`, `input_media_type` | the decision's `input_ref` |
+| `cost__<resource>`, `lambda__<resource>`, `remaining__<resource>` | per pacing resource: cost charged for the chosen arm, the shadow price the scoring used, and the budget left before the decision |
+
+Columns are added before the `feature_*` columns; readers that select by name
+are unaffected. The budget state is captured as the decision is scored, so
+`lambda__` is the price that shaped it; `remaining__` is approximate when
+predictions run concurrently. Provenance travels with a reward that carries its
+prediction, so late rewards keep it.
+
+**Unrewarded decisions (opt-in).** With `BANDITDB_EXPORT_UNREWARDED=1`, a
+prediction that leaves the pending cache without a reward is written to the WAL
+as a `PredictionExpired` record and exported at the next checkpoint with `reward`
+and `rewarded_at` null. Off by default: those rows change the result for anyone
+averaging `reward` over the export. A binary from before this release skips the
+new record on replay.
+
+The Parquet export moved from `src/engine.rs` to `src/export.rs`; its public
+functions are still reachable as `banditdb::engine::*`.
+
 ## v2.3.3 — Corner-case hardening
 
 - **Decay is now D-LinUCB forgetting** (`A' = γA + (1−γ)I`, `b' = γb`). Each

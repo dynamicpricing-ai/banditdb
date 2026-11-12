@@ -535,7 +535,9 @@ HEADERS = {"X-Api-Key": "your-secret-key"}
 # Snapshot models, export Parquet, rotate the WAL
 requests.post("http://localhost:8080/checkpoint", headers=HEADERS)
 
-# Flat schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity | feature_0 …
+# Flat schema: interaction_id | arm_id | reward | predicted_at | rewarded_at | propensity |
+#   reward_status | arm_propensities (JSON) | input_uri | input_sha256 | input_media_type |
+#   cost__&lt;resource&gt; | lambda__&lt;resource&gt; | remaining__&lt;resource&gt; | feature_0 …
 df = pl.read_parquet("/data/exports/sleep.parquet")
 print(df.head())</code></pre>
 
