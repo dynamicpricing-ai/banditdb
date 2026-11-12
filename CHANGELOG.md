@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.4.0 — Decision provenance in exports
 
 **Every exported decision carries its provenance.** Parquet shards gain:
 
