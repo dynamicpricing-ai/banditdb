@@ -5,9 +5,9 @@
 
   [![CI](https://github.com/dynamicpricing-ai/banditdb/actions/workflows/ci.yml/badge.svg)](https://github.com/dynamicpricing-ai/banditdb/actions/workflows/ci.yml)
   [![Rust](https://img.shields.io/badge/Rust-1.93+-orange.svg)](https://www.rust-lang.org)
-  [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org)
+  [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://pypi.org/project/banditdb-python/)
   [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-  [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](#)
+  [![Docker](https://img.shields.io/badge/Docker-Ready-blue)](https://hub.docker.com/r/simeonlukov/banditdb)
 
   <br />
 </div>
@@ -16,594 +16,238 @@
 
 An in-memory decision database that learns from feedback.
 
-BanditDB is a database written in Rust that runs **Contextual Bandit** algorithms — **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB** (Xu et al. 2022), **NeuralThompsonSampling** (Zhang et al. 2021), and a **Progressive Tournament** that autonomously selects the best algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores; rewards trigger microsecond write locks held only for the duration of a matrix update. Full backup and restore via a rotational Write-Ahead Log + Checkpoint. Recovery on restart is automatic.
+BanditDB is a database written in Rust that runs **contextual bandit** algorithms: **LinUCB**, **Linear Thompson Sampling**, **NeuralLinUCB**, **NeuralThompsonSampling**, and a **Progressive Tournament** that selects the better algorithm as your data grows. Predictions are served via concurrent reads across all CPU cores. A reward takes a write lock only for the microseconds of an O(d²) Sherman–Morrison update. Every decision goes to a write-ahead log, and recovery on restart is automatic.
 
-* **Five algorithms in one binary:** LinUCB, Thompson Sampling, NeuralLinUCB, NeuralThompsonSampling, and Progressive Tournament (autonomous algorithm selection via SNIPS-weighted shadow learning).
-* **Two HTTP calls:** `POST /predict` returns which decision to take, `POST /reward` updates the model.
-* **Built-in convergence signal:** `GET /campaign/:id/report` returns 95% CI bounds per arm and a `converged` flag — know exactly when to stop the experiment.
-* Delayed rewards handled via a TTL cache — rewards can arrive hours or days after the prediction.
-* Every interaction is appended to a Write-Ahead Log and exportable to Parquet for offline analysis.
-* RBAC with reader / writer / admin roles; optional multi-tenancy with namespace isolation.
-* Python SDK (with MCP server for AI agents).
-* IPS and Doubly Robust estimators for offline policy evaluation.
+* **Five algorithms in one binary**, chosen with one field at campaign creation.
+* **Two HTTP calls:** `POST /predict` returns which decision to take, `POST /reward` teaches the model what happened.
+* **Delayed rewards:** outcomes can arrive hours or days after the decision.
+* **Budgets:** give arms a cost and BanditDB paces the spend across the window (Lagrangian pacing).
+* **Live catalogues:** add, warm-start, pause and retire arms without disturbing what the others learned.
+* **Know when you're done:** `GET /campaign/:id/report` returns 95% CIs per arm and a `converged` flag. Diagnostics detect a campaign that has silently stopped exploring.
+* **Data science escape hatch:** propensity-logged Parquet exports, and IPS / SNIPS / Doubly Robust off-policy evaluation in the SDK.
+* **Production:** reader / writer / admin keys, multi-tenancy, Prometheus metrics, fsync-durable rewards.
+* **Clients:** Python and TypeScript SDKs, an MCP server for AI agents, or plain HTTP.
+
+**Documentation: [banditdb.com/docs](https://banditdb.com/docs/)**
+
+---
+
+## Get started
+
+### BanditDB Cloud (hosted)
+
+Nothing to install. Sign in to the **[BanditDB Console](https://console.banditdb.com)** with Google, name your organization, and create an API key. Your code then calls `https://api.banditdb.com` with that key.
+
+In the console, the **Playground** lets you sketch a campaign (its choices, the signals that describe each case, what success looks like, an optional budget). It shows the code in curl, Python, TypeScript and MCP as you type. **Make campaign** creates it on your tenant. AI apps connect to `https://mcp.banditdb.com/mcp` and sign in with OAuth.
+
+Limits and prices: [banditdb.com/pricing](https://banditdb.com/pricing/). Details: [Installation → BanditDB Cloud](https://banditdb.com/docs/installation/#cloud).
+
+### Self-host
+
+```bash
+# Binary (Linux needs glibc >= 2.39, i.e. Ubuntu 24.04+; otherwise use Docker or build from source)
+curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh
+banditdb
+
+# Docker
+docker run -d -p 8080:8080 -v banditdb_data:/data simeonlukov/banditdb:latest
+
+# From source (add --features neural for NeuralLinUCB / NeuralThompsonSampling)
+cargo build --release && ./target/release/banditdb
+```
+
+The Windows `.exe` is built without the neural algorithms. Docker Compose, Helm, persistence and every environment variable: [Installation](https://banditdb.com/docs/installation/) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+### SDKs
+
+```bash
+pip install banditdb-python      # Python
+npm install banditdb-js          # TypeScript / JavaScript
+```
+
+---
+
+## Quick start
+
+A complete create → predict → reward → report cycle. Against Cloud, use `https://api.banditdb.com` and your key. Against a local engine with no keys configured, drop the header.
+
+```bash
+export BANDITDB_URL=http://localhost:8080
+export BANDITDB_API_KEY=your-key
+
+# Create (once)
+curl -s -X POST $BANDITDB_URL/campaign -H "X-Api-Key: $BANDITDB_API_KEY" -H "Content-Type: application/json" \
+  -d '{"campaign_id": "sleep",
+       "arms": ["decrease_temperature", "decrease_light", "decrease_noise"],
+       "feature_dim": 5,
+       "metadata": {"features": ["sex", "age_norm", "weight_norm", "activity", "bedtime_norm"]}}'
+
+# Predict: which intervention for this person tonight?
+curl -s -X POST $BANDITDB_URL/predict -H "X-Api-Key: $BANDITDB_API_KEY" -H "Content-Type: application/json" \
+  -d '{"campaign_id": "sleep", "context": [1.0, 0.35, 0.50, 0.60, 0.96]}'
+# {"arm_id":"decrease_temperature","interaction_id":"a1b2c3d4-..."}
+
+# Reward: how well it worked, in [0, 1]
+curl -s -X POST $BANDITDB_URL/reward -H "X-Api-Key: $BANDITDB_API_KEY" -H "Content-Type: application/json" \
+  -d '{"interaction_id": "a1b2c3d4-...", "reward": 0.80}'
+
+# Is it done?
+curl -s $BANDITDB_URL/campaign/sleep/report -H "X-Api-Key: $BANDITDB_API_KEY"
+```
+
+The same in Python:
+
+```python
+from banditdb import Client
+
+db = Client("http://localhost:8080", api_key="your-key")
+db.create_campaign("offers", ["a", "b"], features=["age", "is_mobile"])
+arm, interaction_id = db.predict("offers", {"age": 0.34, "is_mobile": 1.0})
+db.reward(interaction_id, 1.0)
+```
+
+> **Normalise your contexts.** Scale each context vector to unit L2 norm (`normalize_context()` in the SDK, or name your `features` and the SDK does it). The exploration term grows with `‖x‖`. Unnormalised input still converges, only far more slowly, with no error. On UCI shuttle this alone cut cumulative regret from 2,026 to 709. [Why](https://banditdb.com/docs/contexts/#normalise).
 
 ---
 
 ## Algorithms
 
-| Algorithm | When to use |
-|-----------|-------------|
-| `"linucb"` | Default. Linear reward signal, fast convergence, lowest computational cost. |
-| `"thompson_sampling"` | Bayesian exploration. Better empirical performance when rewards are highly stochastic. |
-| `{"neural_lin_ucb": {...}}` | Non-linear reward function. MLP embedding + LinUCB in embedding space. Retrains at checkpoint. Conservative exploration — good when early mistakes are costly. |
-| `{"neural_thompson_sampling": {...}}` | Same MLP embedding as NeuralLinUCB, but Thompson Sampling draws instead of UCB bounds. More diverse early exploration — better long-run convergence at 20K+ interactions. |
-| `{"progressive": {...}}` | Unsure which algorithm fits? BanditDB runs a base and a challenger in parallel and shifts traffic to the winner. |
-
-### NeuralLinUCB
-
-Learns a deep embedding of the context vector, then applies LinUCB in the embedding space. Use when the reward function is non-linear in raw features and early stability is important. The MLP retrains at every `POST /checkpoint` call.
-
-```python
-from banditdb import Client, NeuralLinUCBConfig
-
-db = Client("http://localhost:8080")
-cfg = NeuralLinUCBConfig(
-    context_dim=10,   # must match feature_dim
-    embed_dim=32,     # arm matrix dimension
-    hidden_dim=128,
-    hidden_layers=2,
-    retrain_every=200,
-)
-db.create_campaign("prices", ["10", "15", "20"], feature_dim=10, algorithm=cfg)
-```
-
-### NeuralThompsonSampling
-
-Same MLP architecture and retrain procedure as NeuralLinUCB, but exploration uses Thompson Sampling: at predict time, arm weights are sampled from the posterior `w ~ N(θ, σ²A⁻¹)` instead of computing a UCB bound. This produces natural diversity across concurrent requests — different users in the same segment get different arms, generating richer coverage earlier.
-
-**Choose NeuralThompsonSampling when:**
-- You have large homogeneous segments (many users, same context cluster)
-- Long-run convergence matters more than early-step stability
-- You want to match the [NeuralTS paper (Zhang et al. 2021)](https://arxiv.org/abs/2010.00827) benchmark
-
-```python
-from banditdb import Client, NeuralLinUCBConfig
-
-db = Client("http://localhost:8080")
-cfg = NeuralLinUCBConfig(          # same config struct as NeuralLinUCB
-    context_dim=128,
-    embed_dim=16,
-    hidden_dim=64,
-    hidden_layers=2,
-    retrain_every=100,
-    retrain_steps=200,
-)
-db.create_campaign(
-    "finmedia_churn",
-    ["no_action", "personalized_digest", "premium_trial",
-     "analyst_report_gift", "discount_offer", "account_manager_call"],
-    feature_dim=128,
-    algorithm={"neural_thompson_sampling": cfg},
-)
-```
-
-**NeuralLinUCB vs NeuralThompsonSampling at a glance:**
-
-| | NeuralLinUCB | NeuralThompsonSampling |
-|---|---|---|
-| Exploration | UCB upper bound (deterministic) | Posterior sample (stochastic) |
-| Early regret | Lower | Higher |
-| Convergence at 20K+ | Slower | Faster |
-| Best for | Production safety | Maximum long-run performance |
-| Paper | Li et al. 2010 + neural ext. | Zhang et al. 2021 |
-
-### Progressive Tournament
-
-Runs two algorithms side-by-side in shadow mode. Every reward updates both models. At each checkpoint, both are evaluated with SNIPS: if the challenger wins `required_wins` consecutive rounds by > 10%, one `step_bps` of traffic (default 10%) shifts to the challenger — and vice-versa. Traffic is bounded: 10% floor to 90% ceiling.
-
-The tournament only moves traffic when the challenger is neural, and the base must be `linucb` or `thompson_sampling`. Two linear algorithms learn identical models from the same rewards, so SNIPS always ties and the split stays at 90/10.
-
-```python
-from banditdb import Client, NeuralLinUCBConfig, ProgressiveConfig
-
-db = Client("http://localhost:8080")
-cfg = ProgressiveConfig(
-    base="linucb",
-    challenger=NeuralLinUCBConfig(context_dim=10, embed_dim=32),
-    min_obs=100,
-    required_wins=3,
-    step_bps=1000,   # 10% per confirmed win run
-)
-db.create_campaign("prices", ["10", "15", "20"], feature_dim=10, algorithm=cfg)
-```
-
-Watch the tournament live:
-```bash
-curl http://localhost:8080/campaign/prices/diagnostics
-# → { "challenger_traffic_pct": 30.0, "tournament_win_streak": 2, ... }
-```
-
----
-
-## Installation
-
-BanditDB consists of the **Rust Engine** (~11 MB native binary — also available as a Docker image and Helm chart) and the **Python SDK** (pip).
-
-### 1. Start the Database Engine
-
-**Binary (fastest, no Docker required):**
-```bash
-curl -fsSL https://raw.githubusercontent.com/dynamicpricing-ai/banditdb/main/scripts/install.sh | sh
-banditdb
-curl http://localhost:8080/health   # {"status":"ok"}
-```
-
-> **Requires glibc >= 2.39** (Ubuntu 24.04+ or equivalent). On older distros (e.g. Ubuntu 22.04, glibc 2.35) the binary will fail to run — use Docker or Build from Source below instead.
-
-> **Windows:** the `.exe` excludes the neural algorithms (NeuralLinUCB / NeuralThompsonSampling). Use Linux, macOS, or Docker for neural.
-
-**Docker:**
-```bash
-docker run -d -p 8080:8080 simeonlukov/banditdb:latest
-```
-
-**Build from Source** (bypasses the glibc requirement — builds against your system's own libc):
-```bash
-git clone https://github.com/dynamicpricing-ai/banditdb
-cd banditdb
-cargo build --release                        # standard build
-# cargo build --release --features neural   # with NeuralLinUCB / NeuralThompsonSampling
-./target/release/banditdb
-```
-
-**Production (with persistence and RBAC):**
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  banditdb:
-    image: simeonlukov/banditdb:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - banditdb_data:/data
-    environment:
-      - DATA_DIR=/data
-      # Role-based auth — format: <key>=<role>  or  <key>=<role>:<tenant_id>
-      # Roles: admin (all), writer (predict/reward), reader (GET only)
-      - BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
-      - BANDITDB_REWARD_TTL_SECS=86400
-      # - BANDITDB_CHECKPOINT_INTERVAL=10000   # auto-checkpoint after N rewarded events
-      # - BANDITDB_MAX_WAL_SIZE_MB=128         # auto-checkpoint when WAL exceeds N MB (default 128, 0 disables)
-      # - BANDITDB_WAL_FORMAT=msgpack          # binary WAL (smaller, faster I/O)
-      # - BANDITDB_TENANT_MODE=true            # strict tenant isolation
-      - BANDITDB_REQUIRE_AUTH=true             # refuse to start without API keys
-      # - BANDITDB_CORS_ORIGINS=https://app.example.com   # default: deny all browsers
-      # - BANDITDB_METRICS_PUBLIC=true         # expose /metrics without a key
-      # - BANDITDB_EXPORT_RETAIN_SHARDS=50     # Parquet shards kept per campaign (0 = keep all)
-      # - BANDITDB_MAX_PENDING_INTERACTIONS=100000  # cache ceiling; evictions lose reward matching
-      # - BANDITDB_MAX_CONTEXT_MAGNITUDE=1e6   # reject context values that overflow the update
-      # - BANDITDB_PROVISION_KEY=<secret>      # enables /admin/tenants/* for a control plane
-      # - BANDITDB_MAX_CAMPAIGNS=10000         # instance-wide campaign ceiling
-      # - BANDITDB_MAX_CAMPAIGN_BYTES=0        # per-campaign memory ceiling, 0 = unlimited
-      # --- neural builds only ---
-      # - BANDITDB_RETRAIN_POLL_SECS=2         # background MLP retrain cadence; 0 = checkpoint-only
-      # - BANDITDB_NEURAL_BUFFER_CAP=50000     # replay buffer retention per campaign
-      # - BANDITDB_NEURAL_BATCH_SIZE=4000      # minibatch drawn per retrain call
-volumes:
-  banditdb_data:
-```
-```bash
-docker compose up -d
-```
-
-**Kubernetes (Helm):**
-```bash
-helm install banditdb ./helm/banditdb \
-  --set auth.apiKeys="admin-key=admin,app-key=writer" \
-  --set persistence.size=10Gi \
-  --set ingress.enabled=true \
-  --set ingress.host=banditdb.example.com
-```
-
-The Helm chart at `helm/banditdb/` includes a PersistentVolumeClaim, Secret for API keys, liveness/readiness probes, and a `Recreate` deployment strategy (required for single-writer WAL safety).
-
-### 2. Install the SDK
-
-**Python:**
-```bash
-pip install banditdb-python
-```
-
----
-
-## API Reference
-
-All endpoints accept and return `application/json`. When `BANDITDB_API_KEYS` is set, every request except `/health` and `/metrics` must include `X-Api-Key: <key>`. Use `BANDITDB_API_KEY` (singular) for a single admin key in development.
-
-| Method | Endpoint | Min Role | Description |
-|--------|----------|----------|-------------|
-| `GET` | `/health` | — | Public liveness: `{"status":"ok"\|"degraded", "version", "features"}`. No campaign data — safe for load balancer probes and safe to expose. |
-| `GET` | `/health/detail` | reader | Per-campaign entropy, scoped to the caller's tenant. |
-| `GET` | `/metrics` | reader | Prometheus text-format metrics, scoped to the caller: a tenant key sees only its own campaigns, an operator key sees everything. Authenticated by default; with `BANDITDB_METRICS_PUBLIC=true`, requests without a key get process health only. |
-| `GET` | `/openapi.yaml` | — | OpenAPI 3.1 specification (this API). |
-| `GET` | `/campaigns` | reader | List all campaigns with algorithm, arm count, and metadata. |
-| `GET` | `/campaign/:id` | reader | Full per-arm state: theta vectors, reward counts, campaign-level totals. |
-| `POST` | `/campaign` | admin | Create a campaign. Body: `{campaign_id, arms, feature_dim, alpha?, algorithm?, metadata?}`. |
-| `DELETE` | `/campaign/:id` | admin | Permanently delete a campaign. Irreversible — use `/archive` for soft-delete. |
-| `POST` | `/campaign/:id/archive` | admin | Soft-delete. Frozen campaign preserves all data; recoverable via `/restore`. |
-| `POST` | `/campaign/:id/restore` | admin | Restore an archived campaign to active status. |
-| `POST` | `/campaign/:id/arms` | admin | Add an arm to a live campaign. Body: `{arm_id, group?, warm_start?}`. See [Dynamic arms](#dynamic-arms). |
-| `POST` | `/campaign/:id/arms/:arm_id/status` | admin | Pause, retire, or reactivate an arm. Body: `{status: "active"\|"paused"\|"retired"}`. |
-| `GET` | `/campaign/:id/report` | reader | Convergence report: mean reward per arm with 95% CI, leading arm, `converged` flag. |
-| `GET` | `/campaign/:id/diagnostics` | reader | Operator diagnostics: theta norms, A_inv bounds, tournament traffic %, neural buffer size, **selection entropy with collapse detection**. |
-| `POST` | `/predict` | writer | Select the best arm for a context vector. Returns `{arm_id, interaction_id}`. Accepts optional `eligible_arms` / `exclude_arms` for per-request exclusion, and `input_ref` to record what the decision was made from. |
-| `POST` | `/batch_predict` | writer | Predict for up to 100 campaign/context pairs in one call. Per-item failures inline. |
-| `POST` | `/reward` | writer | Record the outcome. Body: `{interaction_id, reward}`. Reward must be in `[0, 1]`. |
-| `POST` | `/checkpoint` | admin, operator only | Flush WAL, write Parquet shards, run neural retrain + tournament eval, rotate WAL. Process-wide, so tenant keys are refused at any role. |
-| `GET` | `/export` | reader | List per-campaign Parquet files. A tenant key lists `exports/{tenant}/`, its own campaigns only. |
-
-Error responses are always `{"error": "<message>"}` with an appropriate HTTP status code.
-
-### Dynamic Arms
-
-Catalogues change. Arms can be added to a running campaign, and taken out of rotation, without disturbing what the other arms have learned.
-
-**Adding an arm.** A new arm starts cold — θ = 0, everything to learn. `warm_start` instead centres its ridge prior on the mean θ of the arms that already exist:
-
-```bash
-curl -X POST localhost:8080/campaign/catalog/arms \
-  -H "X-Api-Key: $ADMIN_KEY" -H 'Content-Type: application/json' \
-  -d '{"arm_id":"sneaker_42","group":"shoes","warm_start":{"from":"group","strength":1.0}}'
-```
-
-`from` is one of `none` (default), `population` (all active arms), `group` (active arms sharing this arm's `group`), or `arms` (an explicit list, whatever their status — the "replace this creative with a fresh one" case).
-
-The math is the prior that was always there, moved off zero. Ridge regression starts every arm at `A⁻¹ = I`, `b = 0`; a warm start uses `A⁻¹ = I/λ`, `b = λ·μ₀`, so `θ = μ₀`. `strength` (λ) is in pseudo-observations: at 1.0 the arm keeps a cold arm's uncertainty — it is still explored — but starts from a sensible guess instead of from nothing. Raise λ to trust the prior more and explore less. Real rewards outweigh the prior as they arrive.
-
-This is cold-start relief, not a hierarchical model. The prior is resolved once, when the arm is added. Nothing shrinks toward a group mean afterwards.
-
-**Taking an arm out.** Exclusion is soft at every level:
-
-| Level | How | Effect |
-|-------|-----|--------|
-| Per request | `exclude_arms` / `eligible_arms` on `/predict` | Narrows candidates for this call only. No state change. Out of stock for this shopper, already shown to this user, not permitted in this region. |
-| Per arm | `POST /campaign/:id/arms/:arm_id/status` → `paused` | Not selectable anywhere. Reversible; the arm keeps everything it learned. |
-| Per arm | …→ `retired` | Same, meant as permanent. Still restorable — nothing is deleted. |
-
-A paused arm **keeps learning**. Predictions made before the pause are still in flight and their rewards still arrive; dropping them would throw away data the arm already paid for.
-
-Two consequences worth knowing:
-
-- **Propensities follow the filter.** Arms are filtered *before* propensities are computed, so the logged propensity is the probability of the chosen arm under the policy that actually ran. Off-policy evaluation and the Progressive tournament stay valid.
-- **`selection_entropy` and `converged` cover active arms only.** A paused arm's historical traffic would otherwise make a collapsed campaign look healthy. Its history stays visible in `/report` and `/diagnostics`, tagged with its status.
-
-Pausing the last active arm is refused — every prediction would fail. Archive the campaign instead. With `decay_half_life_hours` set, a paused arm's posterior keeps widening while it is out of rotation, so reactivating it gets it explored again rather than trusted on stale confidence.
-
-### Normalise Your Contexts
-
-**Scale every context vector to unit L2 norm before calling `/predict`.** This is the single highest-impact thing you control from the client side.
-
-LinUCB scores an arm as `θ·x + α·√(xᵀA⁻¹x)`. The exploration term scales with `‖x‖`, and the regret analysis assumes `‖x‖ ≤ 1`. Feed unnormalised or heavy-tailed features and rare high-norm rows produce enormous exploration bonuses that dominate arm selection — the model still converges, just far more slowly, with no error or warning to tell you.
-
-Measured on the UCI shuttle benchmark, identical code and identical `alpha`:
-
-| Context scaling | Cumulative regret (T=10,000) |
-|-----------------|------------------------------|
-| Per-column standardisation | 2,026 |
-| **Unit L2 norm** | **709** |
-
-A 2.9× difference from preprocessing alone. Thompson Sampling is affected the same way, since it samples `θ̃ ~ N(θ, α²A⁻¹)` in the same geometry. Min-max scale each feature into `[0, 1]` first when your features have very different ranges, then L2-normalise the row.
-
-```python
-import numpy as np
-context = np.array(raw_features, dtype=float)
-context /= np.linalg.norm(context) or 1.0   # guard the all-zeros row
-```
-
-### Campaign Metadata
-
-`metadata` on `POST /campaign` is a JSON object (≤ 64 KB) stored with the campaign and returned by `GET /campaign/:id` and `GET /campaigns`. The server does not interpret it. The SDKs and tools read these keys:
-
-| Key | Holds |
-|-----|-------|
-| `features` | Name of each context position, in order. The SDKs' `features=[...]` and MCP `create_campaign` write it, so contexts can be passed as dicts. |
-| `context` | How the SDK builds the vector from `features`: `{"bias": true, "normalize": true}` appends a constant 1 and scales to unit length. |
-| `decision_model` | The model that produced the context, when one did: a classifier or an LLM scoring the input. |
-
-`decision_model` records the facts that are the same for every decision, so logged data can be traced to the model version that produced it:
-
-```json
-"metadata": {
-  "features": ["damage_visible", "damage_matches_claim", "customer_distressed", "fraud_signals", "bias"],
-  "decision_model": {
-    "provider": "typesafe",
-    "name": "jev",
-    "version": "claims-v3",
-    "questions": ["damage_visible", "damage_matches_claim", "customer_distressed", "fraud_signals"]
-  }
-}
-```
-
-`provider`, `name` and `version` identify the model. `questions` lists what it was asked, using the same names as the `features` that hold its answers. Bump `version` with each model change. A new version is best started as a new campaign, since the meaning of the context has changed.
-
-### Decision Inputs
-
-`/predict`, `/batch_predict` and `/campaign/:id/interact` accept an optional `input_ref`: a pointer to what the decision was made from. BanditDB stores the pointer in the WAL with the decision and never fetches it.
-
-```json
-"input_ref": {"uri": "postgres://crm/tickets/4412",
-              "sha256": "9f2c…", "media_type": "application/json"}
-```
-
-`uri` is required (≤ 512 bytes, any scheme). `sha256` is the hash of the exact bytes the model received, so a later join can prove the source is unchanged. For multimodal inputs, point to a manifest that lists the parts.
-
-- **Never put credentials in the URI.** `user:password@host` and signed-URL parameters (`X-Amz-Signature`, `sig`, `token`, …) are refused with a 400, because the URI is copied into the WAL and every export.
-- **No personal data in the URI** either, for the same reason. Use opaque IDs.
-- **Rows change.** A database row joined later shows its current state, not what the model saw. Use append-only or versioned rows, a version in the URI (`…/4412?v=17`), or copy inputs to immutable storage.
-
-### Convergence Report
-
-`GET /campaign/:id/report` answers "is this campaign done?":
-
-```json
-{
-  "campaign_id": "prices",
-  "leading_arm": "15",
-  "converged": true,
-  "overall_reward_rate": 0.74,
-  "arms": {
-    "10": { "traffic_share": 0.18, "predictions": 312,  "rewards": 89,  "mean_reward": 0.61, "reward_lower_ci": 0.55, "reward_upper_ci": 0.67 },
-    "15": { "traffic_share": 0.64, "predictions": 1104, "rewards": 408, "mean_reward": 0.79, "reward_lower_ci": 0.76, "reward_upper_ci": 0.82 },
-    "20": { "traffic_share": 0.18, "predictions": 319,  "rewards": 98,  "mean_reward": 0.62, "reward_lower_ci": 0.56, "reward_upper_ci": 0.68 }
-  }
-}
-```
-
-| `converged` | Meaning |
-|-------------|---------|
-| `true` | Leading arm's 95% CI lower bound exceeds every other arm's upper bound — statistically significant. Stop. |
-| `false` | Leading arm is ahead but CIs overlap — keep collecting data. |
-| `null` | Fewer than 30 rewards per arm — insufficient data. |
-
-Cross-validate with `causal_analysis()` (Python SDK): if `arm.traffic_share` matches the causal assignment percentages, the bandit has converged to the correct causal structure.
-
----
-
-### Entropy Alerting
-
-`GET /campaign/:id/diagnostics` includes a live selection entropy signal that detects when a campaign has stopped exploring — silently behaving like a static policy.
-
-```json
-{
-  "selection_entropy": 0.09,
-  "entropy_status": "critical",
-  "entropy_trend": "falling",
-  "converged": false,
-  "likely_cause": "recent_collapse",
-  "suggested_action": "Entropy dropped since last checkpoint. Check reward pipeline for bugs or recent config changes."
-}
-```
-
-| `entropy_status` | Meaning |
-|-----------------|---------|
-| `ok` | Entropy is healthy, or the campaign has statistically converged (Guard 1), or fewer than 500 predictions (Guard 2). |
-| `warning` | Entropy < 0.4 — one arm is absorbing most traffic without a convergence signal. |
-| `critical` | Entropy < 0.2 — near-total collapse. Likely cause and suggested action are always included. |
-
-| `entropy_trend` | Meaning |
-|----------------|---------|
-| `stable` | No significant change since last checkpoint. |
-| `falling` | Dropped > 0.1 since last checkpoint — recent event (bug, deploy, cohort shift). |
-| `recovering` | Recovered > 0.1 since last checkpoint. |
-| `unknown` | No checkpoint has been written yet. |
-
-`GET /health` aggregates entropy across all active campaigns:
-
-```json
-{
-  "status": "degraded",
-  "campaigns": {
-    "prices":  { "entropy": 0.09, "status": "critical" },
-    "banners": { "entropy": 0.71, "status": "ok" }
-  }
-}
-```
-
-HTTP status is `200` for entropy issues (data quality, not service availability) and `503` only when the WAL writer is unavailable.
-
----
-
-## RBAC & Multi-Tenancy
-
-### Role-Based Access Control
-
-Set multiple API keys with roles via `BANDITDB_API_KEYS` (comma-separated `key=role` pairs):
-
-```
-BANDITDB_API_KEYS=admin-key=admin,app-key=writer,dash-key=reader
-```
-
-| Role | Allowed endpoints |
-|------|------------------|
-| `admin` | All operations |
-| `writer` | `POST /predict`, `POST /batch_predict`, `POST /reward` |
-| `reader` | All `GET` endpoints |
-
-### Multi-Tenancy
-
-Append a tenant ID to the key definition: `<key>=<role>:<tenant_id>`:
-
-```
-BANDITDB_API_KEYS=team-a-key=admin:team-a,team-b-key=admin:team-b
-BANDITDB_TENANT_MODE=true   # strict: tenants cannot see each other's campaigns
-```
-
-Campaign IDs are automatically namespaced — `team-a` creating `prices` stores it as `team-a/prices` internally, transparent to the API caller. With `BANDITDB_TENANT_MODE=true`, cross-tenant reads return 404.
-
----
-
-## Live Sandbox
-
-A public sandbox runs at **`https://sandbox.banditdb.com`** with three pre-loaded demo campaigns. It resets nightly at 03:00 UTC.
-
-| Campaign | Arms | Context |
-|----------|------|---------|
-| `sleep` | `decrease_temperature`, `decrease_light`, `decrease_noise` | `[sex, age/100, weight_kg/150, activity_0–1, bedtime_hour/24]` |
-| `prompt_strategy` | `zero_shot`, `chain_of_thought`, `few_shot`, `structured_output` | `[task_complexity, domain, input_length_norm, session_turn_norm, user_expertise]` |
-| `client_intake` | `schedule_consultation`, `send_intake_form`, `refer_to_partner_firm`, `decline` | `[case_value_norm, matter_complexity, org_size_norm, conflict_risk, capacity_norm]` |
-
-```bash
-curl -s https://sandbox.banditdb.com/campaigns -H "X-Api-Key: banditdb-demo"
-
-curl -s -X POST https://sandbox.banditdb.com/predict \
-  -H "Content-Type: application/json" \
-  -H "X-Api-Key: banditdb-demo" \
-  -d '{"campaign_id":"sleep","context":[1.0, 0.35, 0.50, 0.60, 0.96]}'
-```
-
----
-
-## Try It — CURL
-
-A complete predict→reward→report cycle for a **sleep improvement** campaign.
-
-**Create** (run once):
-```bash
-curl -s -X POST http://localhost:8080/campaign \
-  -H "Content-Type: application/json" \
-  -d '{
-    "campaign_id": "sleep",
-    "arms": ["decrease_temperature","decrease_light","decrease_noise"],
-    "feature_dim": 5,
-    "metadata": {
-      "owner": "wellness-team",
-      "features": ["sex","age_norm","weight_norm","activity","bedtime_norm"]
-    }
-  }'
-```
-
-**Predict:**
-```bash
-curl -s -X POST http://localhost:8080/predict \
-  -H "Content-Type: application/json" \
-  -d '{"campaign_id":"sleep","context":[1.0, 0.35, 0.50, 0.60, 0.96]}'
-```
-> `{"arm_id":"decrease_temperature","interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890"}`
-
-**Reward** (sleep quality improved 80%):
-```bash
-curl -s -X POST http://localhost:8080/reward \
-  -H "Content-Type: application/json" \
-  -d '{"interaction_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","reward":0.80}'
-```
-> `"OK"`
-
-**Check convergence:**
-```bash
-curl -s http://localhost:8080/campaign/sleep/report
-```
+| Algorithm | `algorithm` value | When to use | Based on |
+|---|---|---|---|
+| LinUCB | `"linucb"` (default) | Linear reward, fast convergence, lowest cost. | Li et al. 2010 |
+| Linear Thompson Sampling | `"thompson_sampling"` | Bayesian exploration. Concurrent users diversify arm coverage. | Agrawal & Goyal 2013 |
+| NeuralLinUCB | `{"neural_lin_ucb": {…}}` | Non-linear reward. MLP embedding plus LinUCB in embedding space. Conservative early. | Xu et al. 2022 |
+| NeuralThompsonSampling | `{"neural_thompson_sampling": {…}}` | Same embedding, posterior draws instead of UCB. Better long-run convergence. | Zhang et al. 2021 |
+| Progressive | `{"progressive": {…}}` | Unsure. A linear base and a neural challenger run in shadow, and traffic moves to whichever wins repeated SNIPS evaluations. | Swaminathan & Joachims 2015 |
+
+Configs, the tournament rules and when to pick which: [Choosing an Algorithm](https://banditdb.com/docs/algorithms/).
 
 ---
 
 ## Documentation
 
-Full documentation — Quick Start, Algorithm guide, Data Science / OPE, and Recovery — is at:
-
-**[https://banditdb.com/docs.html](https://banditdb.com/docs.html)**
-
-Operating BanditDB:
-
-| Document | Covers |
+| Topic | Where |
 |---|---|
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Every environment variable, every metric, and the alerts worth wiring up |
-| [`docs/HA_RUNBOOK.md`](docs/HA_RUNBOOK.md) | Durability guarantees per event type, failure modes, backup and restore |
-| [`docs/PRODUCTION_STAGE1.md`](docs/PRODUCTION_STAGE1.md) | Measured scale limits, the SLA they support, and known gaps |
-
-### Reward calls are durable
-
-`POST /reward` returns only once the record is fsynced — a 200 means it survives
-power loss. This costs ~3.4 ms per call at concurrency 1. Group commit amortises the
-fsync across concurrent callers (~4,400 rewards/s at concurrency 32), so submit
-rewards in parallel rather than serially if throughput matters.
+| Installation, Cloud & Playground, Run, Quick Start | [banditdb.com/docs](https://banditdb.com/docs/) |
+| Every endpoint | [API Reference](https://banditdb.com/api/) · [`docs/openapi.yaml`](docs/openapi.yaml) (also served at `GET /openapi.yaml`) |
+| Algorithms, NeuralLinUCB, model architecture | [Algorithms](https://banditdb.com/docs/algorithms/) · [NeuralLinUCB](https://banditdb.com/docs/neural-linucb/) · [Model Architecture](https://banditdb.com/docs/model-architecture/) |
+| Budgets and pacing | [Budgets & Costs](https://banditdb.com/docs/budgets/) · [`docs/lagrangian_pacing_mathematics.md`](docs/lagrangian_pacing_mathematics.md) |
+| Adding, warm-starting, pausing arms | [Dynamic Arms](https://banditdb.com/docs/dynamic-arms/) |
+| Context normalisation, metadata, `decision_model`, `input_ref` | [Contexts, Metadata & Inputs](https://banditdb.com/docs/contexts/) |
+| API keys, roles, multi-tenancy | [Access Control & Tenants](https://banditdb.com/docs/access-control/) |
+| Convergence, selection entropy, health, metrics | [Observability & Monitoring](https://banditdb.com/docs/observability/) |
+| Parquet export, off-policy evaluation | [Data Science Escape Hatch](https://banditdb.com/docs/data-science/) |
+| Durability and recovery | [How Recovery Works](https://banditdb.com/docs/recovery/) · [`docs/HA_RUNBOOK.md`](docs/HA_RUNBOOK.md) |
+| Environment variables, metrics, alerts | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) |
+| Measured scale limits and the SLA they support | [`docs/PRODUCTION_STAGE1.md`](docs/PRODUCTION_STAGE1.md) |
+| Errors and status codes | [Errors](https://banditdb.com/docs/errors/) |
+| AI agents (MCP) | [MCP](https://banditdb.com/docs/mcp/) |
+| Worked examples | [`examples/`](examples/) |
 
 ---
 
-## Benchmark
+## Benchmarks
 
-BanditDB is validated against the **MovieLens 100K** dataset using the standard [replay method](https://arxiv.org/abs/1003.5956) (Li et al. 2010) — the same unbiased offline estimator used in the original LinUCB paper.
+| Benchmark | Result |
+|---|---|
+| Yahoo! R6A vs Open Bandit Pipeline | BanditDB-LinUCB **+61.5%** estimated click-through lift over the logging policy (DRos) |
+| MovieLens-100K vs Open Bandit Pipeline | BanditDB-ThompsonSampling **+22.4%** 5-star rate (DRos) |
+| UCI shuttle ([Neural TS paper](https://arxiv.org/abs/2010.00827) setup) | LinUCB cumulative regret **709 vs the published 966.6**, untuned |
+| Throughput, one 4-core node | **~10,000 predictions/s** (p50 ≈ 300 µs), **~4,400 fsync-durable rewards/s** at concurrency 32 |
 
-**Setup:** 92,698 ratings → 6 genre arms. 44-dimensional context with binned demographics, causal user history, feature-crossing, and era preferences. Dynamic Per-User Alpha Decay.
-
-| Metric | Value |
-|--------|-------|
-| Train interactions | 83,428 |
-| Test interactions | 9,270 |
-| Replay match rate | 7.3% |
-| Random baseline avg reward | 0.5606 |
-| BanditDB avg reward | 0.6984 |
-| **Lift over random** | **+24.6%** |
-
-Reproduce the benchmark:
-```bash
-python benchmark/movielens/convert.py
-docker cp benchmark/data/movielens_train.jsonl <container>:/data/bandit_wal.jsonl
-docker exec <container> rm -f /data/checkpoint.json
-docker compose restart
-python benchmark/movielens/evaluate_improved.py
-```
-
-### UCI Benchmark Suite
-
-BanditDB is also validated against the UCI benchmark suite from [Neural Thompson Sampling](https://arxiv.org/abs/2010.00827) (Zhang, Zhou, Li & Gu, ICLR 2021), using the standard classification-as-bandit reduction — k classes become k arms, reward 1 for a correct pick. Unlike a logged-feedback replay, this evaluation is exact: no estimation, no discarded events.
-
-Cumulative regret (= total mistakes) at T=10,000, 3 seeds, untuned α=1.0:
-
-| Dataset | Arms | LinUCB | Thompson | NeuralLinUCB | Random |
-|---------|------|--------|----------|--------------|--------|
-| mushroom | 2 | **35** | 208 | 268 | 2,822 |
-| magic | 2 | 2,062 | 2,134 | **2,009** | 5,000 |
-| shuttle | 7 | 709 | 1,102 | **669** | 8,571 |
-| adult | 2 | **1,716** | 2,002 | 1,937 | 5,000 |
-
-On shuttle — the one configuration directly comparable to the paper (same features, arms, and horizon) — BanditDB's LinUCB scores **709 against the published 966.6**, without the exploration-parameter tuning the paper used.
-
-```bash
-python benchmark/uci/convert.py
-python benchmark/uci/evaluate.py --all --rounds 10000 --repeats 3
-python benchmark/uci/analyze.py
-```
-
-Full methodology, dataset descriptions, and the complete paper comparison: [`benchmark/uci/README.md`](benchmark/uci/README.md).
-
-### Throughput
-
-Peak throughput on a commodity 4-core machine over loopback: **~10,000 predictions/second** at concurrency=64 with p50 latency of ~300µs.
-
-```bash
-docker run -d -p 8080:8080 simeonlukov/banditdb:latest
-python benchmark/throughput/bench.py
-```
+Methodology, all policies, confidence intervals and how to reproduce: [Benchmarks](https://banditdb.com/docs/benchmarks/) · [`benchmark/uci/README.md`](benchmark/uci/README.md).
 
 ---
 
 ## Architecture
 
-* **Compute:** Rust + `ndarray` using SIMD-accelerated Sherman-Morrison rank-1 matrix updates. Matrix inversion is mathematically bypassed for $O(d^2)$ latency.
-* **State:** `parking_lot` RwLocks — concurrent reads for predictions across all CPU cores; µs write locks for reward updates only.
-* **Memory:** Delayed rewards mapped to historical context vectors via `moka`, a fast concurrent TTL cache.
-* **Durability:** Asynchronous MPSC channel pipes interactions to a WAL (JSONL or binary MessagePack). Rotation and recovery are automatic.
-* **Auth:** Constant-time API key comparison via bitwise accumulation — no branch on comparison result (timing-safe against timing oracle attacks).
+* **Compute:** Rust + `ndarray`. Sherman–Morrison rank-one updates keep each reward O(d²) with no matrix inversion.
+* **State:** `parking_lot` RwLocks: concurrent reads for predictions, microsecond write locks for reward updates.
+* **Delayed rewards:** predictions are matched to their rewards via `moka`, a concurrent TTL cache.
+* **Durability:** a group-committed write-ahead log (JSONL or MessagePack), checkpoints and WAL rotation. `/reward` returns only after fsync.
+* **Neural:** `candle` MLPs retrained off the request path. Predictions read an immutable weight snapshot.
+* **Auth:** constant-time API key comparison.
 
 ## Contributing
 
-BanditDB is open source. PRs are welcome!
+BanditDB is open source under Apache 2.0. PRs are welcome.
 
-Visit [banditdb.com](https://banditdb.com) to read the full documentation.
+---
 
 ## References
 
-- **LinUCB** — Li, Chu, Langford, Schapire. *A Contextual-Bandit Approach to Personalized News Article Recommendation.* WWW 2010. [arXiv:1003.0146](https://arxiv.org/abs/1003.0146)
-- **NeuralLinUCB** — Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
-- **NeuralThompsonSampling** — Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
-- **Offline evaluation (replay method)** — Li, Chu, Langford, Wang. *Unbiased Offline Evaluation of Contextual-bandit-based News Article Recommendation Algorithms.* WSDM 2011. [arXiv:1003.5956](https://arxiv.org/abs/1003.5956)
+BanditDB implements published methods. If you build on it in research, please cite the original work too. The same list, grouped the same way, is at [banditdb.com/docs/references](https://banditdb.com/docs/references/).
+
+**Bandit algorithms**
+- **LinUCB:** Li, Chu, Langford, Schapire. *A Contextual-Bandit Approach to Personalized News Article Recommendation.* WWW 2010. [arXiv:1003.0146](https://arxiv.org/abs/1003.0146)
+- Chu, Li, Reyzin, Schapire. *Contextual Bandits with Linear Payoff Functions.* AISTATS 2011.
+- Auer. *Using Confidence Bounds for Exploitation-Exploration Trade-offs.* JMLR 3, 2002.
+- Abbasi-Yadkori, Pál, Szepesvári. *Improved Algorithms for Linear Stochastic Bandits.* NeurIPS 2011.
+- **Thompson Sampling:** Thompson. *On the Likelihood that One Unknown Probability Exceeds Another in View of the Evidence of Two Samples.* Biometrika 25, 1933.
+- **Linear Thompson Sampling:** Agrawal, Goyal. *Thompson Sampling for Contextual Bandits with Linear Payoffs.* ICML 2013. [arXiv:1209.3352](https://arxiv.org/abs/1209.3352)
+- Chapelle, Li. *An Empirical Evaluation of Thompson Sampling.* NeurIPS 2011.
+- Russo, Van Roy, Kazerouni, Osband, Wen. *A Tutorial on Thompson Sampling.* Foundations and Trends in ML, 2018. [arXiv:1707.02038](https://arxiv.org/abs/1707.02038)
+- **NeuralLinUCB:** Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
+- **NeuralThompsonSampling:** Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
+- Zhou, Li, Gu. *Neural Contextual Bandits with UCB-based Exploration.* ICML 2020. [arXiv:1911.04462](https://arxiv.org/abs/1911.04462)
+- Riquelme, Tucker, Snoek. *Deep Bayesian Bandits Showdown.* ICLR 2018. [arXiv:1802.09127](https://arxiv.org/abs/1802.09127)
+- Lattimore, Szepesvári. *Bandit Algorithms.* Cambridge University Press, 2020.
+
+**Updates, decay and neural training**
+- **Reward update:** Sherman, Morrison. *Adjustment of an Inverse Matrix Corresponding to a Change in One Element of a Given Matrix.* Annals of Mathematical Statistics 21, 1950.
+- **Half-life decay (D-LinUCB):** Russac, Vernade, Cappé. *Weighted Linear Bandits for Non-Stationary Environments.* NeurIPS 2019. [arXiv:1909.09146](https://arxiv.org/abs/1909.09146)
+- Garivier, Moulines. *On Upper-Confidence Bound Policies for Switching Bandit Problems.* ALT 2011. [arXiv:0805.3415](https://arxiv.org/abs/0805.3415)
+- **AdamW:** Loshchilov, Hutter. *Decoupled Weight Decay Regularization.* ICLR 2019. [arXiv:1711.05101](https://arxiv.org/abs/1711.05101)
+- **Anchor to initial weights (L2-SP):** Li, Grandvalet, Davoine. *Explicit Inductive Bias for Transfer Learning with Convolutional Networks.* ICML 2018. [arXiv:1802.01483](https://arxiv.org/abs/1802.01483)
+
+**Budgets and Lagrangian pacing**
+- Badanidiyuru, Kleinberg, Slivkins. *Bandits with Knapsacks.* FOCS 2013; JACM 65, 2018. [arXiv:1305.2545](https://arxiv.org/abs/1305.2545)
+- Agrawal, Devanur. *Linear Contextual Bandits with Knapsacks.* NeurIPS 2016. [arXiv:1507.06738](https://arxiv.org/abs/1507.06738)
+- Agrawal, Devanur, Li. *An Efficient Algorithm for Contextual Bandits with Knapsacks, and an Extension to Concave Objectives.* COLT 2016. [arXiv:1506.03374](https://arxiv.org/abs/1506.03374)
+- Balseiro, Lu, Mirrokni. *The Best of Many Worlds: Dual Mirror Descent for Online Allocation Problems.* Operations Research 71, 2023. [arXiv:2011.10124](https://arxiv.org/abs/2011.10124)
+- Zinkevich. *Online Convex Programming and Generalized Infinitesimal Gradient Ascent.* ICML 2003.
+- Hazan. *Introduction to Online Convex Optimization.* Foundations and Trends in Optimization 2, 2016.
+- Boyd, Vandenberghe. *Convex Optimization.* Cambridge University Press, 2004.
+- Danskin. *The Theory of Max-Min, with Applications.* SIAM Journal on Applied Mathematics 14, 1966.
+
+**Off-policy evaluation and the tournament**
+- **IPS:** Horvitz, Thompson. *A Generalization of Sampling Without Replacement from a Finite Universe.* JASA 47, 1952.
+- **SNIPS:** Swaminathan, Joachims. *The Self-Normalized Estimator for Counterfactual Learning.* NeurIPS 2015.
+- **Doubly Robust:** Dudík, Langford, Li. *Doubly Robust Policy Evaluation and Learning.* ICML 2011. [arXiv:1103.4601](https://arxiv.org/abs/1103.4601)
+- **DRos:** Su, Dimakopoulou, Krishnamurthy, Dudík. *Doubly Robust Off-Policy Evaluation with Shrinkage.* ICML 2020. [arXiv:1907.09623](https://arxiv.org/abs/1907.09623)
+- **SwitchDR:** Wang, Agarwal, Dudík. *Optimal and Adaptive Off-policy Evaluation in Contextual Bandits.* ICML 2017. [arXiv:1612.01205](https://arxiv.org/abs/1612.01205)
+- **Replay method:** Li, Chu, Langford, Wang. *Unbiased Offline Evaluation of Contextual-bandit-based News Article Recommendation Algorithms.* WSDM 2011. [arXiv:1003.5956](https://arxiv.org/abs/1003.5956)
+- **Open Bandit Pipeline:** Saito, Aihara, Matsutani, Narita. *Open Bandit Dataset and Pipeline.* NeurIPS Datasets & Benchmarks 2021. [arXiv:2008.07146](https://arxiv.org/abs/2008.07146)
+- Bottou et al. *Counterfactual Reasoning and Learning Systems: The Example of Computational Advertising.* JMLR 14, 2013. [arXiv:1209.2355](https://arxiv.org/abs/1209.2355)
+- Hadad, Hirshberg, Zhan, Wager, Athey. *Confidence Intervals for Policy Evaluation in Adaptive Experiments.* PNAS 118, 2021. [arXiv:1911.02768](https://arxiv.org/abs/1911.02768)
+- Zhan, Hadad, Hirshberg, Athey. *Off-Policy Evaluation via Adaptive Weighting with Data from Contextual Bandits.* KDD 2021. [arXiv:2106.02029](https://arxiv.org/abs/2106.02029)
+
+**Diagnostics**
+- **Convergence CIs:** Wilson. *Probable Inference, the Law of Succession, and Statistical Inference.* JASA 22, 1927.
+- **Selection entropy:** Shannon. *A Mathematical Theory of Communication.* Bell System Technical Journal 27, 1948.
+
+**Causal analysis**
+- Rubin. *Estimating Causal Effects of Treatments in Randomized and Nonrandomized Studies.* Journal of Educational Psychology 66, 1974.
+- Rosenbaum, Rubin. *The Central Role of the Propensity Score in Observational Studies for Causal Effects.* Biometrika 70, 1983.
+- Imbens, Rubin. *Causal Inference for Statistics, Social, and Biomedical Sciences.* Cambridge University Press, 2015.
+- Chernozhukov et al. *Double/Debiased Machine Learning for Treatment and Structural Parameters.* Econometrics Journal 21, 2018. [arXiv:1608.00060](https://arxiv.org/abs/1608.00060)
+- Wager, Athey. *Estimation and Inference of Heterogeneous Treatment Effects using Random Forests.* JASA 113, 2018. [arXiv:1510.04342](https://arxiv.org/abs/1510.04342)
+- Athey, Tibshirani, Wager. *Generalized Random Forests.* Annals of Statistics 47, 2019. [arXiv:1610.01271](https://arxiv.org/abs/1610.01271)
+- Athey, Wager. *Policy Learning with Observational Data.* Econometrica 89, 2021. [arXiv:1702.02896](https://arxiv.org/abs/1702.02896)
+- Künzel, Sekhon, Bickel, Yu. *Metalearners for Estimating Heterogeneous Treatment Effects using Machine Learning.* PNAS 116, 2019. [arXiv:1706.03461](https://arxiv.org/abs/1706.03461)
+- Crump, Hotz, Imbens, Mitnik. *Dealing with Limited Overlap in Estimation of Average Treatment Effects.* Biometrika 96, 2009.
+- Battocchi et al. *EconML: A Python Package for ML-Based Heterogeneous Treatment Effects Estimation.* Microsoft Research, 2019.
+
+**Systems**
+- Mohan, Haderle, Lindsay, Pirahesh, Schwarz. *ARIES: A Transaction Recovery Method Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging.* ACM TODS 17, 1992.
+- DeWitt et al. *Implementation Techniques for Main Memory Database Systems.* SIGMOD 1984.
+- Agarwal et al. *Making Contextual Decisions with Low Technical Debt.* 2016. [arXiv:1606.03966](https://arxiv.org/abs/1606.03966)
+- Bietti, Agarwal, Langford. *A Contextual Bandit Bake-off.* JMLR 22, 2021. [arXiv:1802.04064](https://arxiv.org/abs/1802.04064)
+- Crankshaw et al. *Clipper: A Low-Latency Online Prediction Serving System.* NSDI 2017. [arXiv:1612.03079](https://arxiv.org/abs/1612.03079)
+- Malkov, Yashunin. *Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs.* IEEE TPAMI 42, 2020. [arXiv:1603.09320](https://arxiv.org/abs/1603.09320)
+- Apache Software Foundation. *Apache Parquet File Format Specification.*
+
+**Benchmark datasets**
+- Yahoo! Research. *Yahoo! Front Page Today Module User Click Log Dataset (R6A), v1.0.* Yahoo! Webscope, 2009.
+- Harper, Konstan. *The MovieLens Datasets: History and Context.* ACM TiiS 5, 2015.
+- Dua, Graff. *UCI Machine Learning Repository.* University of California, Irvine, 2019.
