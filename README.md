@@ -118,7 +118,7 @@ db.reward(interaction_id, 1.0)
 | Linear Thompson Sampling | `"thompson_sampling"` | Bayesian exploration. Concurrent users diversify arm coverage. | Agrawal & Goyal 2013 |
 | NeuralLinUCB | `{"neural_lin_ucb": {…}}` | Non-linear reward. MLP embedding plus LinUCB in embedding space. Conservative early. | Xu et al. 2022 |
 | NeuralThompsonSampling | `{"neural_thompson_sampling": {…}}` | Same embedding, posterior draws instead of UCB. Better long-run convergence. | Zhang et al. 2021 |
-| Progressive | `{"progressive": {…}}` | Unsure. A linear base and a neural challenger run in shadow, and traffic moves to whichever wins repeated SNIPS evaluations. | — |
+| Progressive | `{"progressive": {…}}` | Unsure. A linear base and a neural challenger run in shadow, and traffic moves to whichever wins repeated SNIPS evaluations. | Swaminathan & Joachims 2015 |
 
 Configs, the tournament rules and when to pick which: [Choosing an Algorithm](https://banditdb.com/docs/algorithms/).
 
@@ -182,5 +182,5 @@ The formulas BanditDB implements come from these papers:
 2. **Linear Thompson Sampling:** Agrawal, Goyal. *Thompson Sampling for Contextual Bandits with Linear Payoffs.* ICML 2013. [arXiv:1209.3352](https://arxiv.org/abs/1209.3352)
 3. **NeuralLinUCB:** Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
 4. **NeuralThompsonSampling:** Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
-5. **Half-life decay (D-LinUCB):** Russac, Vernade, Cappé. *Weighted Linear Bandits for Non-Stationary Environments.* NeurIPS 2019. [arXiv:1909.09146](https://arxiv.org/abs/1909.09146)
+5. **SNIPS (Progressive tournament):** Swaminathan, Joachims. *The Self-Normalized Estimator for Counterfactual Learning.* NeurIPS 2015.
 6. **Budget pacing (dual descent on shadow prices):** Balseiro, Lu, Mirrokni. *The Best of Many Worlds: Dual Mirror Descent for Online Allocation Problems.* Operations Research 71, 2023. [arXiv:2011.10124](https://arxiv.org/abs/2011.10124)
