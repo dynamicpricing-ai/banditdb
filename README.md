@@ -176,78 +176,11 @@ BanditDB is open source under Apache 2.0. PRs are welcome.
 
 ## References
 
-BanditDB implements published methods. If you build on it in research, please cite the original work too. The same list, grouped the same way, is at [banditdb.com/docs/references](https://banditdb.com/docs/references/).
+The formulas BanditDB implements come from these papers:
 
-**Bandit algorithms**
-- **LinUCB:** Li, Chu, Langford, Schapire. *A Contextual-Bandit Approach to Personalized News Article Recommendation.* WWW 2010. [arXiv:1003.0146](https://arxiv.org/abs/1003.0146)
-- Chu, Li, Reyzin, Schapire. *Contextual Bandits with Linear Payoff Functions.* AISTATS 2011.
-- Auer. *Using Confidence Bounds for Exploitation-Exploration Trade-offs.* JMLR 3, 2002.
-- Abbasi-Yadkori, Pál, Szepesvári. *Improved Algorithms for Linear Stochastic Bandits.* NeurIPS 2011.
-- **Thompson Sampling:** Thompson. *On the Likelihood that One Unknown Probability Exceeds Another in View of the Evidence of Two Samples.* Biometrika 25, 1933.
-- **Linear Thompson Sampling:** Agrawal, Goyal. *Thompson Sampling for Contextual Bandits with Linear Payoffs.* ICML 2013. [arXiv:1209.3352](https://arxiv.org/abs/1209.3352)
-- Chapelle, Li. *An Empirical Evaluation of Thompson Sampling.* NeurIPS 2011.
-- Russo, Van Roy, Kazerouni, Osband, Wen. *A Tutorial on Thompson Sampling.* Foundations and Trends in ML, 2018. [arXiv:1707.02038](https://arxiv.org/abs/1707.02038)
-- **NeuralLinUCB:** Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
-- **NeuralThompsonSampling:** Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
-- Zhou, Li, Gu. *Neural Contextual Bandits with UCB-based Exploration.* ICML 2020. [arXiv:1911.04462](https://arxiv.org/abs/1911.04462)
-- Riquelme, Tucker, Snoek. *Deep Bayesian Bandits Showdown.* ICLR 2018. [arXiv:1802.09127](https://arxiv.org/abs/1802.09127)
-- Lattimore, Szepesvári. *Bandit Algorithms.* Cambridge University Press, 2020.
-
-**Updates, decay and neural training**
-- **Reward update:** Sherman, Morrison. *Adjustment of an Inverse Matrix Corresponding to a Change in One Element of a Given Matrix.* Annals of Mathematical Statistics 21, 1950.
-- **Half-life decay (D-LinUCB):** Russac, Vernade, Cappé. *Weighted Linear Bandits for Non-Stationary Environments.* NeurIPS 2019. [arXiv:1909.09146](https://arxiv.org/abs/1909.09146)
-- Garivier, Moulines. *On Upper-Confidence Bound Policies for Switching Bandit Problems.* ALT 2011. [arXiv:0805.3415](https://arxiv.org/abs/0805.3415)
-- **AdamW:** Loshchilov, Hutter. *Decoupled Weight Decay Regularization.* ICLR 2019. [arXiv:1711.05101](https://arxiv.org/abs/1711.05101)
-- **Anchor to initial weights (L2-SP):** Li, Grandvalet, Davoine. *Explicit Inductive Bias for Transfer Learning with Convolutional Networks.* ICML 2018. [arXiv:1802.01483](https://arxiv.org/abs/1802.01483)
-
-**Budgets and Lagrangian pacing**
-- Badanidiyuru, Kleinberg, Slivkins. *Bandits with Knapsacks.* FOCS 2013; JACM 65, 2018. [arXiv:1305.2545](https://arxiv.org/abs/1305.2545)
-- Agrawal, Devanur. *Linear Contextual Bandits with Knapsacks.* NeurIPS 2016. [arXiv:1507.06738](https://arxiv.org/abs/1507.06738)
-- Agrawal, Devanur, Li. *An Efficient Algorithm for Contextual Bandits with Knapsacks, and an Extension to Concave Objectives.* COLT 2016. [arXiv:1506.03374](https://arxiv.org/abs/1506.03374)
-- Balseiro, Lu, Mirrokni. *The Best of Many Worlds: Dual Mirror Descent for Online Allocation Problems.* Operations Research 71, 2023. [arXiv:2011.10124](https://arxiv.org/abs/2011.10124)
-- Zinkevich. *Online Convex Programming and Generalized Infinitesimal Gradient Ascent.* ICML 2003.
-- Hazan. *Introduction to Online Convex Optimization.* Foundations and Trends in Optimization 2, 2016.
-- Boyd, Vandenberghe. *Convex Optimization.* Cambridge University Press, 2004.
-- Danskin. *The Theory of Max-Min, with Applications.* SIAM Journal on Applied Mathematics 14, 1966.
-
-**Off-policy evaluation and the tournament**
-- **IPS:** Horvitz, Thompson. *A Generalization of Sampling Without Replacement from a Finite Universe.* JASA 47, 1952.
-- **SNIPS:** Swaminathan, Joachims. *The Self-Normalized Estimator for Counterfactual Learning.* NeurIPS 2015.
-- **Doubly Robust:** Dudík, Langford, Li. *Doubly Robust Policy Evaluation and Learning.* ICML 2011. [arXiv:1103.4601](https://arxiv.org/abs/1103.4601)
-- **DRos:** Su, Dimakopoulou, Krishnamurthy, Dudík. *Doubly Robust Off-Policy Evaluation with Shrinkage.* ICML 2020. [arXiv:1907.09623](https://arxiv.org/abs/1907.09623)
-- **SwitchDR:** Wang, Agarwal, Dudík. *Optimal and Adaptive Off-policy Evaluation in Contextual Bandits.* ICML 2017. [arXiv:1612.01205](https://arxiv.org/abs/1612.01205)
-- **Replay method:** Li, Chu, Langford, Wang. *Unbiased Offline Evaluation of Contextual-bandit-based News Article Recommendation Algorithms.* WSDM 2011. [arXiv:1003.5956](https://arxiv.org/abs/1003.5956)
-- **Open Bandit Pipeline:** Saito, Aihara, Matsutani, Narita. *Open Bandit Dataset and Pipeline.* NeurIPS Datasets & Benchmarks 2021. [arXiv:2008.07146](https://arxiv.org/abs/2008.07146)
-- Bottou et al. *Counterfactual Reasoning and Learning Systems: The Example of Computational Advertising.* JMLR 14, 2013. [arXiv:1209.2355](https://arxiv.org/abs/1209.2355)
-- Hadad, Hirshberg, Zhan, Wager, Athey. *Confidence Intervals for Policy Evaluation in Adaptive Experiments.* PNAS 118, 2021. [arXiv:1911.02768](https://arxiv.org/abs/1911.02768)
-- Zhan, Hadad, Hirshberg, Athey. *Off-Policy Evaluation via Adaptive Weighting with Data from Contextual Bandits.* KDD 2021. [arXiv:2106.02029](https://arxiv.org/abs/2106.02029)
-
-**Diagnostics**
-- **Convergence CIs:** Wilson. *Probable Inference, the Law of Succession, and Statistical Inference.* JASA 22, 1927.
-- **Selection entropy:** Shannon. *A Mathematical Theory of Communication.* Bell System Technical Journal 27, 1948.
-
-**Causal analysis**
-- Rubin. *Estimating Causal Effects of Treatments in Randomized and Nonrandomized Studies.* Journal of Educational Psychology 66, 1974.
-- Rosenbaum, Rubin. *The Central Role of the Propensity Score in Observational Studies for Causal Effects.* Biometrika 70, 1983.
-- Imbens, Rubin. *Causal Inference for Statistics, Social, and Biomedical Sciences.* Cambridge University Press, 2015.
-- Chernozhukov et al. *Double/Debiased Machine Learning for Treatment and Structural Parameters.* Econometrics Journal 21, 2018. [arXiv:1608.00060](https://arxiv.org/abs/1608.00060)
-- Wager, Athey. *Estimation and Inference of Heterogeneous Treatment Effects using Random Forests.* JASA 113, 2018. [arXiv:1510.04342](https://arxiv.org/abs/1510.04342)
-- Athey, Tibshirani, Wager. *Generalized Random Forests.* Annals of Statistics 47, 2019. [arXiv:1610.01271](https://arxiv.org/abs/1610.01271)
-- Athey, Wager. *Policy Learning with Observational Data.* Econometrica 89, 2021. [arXiv:1702.02896](https://arxiv.org/abs/1702.02896)
-- Künzel, Sekhon, Bickel, Yu. *Metalearners for Estimating Heterogeneous Treatment Effects using Machine Learning.* PNAS 116, 2019. [arXiv:1706.03461](https://arxiv.org/abs/1706.03461)
-- Crump, Hotz, Imbens, Mitnik. *Dealing with Limited Overlap in Estimation of Average Treatment Effects.* Biometrika 96, 2009.
-- Battocchi et al. *EconML: A Python Package for ML-Based Heterogeneous Treatment Effects Estimation.* Microsoft Research, 2019.
-
-**Systems**
-- Mohan, Haderle, Lindsay, Pirahesh, Schwarz. *ARIES: A Transaction Recovery Method Supporting Fine-Granularity Locking and Partial Rollbacks Using Write-Ahead Logging.* ACM TODS 17, 1992.
-- DeWitt et al. *Implementation Techniques for Main Memory Database Systems.* SIGMOD 1984.
-- Agarwal et al. *Making Contextual Decisions with Low Technical Debt.* 2016. [arXiv:1606.03966](https://arxiv.org/abs/1606.03966)
-- Bietti, Agarwal, Langford. *A Contextual Bandit Bake-off.* JMLR 22, 2021. [arXiv:1802.04064](https://arxiv.org/abs/1802.04064)
-- Crankshaw et al. *Clipper: A Low-Latency Online Prediction Serving System.* NSDI 2017. [arXiv:1612.03079](https://arxiv.org/abs/1612.03079)
-- Malkov, Yashunin. *Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs.* IEEE TPAMI 42, 2020. [arXiv:1603.09320](https://arxiv.org/abs/1603.09320)
-- Apache Software Foundation. *Apache Parquet File Format Specification.*
-
-**Benchmark datasets**
-- Yahoo! Research. *Yahoo! Front Page Today Module User Click Log Dataset (R6A), v1.0.* Yahoo! Webscope, 2009.
-- Harper, Konstan. *The MovieLens Datasets: History and Context.* ACM TiiS 5, 2015.
-- Dua, Graff. *UCI Machine Learning Repository.* University of California, Irvine, 2019.
+1. **LinUCB:** Li, Chu, Langford, Schapire. *A Contextual-Bandit Approach to Personalized News Article Recommendation.* WWW 2010. [arXiv:1003.0146](https://arxiv.org/abs/1003.0146)
+2. **Linear Thompson Sampling:** Agrawal, Goyal. *Thompson Sampling for Contextual Bandits with Linear Payoffs.* ICML 2013. [arXiv:1209.3352](https://arxiv.org/abs/1209.3352)
+3. **NeuralLinUCB:** Xu, Wen, Zhao, Gu. *Neural Contextual Bandits with Deep Representation and Shallow Exploration.* ICLR 2022. [arXiv:2012.01780](https://arxiv.org/abs/2012.01780)
+4. **NeuralThompsonSampling:** Zhang, Zhou, Li, Gu. *Neural Thompson Sampling.* ICLR 2021. [arXiv:2010.00827](https://arxiv.org/abs/2010.00827)
+5. **SNIPS (Progressive tournament):** Swaminathan, Joachims. *The Self-Normalized Estimator for Counterfactual Learning.* NeurIPS 2015.
+6. **Budget pacing (dual descent on shadow prices):** Balseiro, Lu, Mirrokni. *The Best of Many Worlds: Dual Mirror Descent for Online Allocation Problems.* Operations Research 71, 2023. [arXiv:2011.10124](https://arxiv.org/abs/2011.10124)
